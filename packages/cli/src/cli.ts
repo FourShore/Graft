@@ -41,9 +41,12 @@ program
   .option("--no-push", "fetch and merge only")
   .action(async (o) => {
     const r = await graft().sync({ remote: o.remote, push: o.push });
+    if (r.pushError) {
+      console.error(`warning: could not push ${"refs/notes/graft"} to ${r.remote}; records stay local until a sync from a clone that can push.\n  ${r.pushError}`);
+    }
     out(
       r,
-      `${r.remote}: ${r.fetched ? "fetched" : "nothing to fetch"}${r.merged ? ", merged" : ""}${r.pushed ? ", pushed" : ""}`,
+      `${r.remote}: ${r.fetched ? "fetched" : "nothing to fetch"}${r.merged ? ", merged" : ""}${r.pushed ? ", pushed" : r.pushError ? ", push refused" : ""}`,
     );
   });
 

@@ -54,7 +54,7 @@ export class Review {
 
   private async triageEntry(entry: LogEntry): Promise<ReviewedChange> {
     const files = parseDiff(await this.graft.diff(entry.commit));
-    return { entry, triage: triage(entry.record, files) };
+    return { entry, triage: triage(entry.record, files, entry.trailers) };
   }
 }
 

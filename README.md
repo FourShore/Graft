@@ -143,6 +143,7 @@ first, then the diff grouped into behavior, tests, and mechanical files.
 | Needs reading | Behavior changed, no passing test run recorded |
 | Verified | Behavior changed, recorded test run passed |
 | Mechanical | Only tests, docs, lockfiles, or generated files changed |
+| Note missing | The commit has Graft trailers but the full record isn't in this clone; run `graft sync` |
 | No record | No Graft record on this commit |
 
 The badges come from file paths and recorded evidence. They say where to look
@@ -164,10 +165,12 @@ const { commit, record } = await g.land({ paths: ["src/api.ts"] });
 `.graft/policy.json`, written by `graft init`:
 
 ```json
-{ "version": 1, "requireEvidence": true }
+{ "version": 1, "requireEvidence": true, "secretFiles": ["nova.json", "config/*.secret"] }
 ```
 
 Set `requireEvidence` to `false` to turn off the landing gate for a repo.
+`secretFiles` adds repo-specific globs to the credential guard; `graft init`
+doesn't write it, add it when the repo has its own credential file names.
 [docs/CHANGE.md](docs/CHANGE.md#where-it-lives) covers what survives rebases,
 amends, and squashes.
 

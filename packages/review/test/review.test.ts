@@ -171,6 +171,33 @@ describe("Review over a real repo", () => {
     }
   });
 
+  it("uses trailers when the note is missing", async () => {
+    await graft.start({ task: "note went missing", author: { kind: "agent", name: "bot" } });
+    await writeFile(join(dir, "x.ts"), "export const y = 1;\n");
+    await graft.evidenceCommand("true", "unit tests");
+    const { commit } = await graft.land({ all: true });
+    sh(["notes", "--ref=refs/notes/graft", "remove", commit]);
+
+    const review = new Review({ repo: dir });
+    const [item] = await review.queue();
+    expect(item.triage.risk).toBe("partial");
+
+    const server = createReviewServer({ repo: dir });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const port = (server.address() as AddressInfo).port;
+    try {
+      const home = await (await fetch(`http://127.0.0.1:${port}/`)).text();
+      expect(home).toContain("Note missing");
+      expect(home).toContain("note went missing");
+      expect(home).toContain("1 command, 1 passed (summary only)");
+      const page = await (await fetch(`http://127.0.0.1:${port}/change/${commit}`)).text();
+      expect(page).toContain("agent:bot");
+      expect(page).toContain("graft sync");
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+  });
+
   it("escapes HTML in tasks and diffs", async () => {
     await graft.start({ task: "<script>alert(1)</script>", author: { kind: "agent", name: "bot" } });
     await writeFile(join(dir, "x.ts"), "const s = '<b>';\n");

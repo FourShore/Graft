@@ -9,6 +9,7 @@ const RISK_LABEL: Record<Risk, string> = {
   read: "Needs reading",
   verified: "Verified",
   mechanical: "Mechanical",
+  partial: "Note missing",
   unrecorded: "No record",
 };
 
@@ -16,6 +17,8 @@ const RISK_HELP: Record<Risk, string> = {
   read: "Behavior changed and no passing test run is recorded. Read the diff.",
   verified: "Behavior changed and the recorded test run passed. Check the claim, skim the diff.",
   mechanical: "Only tests, docs, lockfiles or generated files changed.",
+  partial:
+    "The commit carries Graft trailers but its full record is not in this clone, so the evidence cannot be inspected. Run graft sync, then read the diff.",
   unrecorded: "This commit has no change record, so nothing is known about why or whether it was checked.",
 };
 
@@ -35,7 +38,7 @@ header.top h1{font-size:16px;margin:0}header.top .repo{color:var(--quiet);font-f
 .queue{list-style:none;padding:0;margin:0}.queue li{display:grid;grid-template-columns:130px 1fr auto;gap:16px;padding:14px 0;border-bottom:1px solid var(--line);align-items:start}
 .queue .task{font-weight:600;text-decoration:none}.queue .meta{color:var(--quiet);font-size:13px;margin-top:2px}.queue .ev{font-size:13px;color:var(--quiet);text-align:right;white-space:nowrap}
 .badge{display:inline-block;font-size:12px;font-weight:600;padding:2px 8px;border-radius:999px;border:1px solid currentColor;white-space:nowrap}
-.badge.read{color:var(--read)}.badge.verified{color:var(--ok)}.badge.mechanical{color:var(--mech)}.badge.unrecorded{color:var(--none)}
+.badge.read{color:var(--read)}.badge.verified{color:var(--ok)}.badge.mechanical{color:var(--mech)}.badge.unrecorded{color:var(--none)}.badge.partial{color:var(--none)}
 .claim{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px 20px;margin:16px 0}
 .claim h2{margin:0 0 4px;font-size:20px}.claim .who{color:var(--quiet);font-size:13px;margin-bottom:12px}
 .claim .plan{white-space:pre-wrap;margin:8px 0 0}.claim dt{font-weight:600;margin-top:12px}.claim dd{margin:4px 0 0}
@@ -69,12 +72,15 @@ export function renderQueue(repo: string, items: QueueItem[]): string {
   const rows = items
     .map(({ entry, triage }) => {
       const r = entry.record;
-      const task = r?.task ?? entry.title;
-      const who = r ? `${r.author.kind}:${r.author.name}` : entry.authorName;
+      const t = entry.trailers;
+      const task = r?.task ?? t["Graft-Task"] ?? entry.title;
+      const who = r ? `${r.author.kind}:${r.author.name}` : (t["Graft-Author"] ?? entry.authorName);
       const files = Object.values(triage.groups).reduce((n, g) => n + g.length, 0);
       const ev = r
         ? `${triage.verdict.testRuns.length ? (triage.verdict.testsPassed ? "tests passed" : "tests failed") : "no test run"} · ${r.evidence.length} evidence`
-        : "no evidence";
+        : t["Graft-Evidence"]
+          ? `${t["Graft-Evidence"]} (summary only)`
+          : "no evidence";
       return `<li><span class="badge ${triage.risk}" title="${esc(RISK_HELP[triage.risk])}">${RISK_LABEL[triage.risk]}</span><div><a class="task" href="/change/${entry.commit}">${esc(task)}</a><div class="meta">${esc(who)} · ${esc(age(entry.authoredAt))} · ${files} file${files === 1 ? "" : "s"} · <span style="font-family:var(--mono)">${entry.commit.slice(0, 10)}</span></div></div><div class="ev">${esc(ev)}</div></li>`;
     })
     .join("");
@@ -93,7 +99,7 @@ export function renderChange(repo: string, entry: LogEntry, triage: Triage): str
     })
     .join("");
   const head = `<p><a href="/">&larr; queue</a> &nbsp; <span class="badge ${triage.risk}">${RISK_LABEL[triage.risk]}</span> <span class="help">${esc(RISK_HELP[triage.risk])}</span></p>`;
-  return page(r?.task ?? entry.title, repo, head + claim + groups);
+  return page(r?.task ?? entry.trailers["Graft-Task"] ?? entry.title, repo, head + claim + groups);
 }
 
 function renderClaim(r: ChangeRecord, t: Triage): string {
@@ -109,7 +115,12 @@ function renderClaim(r: ChangeRecord, t: Triage): string {
 }
 
 function renderNoRecord(e: LogEntry): string {
-  return `<div class="claim"><h2>${esc(e.title)}</h2><div class="who">${esc(e.authorName)} · ${esc(e.authoredAt.slice(0, 16).replace("T", " "))} · <span style="font-family:var(--mono)">${e.commit.slice(0, 10)}</span></div><p class="help">No Graft record on this commit. The task, plan and evidence are unknown.</p></div>`;
+  const t = e.trailers;
+  const when = esc(e.authoredAt.slice(0, 16).replace("T", " "));
+  if (t["Graft-Change"]) {
+    return `<div class="claim"><h2>${esc(t["Graft-Task"] ?? e.title)}</h2><div class="who">${esc(t["Graft-Author"] ?? e.authorName)}${t["Graft-Model"] ? ` · ${esc(t["Graft-Model"])}` : ""} · ${when} · <span style="font-family:var(--mono)">${esc(t["Graft-Change"])}</span></div><dl><dt>Evidence <span class="help" style="font-weight:400">· ${esc(t["Graft-Evidence"] ?? "none")}</span></dt><dd><p class="help">Summary from the commit trailers. The full record, with the plan and each command's output, lives on <code>refs/notes/graft</code> and is not in this clone. Run <code>graft sync</code>.</p></dd></dl></div>`;
+  }
+  return `<div class="claim"><h2>${esc(e.title)}</h2><div class="who">${esc(e.authorName)} · ${when} · <span style="font-family:var(--mono)">${e.commit.slice(0, 10)}</span></div><p class="help">No Graft record on this commit. The task, plan and evidence are unknown.</p></div>`;
 }
 
 function renderEvidence(ev: Evidence): string {

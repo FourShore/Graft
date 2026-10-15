@@ -163,8 +163,12 @@ report them.
 { "version": 1, "requireEvidence": true }
 ```
 
-Version 1 has one rule. `requireEvidence` makes `land` refuse a change with an
-empty evidence list unless the author passes `--allow-no-evidence`. Readers
+`requireEvidence` makes `land` refuse a change with an empty evidence list
+unless the author passes `--allow-no-evidence`. `secretFiles`, optional, is a
+list of globs relative to the root (`"nova.json"`, `"config/*.secret"`,
+`"keys/**"`) that `land` refuses to commit without `--allow-secrets`, on top
+of the built-in list (`.env`, `*.pem`, `*.key`, ...). A glob without a slash
+matches a file name anywhere in the tree. Readers
 reject unknown policy versions. The file is committed, so changing policy is a
 reviewed change like any other.
 
