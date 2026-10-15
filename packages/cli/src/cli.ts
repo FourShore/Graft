@@ -106,6 +106,7 @@ program
   .option("--plan <plan>", "final plan")
   .option("--allow-no-evidence", "land even though nothing was verified")
   .option("--allow-secrets", "land even though a staged file looks like a credential")
+  .option("--trailer <trailer>", "extra commit trailer 'Key: value' (repeatable)", (v: string, all: string[]) => [...all, v], [])
   .action(async (paths: string[], o) => {
     const { record, commit } = await graft().land({
       title: o.title,
@@ -114,6 +115,7 @@ program
       plan: o.plan,
       allowNoEvidence: o.allowNoEvidence,
       allowSecrets: o.allowSecrets,
+      trailers: o.trailer,
     });
     out({ record, commit }, `Landed ${record.id} as ${commit.slice(0, 10)}`);
   });

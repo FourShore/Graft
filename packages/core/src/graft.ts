@@ -40,6 +40,8 @@ export interface LandOptions {
   paths?: string[];
   /** Land even though a staged file looks like a credential (.env, *.pem, ...). */
   allowSecrets?: boolean;
+  /** Extra commit trailers, each "Key: value", appended after Graft's own (e.g. Co-Authored-By). */
+  trailers?: string[];
   /** Final plan, overriding whatever was recorded at start. */
   plan?: string;
   /** Allow landing with no evidence recorded. */
@@ -181,7 +183,7 @@ export class Graft {
     }
 
     open.landedAt = new Date().toISOString();
-    const message = buildCommitMessage(open, opts.title);
+    const message = buildCommitMessage(open, opts.title, opts.trailers);
     await this.git.run(["commit", "-q", "-F", "-"], { input: message });
     const commit = (await this.git.head())!;
     open.commit = commit;
@@ -365,13 +367,23 @@ export class Graft {
   }
 }
 
-export function buildCommitMessage(record: ChangeRecord, title?: string): string {
+export function buildCommitMessage(record: ChangeRecord, title?: string, extraTrailers: string[] = []): string {
   const subject = (title?.trim() || record.task).split("\n")[0].slice(0, 72);
   const lines = [subject, ""];
   if (record.task !== subject) lines.push(record.task, "");
   if (record.plan) lines.push("Plan:", indent(record.plan), "");
   for (const [k, v] of trailersFor(record)) lines.push(`${k}: ${v}`);
+  for (const t of extraTrailers) lines.push(checkTrailer(t));
   return lines.join("\n") + "\n";
+}
+
+const TRAILER = /^([A-Za-z][A-Za-z0-9-]*): (\S.*)$/;
+
+function checkTrailer(t: string): string {
+  const m = TRAILER.exec(t.trim());
+  if (!m) throw new GraftError(`Bad trailer '${t}': expected 'Key: value'.`);
+  if (/^graft-/i.test(m[1])) throw new GraftError(`Trailer '${m[1]}' is reserved; Graft writes its own.`);
+  return `${m[1]}: ${m[2]}`;
 }
 
 function indent(s: string): string {

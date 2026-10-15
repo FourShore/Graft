@@ -124,6 +124,24 @@ describe("land", () => {
   });
 });
 
+describe("extra trailers", () => {
+  it("appends them after Graft's own and rejects bad or reserved ones", async () => {
+    await graft.start({ task: "t" });
+    await graft.evidenceNote("checked");
+    await writeFile(join(dir, "a.txt"), "a\n");
+    await expect(graft.land({ all: true, trailers: ["no colon"] })).rejects.toThrow(/expected 'Key: value'/);
+    await expect(graft.land({ all: true, trailers: ["Graft-Task: x"] })).rejects.toThrow(/reserved/);
+    const { commit } = await graft.land({
+      all: true,
+      trailers: ["Co-Authored-By: Bot <bot@example.com>", "Session: https://example.com/s/1"],
+    });
+    const body = sh(["log", "-1", "--format=%B", commit]);
+    const keys = body.split("\n").filter((l) => /^[A-Za-z-]+: /.test(l)).map((l) => l.split(":")[0]);
+    expect(keys).toEqual(["Graft-Change", "Graft-Task", "Graft-Author", "Graft-Evidence", "Co-Authored-By", "Session"]);
+    expect(sh(["log", "-1", "--format=%(trailers:key=Session,valueonly)", commit])).toBe("https://example.com/s/1");
+  });
+});
+
 describe("redaction", () => {
   it("scrubs secret-looking env values from evidence output and notes", async () => {
     process.env.GRAFT_TEST_API_KEY = "hunter2hunter2";

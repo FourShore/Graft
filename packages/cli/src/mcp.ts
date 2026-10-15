@@ -89,10 +89,14 @@ server.registerTool(
       stageAll: z.boolean().optional().default(false).describe("Stage every change in the tree (git add -A)"),
       allowNoEvidence: z.boolean().optional().default(false),
       allowSecrets: z.boolean().optional().default(false),
+      trailers: z
+        .array(z.string())
+        .optional()
+        .describe("Extra commit trailers, each 'Key: value', e.g. Co-Authored-By or a session link"),
     },
   },
-  async ({ title, plan, paths, stageAll, allowNoEvidence, allowSecrets }) =>
-    guarded(() => graft.land({ title, plan, paths, all: stageAll, allowNoEvidence, allowSecrets })),
+  async ({ title, plan, paths, stageAll, allowNoEvidence, allowSecrets, trailers }) =>
+    guarded(() => graft.land({ title, plan, paths, all: stageAll, allowNoEvidence, allowSecrets, trailers })),
 );
 
 server.registerTool(
