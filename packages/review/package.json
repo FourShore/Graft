@@ -1,6 +1,6 @@
 {
   "name": "@fourshore/graft-review",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "description": "Claim-first review of Graft changes: a local web view that leads with task, plan and evidence, then a diff grouped by what evidence covers.",
   "license": "MIT",
   "type": "module",
@@ -42,6 +42,6 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@fourshore/graft-core": "0.0.5"
+    "@fourshore/graft-core": "0.0.6"
   }
 }
