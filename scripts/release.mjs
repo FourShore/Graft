@@ -9,7 +9,7 @@
 //   npm run release -- patch     (or minor, major, or an exact version)
 //   git push --follow-tags
 import { execFileSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 
 const bump = process.argv[2];
 if (!bump) {
@@ -23,9 +23,13 @@ if (run("git", ["status", "--porcelain"])) {
   process.exit(1);
 }
 
-// A fresh clone has no dist yet, and Graft itself is imported from there. Clean
-// first so a stale tsconfig.tsbuildinfo cannot make tsc skip a package whose
-// dist is gone.
+// A fresh clone has neither dependencies nor dist, and Graft itself is
+// imported from dist. Install when tsc is missing; clean before building so a
+// stale tsconfig.tsbuildinfo cannot make tsc skip a package whose dist is gone.
+if (!existsSync("node_modules/.bin/tsc")) {
+  console.log("installing dependencies...");
+  execFileSync("npm", ["ci", "--no-audit", "--no-fund"], { stdio: "inherit" });
+}
 console.log("building...");
 execFileSync("npm", ["run", "clean"], { stdio: "inherit" });
 execFileSync("npm", ["run", "build"], { stdio: "inherit" });
