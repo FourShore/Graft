@@ -3,7 +3,7 @@ name: Release
 # Publishes @fourshore/graft to npm when a version tag is pushed.
 # Requires an NPM_TOKEN repository secret with publish rights to the scope.
 #
-#   npm version patch   # bumps package.json and creates the tag
+#   npm run release -- patch   # bumps all packages, commits, tags
 #   git push --follow-tags
 
 on:
@@ -26,6 +26,6 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run build
-      - run: npm publish --provenance --access public
+      - run: npm publish --workspaces --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

@@ -1,12 +1,18 @@
 #!/usr/bin/env node
 import { Command } from "commander";
-import { Graft, GraftError, type LogEntry } from "./graft.js";
-import type { ChangeRecord } from "./record.js";
+import { Graft, GraftError, type LogEntry } from "@fourshore/graft-core";
+import type { ChangeRecord } from "@fourshore/graft-core";
+import { createReviewServer } from "@fourshore/graft-review";
+import type { AddressInfo } from "node:net";
+import { createRequire } from "node:module";
+
+const { version } = createRequire(import.meta.url)("../package.json") as { version: string };
 
 const program = new Command();
 program
   .name("graft")
   .description("Change records for agent-written code, stored in plain git.")
+  .version(version)
   .option("-C <dir>", "run as if started in <dir>", process.cwd())
   .option("--json", "print machine-readable output");
 
@@ -132,6 +138,28 @@ program
   .action(async (o) => {
     const entries = await graft().log({ limit: Number(o.limit), onlyGraft: !o.all });
     out(entries, entries.map(formatEntry).join("\n\n") || "No changes yet.");
+  });
+
+program
+  .command("review")
+  .description("open a local web view: changes ranked by risk, claim first, then the diff")
+  .option("-p, --port <port>", "port to listen on (default: 7777, 0 for any)", "7777")
+  .option("-n, --limit <n>", "number of commits to show", "50")
+  .option("--only-recorded", "hide commits that have no change record")
+  .action(async (o) => {
+    const repo = program.opts<{ C: string }>().C;
+    const server = createReviewServer({ repo, limit: Number(o.limit), includeUnrecorded: !o.onlyRecorded });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(Number(o.port), "127.0.0.1", resolve);
+    });
+    const { port } = server.address() as AddressInfo;
+    console.log(`Graft review: http://127.0.0.1:${port}/  (Ctrl-C to stop)`);
+    await new Promise<void>((resolve) => {
+      const stop = () => server.close(() => resolve());
+      process.once("SIGINT", stop);
+      process.once("SIGTERM", stop);
+    });
   });
 
 program

@@ -65,6 +65,9 @@ export interface LandedChange {
 export interface LogEntry {
   commit: string;
   title: string;
+  /** Git author name and ISO date of the commit. */
+  authorName: string;
+  authoredAt: string;
   record: ChangeRecord | null;
   /** Trailers parsed from the message, even when the note is missing. */
   trailers: Record<string, string>;
@@ -262,16 +265,16 @@ export class Graft {
     const raw = await this.git.run([
       "log",
       `--max-count=${limit}`,
-      "--format=%H%x1f%s%x1f%B%x1e",
+      "--format=%H%x1f%s%x1f%an%x1f%aI%x1f%B%x1e",
     ]);
     const entries: LogEntry[] = [];
     for (const chunk of raw.split("\x1e")) {
       if (!chunk.trim()) continue;
-      const [commit, title, body] = chunk.replace(/^\n/, "").split("\x1f");
+      const [commit, title, authorName, authoredAt, body] = chunk.replace(/^\n/, "").split("\x1f");
       const trailers = parseTrailers(body ?? "");
       if (opts.onlyGraft && !trailers[TRAILER_KEYS.change]) continue;
       const record = trailers[TRAILER_KEYS.change] ? await this.readNote(commit) : null;
-      entries.push({ commit, title, trailers, record });
+      entries.push({ commit, title, authorName, authoredAt, trailers, record });
     }
     return entries;
   }
@@ -290,10 +293,16 @@ export class Graft {
     } catch {
       return null;
     }
-    const body = await this.git.run(["log", "-1", "--format=%B", sha]);
-    const title = await this.git.run(["log", "-1", "--format=%s", sha]);
-    const trailers = parseTrailers(body);
-    return { commit: sha, title, trailers, record: await this.readNote(sha) };
+    const [title, authorName, authoredAt, body] = (
+      await this.git.run(["log", "-1", "--format=%s%x1f%an%x1f%aI%x1f%B", sha])
+    ).split("\x1f");
+    const trailers = parseTrailers(body ?? "");
+    return { commit: sha, title, authorName, authoredAt, trailers, record: await this.readNote(sha) };
+  }
+
+  /** The unified diff a commit introduced against its first parent (empty for a root commit's parent side). */
+  async diff(commit: string): Promise<string> {
+    return this.git.run(["show", "--format=", "--no-color", "--no-ext-diff", "-M", "--root", commit]);
   }
 
   private async readNote(commit: string): Promise<ChangeRecord | null> {

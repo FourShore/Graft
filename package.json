@@ -1,41 +1,10 @@
 {
-  "name": "@fourshore/graft",
+  "name": "graft-monorepo",
+  "private": true,
   "version": "0.0.1",
+  "type": "module",
   "description": "Agent-native change records on top of git: every change carries its intent, plan, author agent and evidence.",
   "license": "MIT",
-  "type": "module",
-  "bin": {
-    "graft": "./dist/cli.js",
-    "graft-mcp": "./dist/mcp.js"
-  },
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
-  "files": [
-    "dist",
-    "docs/CHANGE.md",
-    "README.md"
-  ],
-  "engines": {
-    "node": ">=20"
-  },
-  "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "dev": "tsx src/cli.ts",
-    "test": "vitest run",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "prepublishOnly": "npm run build"
-  },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.32.1",
-    "commander": "^15.0.0",
-    "zod": "^3.25.76"
-  },
-  "devDependencies": {
-    "@types/node": "^22.0.0",
-    "tsx": "^4.23.15",
-    "typescript": "^5.9.0",
-    "vitest": "^3.2.0"
-  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/FourShore/Graft.git"
@@ -44,14 +13,26 @@
   "bugs": {
     "url": "https://github.com/FourShore/Graft/issues"
   },
-  "keywords": [
-    "git",
-    "version-control",
-    "ai-agents",
-    "mcp",
-    "code-review"
+  "engines": {
+    "node": ">=20"
+  },
+  "workspaces": [
+    "packages/core",
+    "packages/review",
+    "packages/cli"
   ],
-  "publishConfig": {
-    "access": "public"
+  "scripts": {
+    "build": "tsc -b packages/core packages/review packages/cli",
+    "typecheck": "tsc -b packages/core packages/review packages/cli",
+    "test": "vitest run",
+    "clean": "rm -rf packages/*/dist packages/*/tsconfig.tsbuildinfo",
+    "dev:review": "node packages/cli/dist/cli.js review",
+    "release": "node scripts/release.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
   }
 }
