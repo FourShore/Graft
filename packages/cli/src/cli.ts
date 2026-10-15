@@ -4,11 +4,15 @@ import { Graft, GraftError, type LogEntry } from "@fourshore/graft-core";
 import type { ChangeRecord } from "@fourshore/graft-core";
 import { createReviewServer } from "@fourshore/graft-review";
 import type { AddressInfo } from "node:net";
+import { createRequire } from "node:module";
+
+const { version } = createRequire(import.meta.url)("../package.json") as { version: string };
 
 const program = new Command();
 program
   .name("graft")
   .description("Change records for agent-written code, stored in plain git.")
+  .version(version)
   .option("-C <dir>", "run as if started in <dir>", process.cwd())
   .option("--json", "print machine-readable output");
 

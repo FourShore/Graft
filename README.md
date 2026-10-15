@@ -22,11 +22,64 @@ away. Graft captures it at the moment it is cheapest to capture.
 
 ## Install
 
+Graft needs Node 20+ and git. It is not on npm yet, so install it from source.
+These steps are safe to paste to a coding agent as-is.
+
 ```
-npm install -g @fourshore/graft
+git clone https://github.com/FourShore/Graft.git ~/graft
+cd ~/graft
+npm install
+npm run build
+npm link --workspace packages/cli
 ```
 
-Requires Node 20+ and git on your PATH.
+That puts two commands on your PATH: `graft` and `graft-mcp`. Check with:
+
+```
+graft --version
+```
+
+To update later: `cd ~/graft && git pull && npm install && npm run build`.
+To remove: `npm unlink -g @fourshore/graft`.
+
+Once the package is published, this becomes `npm install -g @fourshore/graft`.
+
+### Set up a repository
+
+In the repository you want to use Graft on:
+
+```
+graft init
+```
+
+This is safe to run on an existing repository. It changes nothing in your
+history. It sets three git config keys so records survive `commit --amend` and
+`rebase`, adds the records ref to `origin`'s fetch list, and writes
+`.graft/policy.json` (commit that file).
+
+### Tell your coding agent to use it
+
+For Claude Code, register the MCP server once per machine or per repository:
+
+```
+claude mcp add graft -- graft-mcp --repo /path/to/your/repo
+```
+
+and add this to the repository's `CLAUDE.md` or `AGENTS.md` so the agent knows
+the workflow:
+
+```markdown
+## Version control
+
+This repository uses Graft. Before editing code, call `graft_start` with the
+task you were given. Record every verification you run with `graft_evidence`
+(tests, lint, build) or `graft_note` (anything you checked by hand). Commit
+with `graft_land`, never with plain `git commit`. Call `graft_log` first when
+you need to know why code is the way it is.
+```
+
+Agents that cannot use MCP can run the same workflow through the `graft` CLI;
+the commands are below.
 
 ## Use it from the shell
 
