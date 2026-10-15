@@ -7,8 +7,12 @@ import { join } from "node:path";
  */
 export interface Policy {
   version: 1;
-  /** Refuse to land a change that has no evidence. Default true. */
-  requireEvidence: boolean;
+  /**
+   * Refuse to land a change that has no evidence. Default true. "command"
+   * is stricter: at least one recorded command must have exited 0, so a note
+   * alone ("checked it") does not satisfy the gate.
+   */
+  requireEvidence: boolean | "command";
   /**
    * Extra files that must not be landed without --allow-secrets, as globs
    * relative to the repo root ("nova.json", "config/*.secret", "keys/**").

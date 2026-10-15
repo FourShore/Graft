@@ -10,6 +10,9 @@ import {
   isChangeId,
   newChangeId,
   parseTrailers,
+  parseMessageRecord,
+  evidenceLines,
+  EVIDENCE_HEADER,
   trailersFor,
 } from "./record.js";
 import { OpenChangeStore } from "./store.js";
@@ -29,6 +32,8 @@ export interface StartOptions {
   task: string;
   plan?: string;
   author?: Partial<ChangeAuthor>;
+  /** Abandon a change left open (for example by a crashed session) instead of refusing. */
+  replace?: boolean;
 }
 
 export interface LandOptions {
@@ -78,6 +83,12 @@ export interface LogEntry {
   authorName: string;
   authoredAt: string;
   record: ChangeRecord | null;
+  /**
+   * Where `record` came from: the git note (full record, with command output),
+   * or the commit message alone (trailers plus the Plan: and Evidence: blocks,
+   * no output) when the note is not in this clone. Null when there is no record.
+   */
+  recordSource: "note" | "message" | null;
   /** Trailers parsed from the message, even when the note is missing. */
   trailers: Record<string, string>;
 }
@@ -98,9 +109,10 @@ export class Graft {
 
   async start(opts: StartOptions): Promise<ChangeRecord> {
     const open = await this.store.read();
-    if (open) {
+    if (open && !opts.replace) {
       throw new GraftError(
-        `A change is already open (${open.id}: ${open.task}). Land it or run \`graft abandon\` first.`,
+        `A change is already open (${open.id}: ${open.task}, opened ${age(open.startedAt)} ago). ` +
+          "Land it, run `graft abandon`, or pass --replace to drop it.",
       );
     }
     if (!opts.task?.trim()) throw new GraftError("A task is required.");
@@ -165,10 +177,19 @@ export class Graft {
     const open = await this.requireOpen();
     if (opts.plan) open.plan = opts.plan.trim();
     const policy = await readPolicy(await this.git.topLevel());
-    if (open.evidence.length === 0 && policy.requireEvidence && !opts.allowNoEvidence) {
-      throw new GraftError(
-        "No evidence recorded. Run `graft evidence -- <command>` or pass --allow-no-evidence.",
-      );
+    if (policy.requireEvidence && !opts.allowNoEvidence) {
+      if (open.evidence.length === 0) {
+        throw new GraftError(
+          "No evidence recorded. Run `graft evidence -- <command>` or pass --allow-no-evidence.",
+        );
+      }
+      const passed = open.evidence.some((e) => e.kind === "command" && e.exitCode === 0);
+      if (policy.requireEvidence === "command" && !passed) {
+        throw new GraftError(
+          "Policy requires a passing command as evidence; notes alone do not count. " +
+            "Run `graft evidence -- <command>` or pass --allow-no-evidence.",
+        );
+      }
     }
     if (opts.paths?.length) await this.git.run(["add", "--", ...opts.paths]);
     if (opts.all) await this.git.run(["add", "-A"]);
@@ -298,8 +319,7 @@ export class Graft {
       const [commit, title, authorName, authoredAt, body] = chunk.replace(/^\n/, "").split("\x1f");
       const trailers = parseTrailers(body ?? "");
       if (opts.onlyGraft && !trailers[TRAILER_KEYS.change]) continue;
-      const record = trailers[TRAILER_KEYS.change] ? await this.readNote(commit) : null;
-      entries.push({ commit, title, authorName, authoredAt, trailers, record });
+      entries.push({ commit, title, authorName, authoredAt, trailers, ...(await this.readRecord(commit, body ?? "", authoredAt)) });
     }
     return entries;
   }
@@ -322,12 +342,25 @@ export class Graft {
       await this.git.run(["log", "-1", "--format=%s%x1f%an%x1f%aI%x1f%B", sha])
     ).split("\x1f");
     const trailers = parseTrailers(body ?? "");
-    return { commit: sha, title, authorName, authoredAt, trailers, record: await this.readNote(sha) };
+    return { commit: sha, title, authorName, authoredAt, trailers, ...(await this.readRecord(sha, body ?? "", authoredAt)) };
   }
 
   /** The unified diff a commit introduced against its first parent (empty for a root commit's parent side). */
   async diff(commit: string): Promise<string> {
     return this.git.run(["show", "--format=", "--no-color", "--no-ext-diff", "-M", "--root", commit]);
+  }
+
+  /** The note when it is here, else what the commit message alone can reconstruct. */
+  private async readRecord(
+    commit: string,
+    message: string,
+    authoredAt: string,
+  ): Promise<Pick<LogEntry, "record" | "recordSource">> {
+    if (!parseTrailers(message)[TRAILER_KEYS.change]) return { record: null, recordSource: null };
+    const note = await this.readNote(commit);
+    if (note) return { record: note, recordSource: "note" };
+    const record = parseMessageRecord(message, authoredAt);
+    return record ? { record, recordSource: "message" } : { record: null, recordSource: null };
   }
 
   private async readNote(commit: string): Promise<ChangeRecord | null> {
@@ -381,6 +414,7 @@ export function buildCommitMessage(record: ChangeRecord, title?: string, extraTr
   const lines = [subject, ""];
   if (record.task !== subject) lines.push(record.task, "");
   if (record.plan) lines.push("Plan:", indent(record.plan), "");
+  if (record.evidence.length) lines.push(EVIDENCE_HEADER, ...evidenceLines(record.evidence), "");
   for (const [k, v] of trailersFor(record)) lines.push(`${k}: ${v}`);
   for (const t of extraTrailers) lines.push(checkTrailer(t));
   return lines.join("\n") + "\n";
@@ -393,6 +427,13 @@ function checkTrailer(t: string): string {
   if (!m) throw new GraftError(`Bad trailer '${t}': expected 'Key: value'.`);
   if (/^graft-/i.test(m[1])) throw new GraftError(`Trailer '${m[1]}' is reserved; Graft writes its own.`);
   return `${m[1]}: ${m[2]}`;
+}
+
+function age(iso: string): string {
+  const mins = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 60_000));
+  if (mins < 60) return `${mins} min`;
+  const hours = Math.round(mins / 60);
+  return hours < 48 ? `${hours} h` : `${Math.round(hours / 24)} days`;
 }
 
 function indent(s: string): string {

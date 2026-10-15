@@ -58,11 +58,13 @@ program
   .option("--author <name>", "who is doing the work (default: from environment)")
   .option("--model <model>", "model id, when the author is an agent")
   .option("--human", "mark the author as a human rather than an agent")
+  .option("--replace", "drop a change another session left open, then start this one")
   .action(async (task: string[], o) => {
     const record = await graft().start({
       task: task.join(" "),
       plan: o.plan,
       author: { name: o.author, model: o.model, kind: o.human ? "human" : undefined },
+      replace: o.replace,
     });
     out(record, `Opened change ${record.id}\n  task: ${record.task}`);
   });
@@ -178,7 +180,7 @@ program
   .action(async (ref: string) => {
     const entry = await graft().show(ref);
     if (!entry) throw new GraftError(`No change found for ${ref}.`);
-    out(entry, entry.record ? formatRecord(entry.record) : formatEntry(entry));
+    out(entry, entry.record && entry.recordSource === "note" ? formatRecord(entry.record) : formatEntry(entry));
   });
 
 function out(data: unknown, text: string, textAlways = false): void {
@@ -194,7 +196,8 @@ function formatEntry(e: LogEntry): string {
       ? `${head}\n  change: ${t["Graft-Change"]} (note missing)\n  author: ${t["Graft-Author"] ?? "?"}\n  evidence: ${t["Graft-Evidence"] ?? "?"}`
       : `${head}\n  (no change record)`;
   }
-  return `${head}\n${indent(formatRecord(e.record))}`;
+  const from = e.recordSource === "message" ? "\n  (note missing; rebuilt from the commit message, output not available)" : "";
+  return `${head}\n${indent(formatRecord(e.record))}${from}`;
 }
 
 function formatRecord(r: ChangeRecord): string {

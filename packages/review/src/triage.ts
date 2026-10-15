@@ -55,8 +55,9 @@ export function judgeEvidence(evidence: Evidence[]): EvidenceVerdict {
  *   read:       behavior changed and nothing proves it works
  *   verified:   behavior changed and a test run passed
  *   mechanical: no behavior files changed
- *   partial:    the commit has Graft trailers but the full record (note) is
- *               not in this clone, so the evidence cannot be inspected
+ *   partial:    the commit has Graft trailers but neither the note nor an
+ *               Evidence: block in its message, so the evidence cannot be
+ *               inspected (commits landed before 0.0.6 with no note here)
  *   unrecorded: commit has no change record at all
  */
 export type Risk = "read" | "verified" | "mechanical" | "partial" | "unrecorded";
@@ -71,12 +72,16 @@ export function triage(
   record: ChangeRecord | null,
   files: DiffFile[],
   trailers: Record<string, string> = {},
+  source: "note" | "message" | null = record ? "note" : null,
 ): Triage {
   const groups: Record<FileGroup, DiffFile[]> = { behavior: [], tests: [], mechanical: [] };
   for (const f of files) groups[groupFile(f)].push(f);
   const verdict = judgeEvidence(record?.evidence ?? []);
+  const summaryOnly =
+    source === "message" && record?.evidence.length === 0 && (trailers["Graft-Evidence"] ?? "none") !== "none";
   let risk: Risk;
   if (!record) risk = trailers["Graft-Change"] ? "partial" : "unrecorded";
+  else if (summaryOnly) risk = "partial";
   else if (groups.behavior.length === 0) risk = "mechanical";
   else if (verdict.testsPassed) risk = "verified";
   else risk = "read";

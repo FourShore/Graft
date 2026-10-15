@@ -109,6 +109,10 @@ Add rate limiting to the public API
 Plan:
   Token bucket per key
 
+Evidence:
+  [pass] unit tests: npm test (12.3s)
+  [note] Hit the endpoint 200 times; 429 after 100 as expected
+
 Graft-Change: m4z1gs7jgdyp3pj2za9c
 Graft-Task: Add rate limiting to the public API
 Graft-Author: agent:claude-code
@@ -116,17 +120,25 @@ Graft-Model: example-model-1
 Graft-Evidence: 1 command, 1 passed; 1 note
 ```
 
-The full record, including command output, is a note on `refs/notes/graft`.
+The message carries the task, plan and evidence list, so any clone and
+GitHub's commit view show them. The command output is a note on
+`refs/notes/graft`.
+
+A crashed session can leave a change open in `.git`. `graft start --replace`
+drops it and opens the new one; `graft status` shows what is there.
 
 ## Sharing records
 
-Trailers travel with the commit. Notes don't travel on their own, so run
-`graft sync` after `git push` and after `git pull`. It fetches the remote's
-notes, merges them with yours, and pushes.
+The commit message travels with the commit, so the task, plan and evidence
+list reach every clone with a plain `git push`. The command output lives in a
+note, and notes don't travel on their own, so run `graft sync` after
+`git push` and after `git pull`. It fetches the remote's notes, merges them
+with yours, and pushes.
 
 Some hosted agent sessions can only push their own branch, so their notes
-push is refused. The trailers still land; the full records reach the remote
-the next time anyone runs `graft sync` from a normal clone.
+push is refused. `graft sync` says so and carries on; `graft log` and
+`graft review` rebuild the record from the message, minus the output, until
+someone runs `graft sync` from a normal clone.
 
 ## Review
 
@@ -143,7 +155,7 @@ first, then the diff grouped into behavior, tests, and mechanical files.
 | Needs reading | Behavior changed, no passing test run recorded |
 | Verified | Behavior changed, recorded test run passed |
 | Mechanical | Only tests, docs, lockfiles, or generated files changed |
-| Note missing | The commit has Graft trailers but the full record isn't in this clone; run `graft sync` |
+| Note missing | The commit has Graft trailers but no evidence list in its message and no note in this clone; run `graft sync` |
 | No record | No Graft record on this commit |
 
 The badges come from file paths and recorded evidence. They say where to look
@@ -168,7 +180,9 @@ const { commit, record } = await g.land({ paths: ["src/api.ts"] });
 { "version": 1, "requireEvidence": true, "secretFiles": ["nova.json", "config/*.secret"] }
 ```
 
-Set `requireEvidence` to `false` to turn off the landing gate for a repo.
+Set `requireEvidence` to `false` to turn off the landing gate for a repo, or
+to `"command"` to require at least one recorded command that exited 0, so a
+note alone (`--note "checked"`) doesn't pass.
 `secretFiles` adds repo-specific globs to the credential guard; `graft init`
 doesn't write it, add it when the repo has its own credential file names.
 [docs/CHANGE.md](docs/CHANGE.md#where-it-lives) covers what survives rebases,

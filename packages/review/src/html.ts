@@ -18,7 +18,7 @@ const RISK_HELP: Record<Risk, string> = {
   verified: "Behavior changed and the recorded test run passed. Check the claim, skim the diff.",
   mechanical: "Only tests, docs, lockfiles or generated files changed.",
   partial:
-    "The commit carries Graft trailers but its full record is not in this clone, so the evidence cannot be inspected. Run graft sync, then read the diff.",
+    "The commit carries Graft trailers but neither the note nor an evidence list in its message is in this clone, so the evidence cannot be inspected. Run graft sync, then read the diff.",
   unrecorded: "This commit has no change record, so nothing is known about why or whether it was checked.",
 };
 
@@ -76,9 +76,10 @@ export function renderQueue(repo: string, items: QueueItem[]): string {
       const task = r?.task ?? t["Graft-Task"] ?? entry.title;
       const who = r ? `${r.author.kind}:${r.author.name}` : (t["Graft-Author"] ?? entry.authorName);
       const files = Object.values(triage.groups).reduce((n, g) => n + g.length, 0);
-      const ev = r
-        ? `${triage.verdict.testRuns.length ? (triage.verdict.testsPassed ? "tests passed" : "tests failed") : "no test run"} · ${r.evidence.length} evidence`
-        : t["Graft-Evidence"]
+      const ev =
+        r && triage.risk !== "partial"
+          ? `${triage.verdict.testRuns.length ? (triage.verdict.testsPassed ? "tests passed" : "tests failed") : "no test run"} · ${r.evidence.length} evidence${entry.recordSource === "message" ? ", note missing" : ""}`
+          : t["Graft-Evidence"]
           ? `${t["Graft-Evidence"]} (summary only)`
           : "no evidence";
       return `<li><span class="badge ${triage.risk}" title="${esc(RISK_HELP[triage.risk])}">${RISK_LABEL[triage.risk]}</span><div><a class="task" href="/change/${entry.commit}">${esc(task)}</a><div class="meta">${esc(who)} · ${esc(age(entry.authoredAt))} · ${files} file${files === 1 ? "" : "s"} · <span style="font-family:var(--mono)">${entry.commit.slice(0, 10)}</span></div></div><div class="ev">${esc(ev)}</div></li>`;
@@ -89,7 +90,7 @@ export function renderQueue(repo: string, items: QueueItem[]): string {
 
 export function renderChange(repo: string, entry: LogEntry, triage: Triage): string {
   const r = entry.record;
-  const claim = r ? renderClaim(r, triage) : renderNoRecord(entry);
+  const claim = r && triage.risk !== "partial" ? renderClaim(r, triage, entry.recordSource === "message") : renderNoRecord(entry);
   const groups = (["behavior", "tests", "mechanical"] as FileGroup[])
     .filter((g) => triage.groups[g].length)
     .map((g) => {
@@ -102,36 +103,40 @@ export function renderChange(repo: string, entry: LogEntry, triage: Triage): str
   return page(r?.task ?? entry.trailers["Graft-Task"] ?? entry.title, repo, head + claim + groups);
 }
 
-function renderClaim(r: ChangeRecord, t: Triage): string {
+function renderClaim(r: ChangeRecord, t: Triage, fromMessage = false): string {
   const ev = r.evidence.length
-    ? `<ul class="evlist">${r.evidence.map(renderEvidence).join("")}</ul>`
+    ? `<ul class="evlist">${r.evidence.map((e) => renderEvidence(e, fromMessage)).join("")}</ul>`
     : `<p class="help">None recorded.</p>`;
+  const source = fromMessage
+    ? `<p class="help">Rebuilt from the commit message. Command output lives on <code>refs/notes/graft</code>, which is not in this clone; run <code>graft sync</code> to see it.</p>`
+    : "";
   const summary = t.verdict.testRuns.length
     ? t.verdict.testsPassed
       ? "A test run passed."
       : "The last test run failed."
     : "No command looks like a test run.";
-  return `<div class="claim"><h2>${esc(r.task)}</h2><div class="who">${esc(r.author.kind)}:${esc(r.author.name)}${r.author.model ? ` · ${esc(r.author.model)}` : ""} · started ${esc(r.startedAt.slice(0, 16).replace("T", " "))}${r.landedAt ? `, landed ${esc(r.landedAt.slice(0, 16).replace("T", " "))}` : ""} · <span style="font-family:var(--mono)">${esc(r.id)}</span></div><dl><dt>Plan</dt><dd>${r.plan ? `<p class="plan">${esc(r.plan)}</p>` : `<span class="help">None recorded.</span>`}</dd><dt>Evidence <span class="help" style="font-weight:400">· ${esc(summary)}</span></dt><dd>${ev}</dd></dl></div>`;
+  return `<div class="claim"><h2>${esc(r.task)}</h2><div class="who">${esc(r.author.kind)}:${esc(r.author.name)}${r.author.model ? ` · ${esc(r.author.model)}` : ""} · started ${esc(r.startedAt.slice(0, 16).replace("T", " "))}${r.landedAt ? `, landed ${esc(r.landedAt.slice(0, 16).replace("T", " "))}` : ""} · <span style="font-family:var(--mono)">${esc(r.id)}</span></div><dl><dt>Plan</dt><dd>${r.plan ? `<p class="plan">${esc(r.plan)}</p>` : `<span class="help">None recorded.</span>`}</dd><dt>Evidence <span class="help" style="font-weight:400">· ${esc(summary)}</span></dt><dd>${source}${ev}</dd></dl></div>`;
 }
 
 function renderNoRecord(e: LogEntry): string {
   const t = e.trailers;
   const when = esc(e.authoredAt.slice(0, 16).replace("T", " "));
   if (t["Graft-Change"]) {
-    return `<div class="claim"><h2>${esc(t["Graft-Task"] ?? e.title)}</h2><div class="who">${esc(t["Graft-Author"] ?? e.authorName)}${t["Graft-Model"] ? ` · ${esc(t["Graft-Model"])}` : ""} · ${when} · <span style="font-family:var(--mono)">${esc(t["Graft-Change"])}</span></div><dl><dt>Evidence <span class="help" style="font-weight:400">· ${esc(t["Graft-Evidence"] ?? "none")}</span></dt><dd><p class="help">Summary from the commit trailers. The full record, with the plan and each command's output, lives on <code>refs/notes/graft</code> and is not in this clone. Run <code>graft sync</code>.</p></dd></dl></div>`;
+    return `<div class="claim"><h2>${esc(t["Graft-Task"] ?? e.title)}</h2><div class="who">${esc(t["Graft-Author"] ?? e.authorName)}${t["Graft-Model"] ? ` · ${esc(t["Graft-Model"])}` : ""} · ${when} · <span style="font-family:var(--mono)">${esc(t["Graft-Change"])}</span></div><dl><dt>Evidence <span class="help" style="font-weight:400">· ${esc(t["Graft-Evidence"] ?? "none")}</span></dt><dd><p class="help">Summary from the commit trailers. This commit's message has no evidence list and the full record, with the plan and each command's output, lives on <code>refs/notes/graft</code>, which is not in this clone. Run <code>graft sync</code>.</p></dd></dl></div>`;
   }
   return `<div class="claim"><h2>${esc(e.title)}</h2><div class="who">${esc(e.authorName)} · ${when} · <span style="font-family:var(--mono)">${e.commit.slice(0, 10)}</span></div><p class="help">No Graft record on this commit. The task, plan and evidence are unknown.</p></div>`;
 }
 
-function renderEvidence(ev: Evidence): string {
+function renderEvidence(ev: Evidence, fromMessage = false): string {
   if (ev.kind === "note") {
     return `<li><span class="note">note</span> ${esc(ev.text)}${ev.label ? ` <span class="help">[${esc(ev.label)}]</span>` : ""}</li>`;
   }
   const cls = ev.exitCode === 0 ? "pass" : "fail";
   const word = ev.exitCode === 0 ? "pass" : `exit ${ev.exitCode}`;
+  const secs = `${(ev.durationMs / 1000).toFixed(1)}s`;
   const out = ev.output.trim()
-    ? `<details><summary class="help">output · ${(ev.durationMs / 1000).toFixed(1)}s</summary><pre>${esc(ev.output)}</pre></details>`
-    : `<span class="help"> · ${(ev.durationMs / 1000).toFixed(1)}s, no output</span>`;
+    ? `<details><summary class="help">output · ${secs}</summary><pre>${esc(ev.output)}</pre></details>`
+    : `<span class="help"> · ${secs}, ${fromMessage ? "output not in this clone" : "no output"}</span>`;
   return `<li><span class="${cls}">${word}</span> <code>${esc(ev.command)}</code>${ev.label ? ` <span class="help">[${esc(ev.label)}]</span>` : ""}${out}</li>`;
 }
 
