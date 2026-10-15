@@ -20,7 +20,11 @@ export interface ChangeRecord {
   landedAt?: string;
   /** Evidence collected while the change was open. */
   evidence: Evidence[];
-  /** Commit SHA this record was landed on, once landed. */
+  /**
+   * Commit SHA this record was first landed on. Informational: the note follows
+   * the commit through amend and rebase, so after a rewrite this names the
+   * original SHA, not the one the note is now attached to.
+   */
   commit?: string;
 }
 

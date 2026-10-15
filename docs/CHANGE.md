@@ -58,7 +58,7 @@ change is being made.
 | `author.name` | yes | Tool or person: `claude-code`, `cursor`, `zach`. |
 | `author.model` | no | Model identifier when the author is an agent. |
 | `startedAt`, `landedAt` | yes / on land | ISO 8601. |
-| `commit` | on land | The SHA the record was first landed on. Informational; the trailer is the durable link. |
+| `commit` | on land | The SHA the record was first landed on. Informational; the trailer is the durable link. After an amend or rebase the note moves with the commit but this field keeps the original SHA, so readers take the commit from where the note is attached, never from this field. |
 | `evidence[]` | yes (may be empty) | Ordered list of what was done to verify the change. |
 
 ### Evidence
@@ -114,6 +114,10 @@ Graft-Evidence: 1 command, 1 passed; 1 note
 | `Graft-Task` | The task, collapsed to one line. |
 | `Graft-Author` | `<kind>:<name>`. |
 | `Graft-Model` | Present only for agents with a known model. |
+
+Other trailers can be added at land time (`graft land --trailer "Co-Authored-By: ..."`,
+or `trailers` on `graft_land`); they go after Graft's own. The `Graft-` prefix
+is reserved.
 | `Graft-Evidence` | Human-readable summary of the evidence list. |
 
 The commit title is the task truncated to 72 characters unless the author gives
