@@ -7,9 +7,23 @@ which agent) did the work, and the commands they ran to check it. It's stored
 as commit trailers and a git note, so git, GitHub, and your tools keep working
 as they are.
 
-Agents now write most of the code in a lot of repos. Six weeks later the
-question is rarely "what changed" but "why, and did anyone test it". Git
-doesn't keep that. Graft does.
+## Why
+
+AI moved the bottleneck. Writing code used to be the slow part. Now an agent
+can produce a working change in minutes, and the slow part is deciding whether
+to trust it. Nobody can read every diff at the rate agents produce them, and a
+diff on its own doesn't say what was asked for or what was checked.
+
+Git was built for the old bottleneck. It tracks what changed and who committed
+it, which was enough when a human typed every line and could be asked about
+it. It has no place for the task, the plan, or the evidence, so that context
+gets produced during agent work and thrown away.
+
+Graft keeps it. Each commit carries the task, the author, and the commands
+that were run, and `graft land` won't commit without evidence. Review starts
+from the claim, "this is what I was asked and this is what I ran", instead of
+from a bare diff. Months later, `graft log` answers "why is this here" without
+digging through chat logs.
 
 Status: early. The record format, a CLI, an MCP server, and a local review page
 work and are used on this repo. See [docs/CHANGE.md](docs/CHANGE.md) for the
