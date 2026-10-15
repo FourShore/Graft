@@ -10,7 +10,6 @@
 //   git push --follow-tags
 import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
-import { Graft } from "../packages/core/dist/index.js";
 
 const bump = process.argv[2];
 if (!bump) {
@@ -23,6 +22,14 @@ if (run("git", ["status", "--porcelain"])) {
   console.error("working tree is not clean; commit or stash first");
   process.exit(1);
 }
+
+// A fresh clone has no dist yet, and Graft itself is imported from there. Clean
+// first so a stale tsconfig.tsbuildinfo cannot make tsc skip a package whose
+// dist is gone.
+console.log("building...");
+execFileSync("npm", ["run", "clean"], { stdio: "inherit" });
+execFileSync("npm", ["run", "build"], { stdio: "inherit" });
+const { Graft } = await import("../packages/core/dist/index.js");
 
 // npm version in a workspace tries to resolve sibling packages from the
 // registry, which fails before the first publish, so bump the files directly.
