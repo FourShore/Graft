@@ -71,7 +71,8 @@ graft sync
 ```
 
 `land` commits what's staged, plus any files you name, or everything with
-`-a`. It refuses to commit without evidence (`--allow-no-evidence` overrides)
+`-a`. Add your own trailers with `--trailer "Co-Authored-By: ..."` (repeatable;
+`trailers` on `graft_land`). It refuses to commit without evidence (`--allow-no-evidence` overrides)
 and refuses staged files that look like credentials such as `.env`, `*.pem`,
 `*.key` (`--allow-secrets` overrides). Evidence output and notes are scrubbed
 of any value held in an environment variable whose name looks secret.
@@ -106,6 +107,10 @@ The full record, including command output, is a note on `refs/notes/graft`.
 Trailers travel with the commit. Notes don't travel on their own, so run
 `graft sync` after `git push` and after `git pull`. It fetches the remote's
 notes, merges them with yours, and pushes.
+
+Some hosted agent sessions can only push their own branch, so their notes
+push is refused. The trailers still land; the full records reach the remote
+the next time anyone runs `graft sync` from a normal clone.
 
 ## Review
 
