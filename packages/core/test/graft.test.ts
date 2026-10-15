@@ -33,7 +33,10 @@ describe("start / status / abandon", () => {
     const r = await graft.start({ task: "add rate limiting", author: { name: "test-agent", kind: "agent" } });
     expect(isChangeId(r.id)).toBe(true);
     expect((await graft.status())?.id).toBe(r.id);
-    await expect(graft.start({ task: "another" })).rejects.toThrow(GraftError);
+    await expect(graft.start({ task: "another" })).rejects.toThrow(/opened \d+ min ago.*--replace/);
+    const replaced = await graft.start({ task: "another", replace: true });
+    expect(replaced.id).not.toBe(r.id);
+    expect((await graft.status())?.task).toBe("another");
     await graft.abandon();
     expect(await graft.status()).toBeNull();
   });
@@ -208,8 +211,38 @@ describe("log and show", () => {
 
     const found = await graft.show(record.id);
     expect(found?.trailers["Graft-Task"]).toBe("feature work");
-    // The note is keyed by SHA and does not follow by default; the trailers do.
-    expect(found?.record).toBeNull();
+    // The note is keyed by SHA and does not follow by default; the message does.
+    expect(found?.recordSource).toBe("message");
+    expect(found?.record?.evidence).toEqual([{ kind: "note", at: expect.any(String), text: "ok", label: undefined }]);
+  });
+
+  it("rebuilds a record from the commit message when the note is missing", async () => {
+    await graft.start({ task: "message record", plan: "first paragraph\n\nsecond paragraph", author: { name: "bot", model: "m-2", kind: "agent" } });
+    await writeFile(join(dir, "a.txt"), "a\n");
+    await graft.evidenceCommand("true", "unit tests");
+    await graft.evidenceCommand("exit 3");
+    await graft.evidenceNote("looked at it: twice", "manual");
+    const { record, commit } = await graft.land({ all: true });
+    const body = sh(["log", "-1", "--format=%B"]);
+    expect(body).toMatch(/Evidence:\n  \[pass\] unit tests: true \(\d+\.\ds\)\n  \[fail 3\] exit 3 \(\d+\.\ds\)\n  \[note\] manual: looked at it: twice\n/);
+
+    const withNote = await graft.show(commit);
+    expect(withNote?.recordSource).toBe("note");
+    sh(["notes", "--ref=refs/notes/graft", "remove", commit]);
+    const rebuilt = await graft.show(commit);
+    expect(rebuilt?.recordSource).toBe("message");
+    expect(rebuilt?.record).toMatchObject({
+      id: record.id,
+      task: "message record",
+      plan: "first paragraph\n\nsecond paragraph",
+      author: { kind: "agent", name: "bot", model: "m-2" },
+    });
+    expect(rebuilt?.record?.evidence).toMatchObject([
+      { kind: "command", command: "true", exitCode: 0, label: "unit tests", output: "" },
+      { kind: "command", command: "exit 3", exitCode: 3, label: undefined },
+      { kind: "note", text: "looked at it: twice", label: "manual" },
+    ]);
+    expect((await graft.log())[0].recordSource).toBe("message");
   });
 });
 
@@ -250,6 +283,19 @@ describe("policy", () => {
     expect(commit).toHaveLength(40);
   });
 
+  it("requireEvidence: \"command\" refuses notes-only evidence", async () => {
+    await mkdir(join(dir, ".graft"), { recursive: true });
+    await writeFile(join(dir, ".graft/policy.json"), JSON.stringify({ version: 1, requireEvidence: "command" }));
+    await graft.start({ task: "t" });
+    await writeFile(join(dir, "a.txt"), "a\n");
+    await graft.evidenceNote("checked");
+    await expect(graft.land({ all: true })).rejects.toThrow(/passing command/);
+    await graft.evidenceCommand("false");
+    await expect(graft.land({ all: true })).rejects.toThrow(/passing command/);
+    await graft.evidenceCommand("true");
+    expect((await graft.land({ all: true })).commit).toHaveLength(40);
+  });
+
   it("rejects an unknown policy version", async () => {
     await mkdir(join(dir, ".graft"), { recursive: true });
     await writeFile(join(dir, ".graft/policy.json"), JSON.stringify({ version: 2 }));
@@ -279,10 +325,12 @@ describe("sync", () => {
     const clone = await mkdtemp(join(tmpdir(), "graft-clone-"));
     execFileSync("git", ["clone", "-q", remote, clone]);
     const other = new Graft(clone);
-    expect((await other.show(commit))?.record).toBeNull();
+    expect((await other.show(commit))?.recordSource).toBe("message");
     const r2 = await other.sync();
     expect(r2).toMatchObject({ fetched: true, merged: true });
-    expect((await other.show(commit))?.record?.id).toBe(record.id);
+    const synced = await other.show(commit);
+    expect(synced?.recordSource).toBe("note");
+    expect(synced?.record?.id).toBe(record.id);
   });
 
   it("merges records from two clones instead of overwriting", async () => {

@@ -91,15 +91,21 @@ open per worktree.
 On land, the record is written to two places in the commit, so that a reader
 with plain git sees the important part and a reader with Graft sees all of it.
 
-**1. Trailers in the commit message.** These survive everything git does to a
-commit: rebase, cherry-pick, squash (if the message is kept), `git log --grep`,
-GitHub's commit view.
+**1. The commit message: trailers, plus `Plan:` and `Evidence:` blocks in the
+body.** These survive everything git does to a commit: rebase, cherry-pick,
+squash (if the message is kept), `git log --grep`, GitHub's commit view. They
+also need no extra ref to push, so they are the part of the record that is
+guaranteed to travel.
 
 ```
 Add rate limiting to the public API
 
 Plan:
   Token bucket per API key in middleware; 429 with Retry-After.
+
+Evidence:
+  [pass] unit tests: npm test (12.3s)
+  [note] Hit the endpoint 200 times; 429 after 100 as expected
 
 Graft-Change: m4z1gs7jgdyp3pj2za9c
 Graft-Task: Add rate limiting to the public API
@@ -122,7 +128,17 @@ is reserved.
 
 The commit title is the task truncated to 72 characters unless the author gives
 a better one. The plan, if any, goes in the body under `Plan:` so it reads well
-in any git tool.
+in any git tool. The evidence list goes under `Evidence:`, one line per entry:
+`[pass]` or `[fail <exit code>]` followed by the optional label, the command and
+its duration, or `[note]` followed by the optional label and the text. Commands
+and notes are collapsed to one line and cut at 200 characters. Output is not in
+the message.
+
+Readers rebuild a record from the message alone when the note is missing
+(`graft log`, `graft show`, `graft review` all do): the trailers give the id,
+task and author, the blocks give the plan and evidence, timestamps fall back
+to the commit date, and command output is empty. Such a record is marked as
+coming from the message so a reader knows the output is elsewhere.
 
 **2. The full record as a git note** on `refs/notes/graft`, keyed by commit SHA,
 holding the JSON above verbatim. Notes carry the parts that do not belong in a
@@ -142,15 +158,16 @@ plain `git fetch` brings records along too.
 
 ### What survives what
 
-| Operation | Trailers | Note |
+| Operation | Message (trailers, plan, evidence list) | Note (output) |
 | --- | --- | --- |
 | `git rebase`, `cherry-pick` | kept | lost (note is keyed by the old SHA) |
 | `git commit --amend` | kept | lost unless `notes.rewriteRef` is set |
 | Squash merge that keeps the message | kept | lost |
 | `git push` / `git fetch` | kept | only if the notes ref is pushed/fetched |
 
-So: the change id in the trailer is the durable identity, and the note is a
-cache of detail that can be recovered. `graft init` sets `notes.rewriteRef`
+So: the change id in the trailer is the durable identity, the message carries
+the record a reviewer needs, and the note is a cache of output that can be
+recovered. `graft init` sets `notes.rewriteRef`
 and the `notes.rewrite.*` keys so git carries notes through amend and rebase in
 that clone. A future `graft fsck` can find commits whose note is missing and
 report them.
@@ -164,7 +181,9 @@ report them.
 ```
 
 `requireEvidence` makes `land` refuse a change with an empty evidence list
-unless the author passes `--allow-no-evidence`. `secretFiles`, optional, is a
+unless the author passes `--allow-no-evidence`. Set it to `"command"` and
+`land` also requires at least one recorded command that exited 0: a note
+alone does not satisfy the gate, since a note is only a claim. `secretFiles`, optional, is a
 list of globs relative to the root (`"nova.json"`, `"config/*.secret"`,
 `"keys/**"`) that `land` refuses to commit without `--allow-secrets`, on top
 of the built-in list (`.env`, `*.pem`, `*.key`, ...). A glob without a slash

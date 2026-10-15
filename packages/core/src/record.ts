@@ -127,3 +127,108 @@ export function oneLine(s: string): string {
 
 /** The notes ref where full records live. */
 export const NOTES_REF = "refs/notes/graft";
+
+/** Header of the evidence section written into the commit message body. */
+export const EVIDENCE_HEADER = "Evidence:";
+const MESSAGE_LINE_CAP = 200;
+
+/**
+ * The evidence list as commit-message lines: one per entry, so the record
+ * travels with the commit even when the note does not. Output stays in the
+ * note; the message carries the command, its exit code and duration.
+ *
+ *   [pass] unit tests: npm test (12.3s)
+ *   [fail 1] npm run lint (0.4s)
+ *   [note] manually verified in browser
+ */
+export function evidenceLines(evidence: Evidence[]): string[] {
+  return evidence.map((ev) => {
+    const label = ev.label ? `${oneLine(ev.label)}: ` : "";
+    if (ev.kind === "note") return `  [note] ${label}${clip(oneLine(ev.text))}`;
+    const status = ev.exitCode === 0 ? "pass" : `fail ${ev.exitCode}`;
+    return `  [${status}] ${label}${clip(oneLine(ev.command))} (${(ev.durationMs / 1000).toFixed(1)}s)`;
+  });
+}
+
+const EVIDENCE_LINE = /^\s*\[(pass|fail (-?\d+)|note)\] (.*)$/;
+const DURATION = /^(.*) \((\d+(?:\.\d+)?)s\)$/;
+const LABEL = /^([^:]{1,60}): (.*)$/;
+
+/**
+ * Rebuild a record from a commit message alone: trailers, the Plan: block and
+ * the Evidence: block. Used when the note is missing. Command output is not in
+ * the message, so `output` is empty; timestamps fall back to `authoredAt`.
+ * Returns null when the message carries no Graft-Change trailer.
+ */
+export function parseMessageRecord(message: string, authoredAt: string): ChangeRecord | null {
+  const trailers = parseTrailers(message);
+  const id = trailers[TRAILER_KEYS.change];
+  if (!id) return null;
+  const lines = message.split("\n");
+  const plan = readBlock(lines, "Plan:");
+  const evidence: Evidence[] = [];
+  for (const line of readBlock(lines, EVIDENCE_HEADER)?.split("\n") ?? []) {
+    const m = EVIDENCE_LINE.exec(line);
+    if (!m) continue;
+    let rest = m[3];
+    let durationMs = 0;
+    if (m[1] !== "note") {
+      const d = DURATION.exec(rest);
+      if (d) {
+        rest = d[1];
+        durationMs = Math.round(Number(d[2]) * 1000);
+      }
+    }
+    let label: string | undefined;
+    const l = LABEL.exec(rest);
+    if (l) {
+      label = l[1];
+      rest = l[2];
+    }
+    if (m[1] === "note") evidence.push({ kind: "note", at: authoredAt, text: rest, label });
+    else evidence.push({ kind: "command", at: authoredAt, command: rest, exitCode: m[2] ? Number(m[2]) : 0, durationMs, output: "", label });
+  }
+  const [kind, ...name] = (trailers[TRAILER_KEYS.author] ?? "human:unknown").split(":");
+  return {
+    version: 1,
+    id,
+    task: trailers[TRAILER_KEYS.task] ?? lines[0],
+    plan: plan || undefined,
+    author: {
+      kind: kind === "agent" ? "agent" : "human",
+      name: name.join(":") || "unknown",
+      model: trailers[TRAILER_KEYS.model] || undefined,
+    },
+    startedAt: authoredAt,
+    landedAt: authoredAt,
+    evidence,
+  };
+}
+
+/**
+ * The indented lines that follow `header` on its own line. Blank lines are
+ * kept while the next non-blank line is still indented, so a multi-paragraph
+ * plan survives; the block ends at the first unindented line.
+ */
+function readBlock(lines: string[], header: string): string | null {
+  const start = lines.indexOf(header);
+  if (start < 0) return null;
+  const body: string[] = [];
+  const rest = lines.slice(start + 1);
+  for (let i = 0; i < rest.length; i++) {
+    const line = rest[i];
+    if (!line.trim()) {
+      const next = rest.slice(i + 1).find((l) => l.trim());
+      if (!next || !next.startsWith("  ")) break;
+      body.push("");
+      continue;
+    }
+    if (!line.startsWith("  ")) break;
+    body.push(line.slice(2));
+  }
+  return body.join("\n");
+}
+
+function clip(s: string): string {
+  return s.length > MESSAGE_LINE_CAP ? s.slice(0, MESSAGE_LINE_CAP - 1) + "…" : s;
+}

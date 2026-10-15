@@ -11,7 +11,8 @@ import { groupFile, judgeEvidence, triage } from "../src/triage.js";
 
 let dir: string;
 let graft: Graft;
-const sh = (args: string[], cwd = dir) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+const sh = (args: string[], cwd = dir, input?: string) =>
+  execFileSync("git", args, { cwd, encoding: "utf8", input }).trim();
 
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "graft-review-"));
@@ -171,12 +172,45 @@ describe("Review over a real repo", () => {
     }
   });
 
-  it("uses trailers when the note is missing", async () => {
+  it("reads the evidence list from the commit message when the note is missing", async () => {
     await graft.start({ task: "note went missing", author: { kind: "agent", name: "bot" } });
     await writeFile(join(dir, "x.ts"), "export const y = 1;\n");
     await graft.evidenceCommand("true", "unit tests");
     const { commit } = await graft.land({ all: true });
     sh(["notes", "--ref=refs/notes/graft", "remove", commit]);
+
+    const review = new Review({ repo: dir });
+    const [item] = await review.queue();
+    expect(item.triage.risk).toBe("verified");
+    expect(item.entry.recordSource).toBe("message");
+
+    const server = createReviewServer({ repo: dir });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const port = (server.address() as AddressInfo).port;
+    try {
+      const home = await (await fetch(`http://127.0.0.1:${port}/`)).text();
+      expect(home).toContain("Verified");
+      expect(home).toContain("tests passed · 1 evidence, note missing");
+      const page = await (await fetch(`http://127.0.0.1:${port}/change/${commit}`)).text();
+      expect(page).toContain("agent:bot");
+      expect(page).toContain("unit tests");
+      expect(page).toContain("output not in this clone");
+      expect(page).toContain("graft sync");
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+  });
+
+  it("falls back to the trailer summary when the message has no evidence list", async () => {
+    await writeFile(join(dir, "x.ts"), "export const y = 1;\n");
+    sh(["add", "-A"]);
+    sh([
+      "commit",
+      "-q",
+      "-F",
+      "-",
+    ], dir, "old style\n\nGraft-Change: m4z1gs7jgdyp3pj2za9c\nGraft-Task: old style\nGraft-Author: agent:bot\nGraft-Evidence: 1 command, 1 passed\n");
+    const commit = sh(["rev-parse", "HEAD"]);
 
     const review = new Review({ repo: dir });
     const [item] = await review.queue();
@@ -188,10 +222,8 @@ describe("Review over a real repo", () => {
     try {
       const home = await (await fetch(`http://127.0.0.1:${port}/`)).text();
       expect(home).toContain("Note missing");
-      expect(home).toContain("note went missing");
       expect(home).toContain("1 command, 1 passed (summary only)");
       const page = await (await fetch(`http://127.0.0.1:${port}/change/${commit}`)).text();
-      expect(page).toContain("agent:bot");
       expect(page).toContain("graft sync");
     } finally {
       await new Promise<void>((r) => server.close(() => r()));
