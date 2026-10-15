@@ -18,6 +18,7 @@ import {
 import { OpenChangeStore } from "./store.js";
 import { DEFAULT_POLICY, POLICY_PATH, readPolicy } from "./policy.js";
 import { looksLikeSecretFile, redact } from "./redact.js";
+import { writeAgentsSection, type AgentsResult } from "./agents.js";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -60,6 +61,8 @@ export interface InitResult {
   /** True if .graft/policy.json was written. */
   policyWritten: boolean;
   remote?: string;
+  /** What happened to AGENTS.md; absent when `agents: false`. */
+  agents?: AgentsResult;
 }
 
 export interface SyncResult {
@@ -220,10 +223,10 @@ export class Graft {
 
   /**
    * Prepare a repository: make git carry notes through amend and rebase,
-   * fetch the notes ref alongside branches, and write a starter policy file.
-   * Safe to run more than once.
+   * fetch the notes ref alongside branches, write a starter policy file, and
+   * tell agents how to use Graft in AGENTS.md. Safe to run more than once.
    */
-  async init(opts: { remote?: string; force?: boolean } = {}): Promise<InitResult> {
+  async init(opts: { remote?: string; force?: boolean; agents?: boolean } = {}): Promise<InitResult> {
     const topLevel = await this.git.topLevel();
     const configured: string[] = [];
     const want: Array<[string, string]> = [
@@ -260,7 +263,8 @@ export class Graft {
       await writeFile(policyFile, JSON.stringify(DEFAULT_POLICY, null, 2) + "\n");
       policyWritten = true;
     }
-    return { topLevel, configured, policyWritten, remote: remote ?? undefined };
+    const agents = opts.agents === false ? undefined : await writeAgentsSection(topLevel);
+    return { topLevel, configured, policyWritten, remote: remote ?? undefined, agents };
   }
 
   /**
