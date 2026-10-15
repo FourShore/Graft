@@ -22,15 +22,10 @@ away. Graft captures it at the moment it is cheapest to capture.
 
 ## Install
 
-Graft needs Node 20+ and git. It is not on npm yet, so install it from source.
-These steps are safe to paste to a coding agent as-is.
+Graft needs Node 20+ and git.
 
 ```
-git clone https://github.com/FourShore/Graft.git ~/graft
-cd ~/graft
-npm install
-npm run build
-npm link --workspace packages/cli
+npm install -g @fourshore/graft
 ```
 
 That puts two commands on your PATH: `graft` and `graft-mcp`. Check with:
@@ -39,10 +34,8 @@ That puts two commands on your PATH: `graft` and `graft-mcp`. Check with:
 graft --version
 ```
 
-To update later: `cd ~/graft && git pull && npm install && npm run build`.
-To remove: `npm unlink -g @fourshore/graft`.
-
-Once the package is published, this becomes `npm install -g @fourshore/graft`.
+To update later, run the same install command again. These steps are safe to
+paste to a coding agent as-is.
 
 ### Set up a repository
 
@@ -236,8 +229,17 @@ node packages/cli/dist/cli.js review
 
 Releases: `npm run release -- patch` bumps all three packages to one version,
 commits and tags; `git push --follow-tags` then publishes them to npm from CI.
-The repository needs an `NPM_TOKEN` secret with publish rights to the
-`@fourshore` scope.
+CI authenticates with npm trusted publishing, so no token is involved.
+
+To work on Graft itself from a clone:
+
+```
+git clone https://github.com/FourShore/Graft.git
+cd Graft
+npm install
+npm run build
+npm link --workspace packages/cli   # makes `graft` point at this checkout
+```
 
 This repository uses Graft on itself. Run `graft log` here to see it.
 

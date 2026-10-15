@@ -26,8 +26,8 @@
     "code-review"
   ],
   "bin": {
-    "graft": "./dist/cli.js",
-    "graft-mcp": "./dist/mcp.js"
+    "graft": "dist/cli.js",
+    "graft-mcp": "dist/mcp.js"
   },
   "files": [
     "dist",
