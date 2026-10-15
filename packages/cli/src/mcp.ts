@@ -8,13 +8,16 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { createRequire } from "node:module";
 import { Graft, GraftError } from "@fourshore/graft-core";
+
+const { version } = createRequire(import.meta.url)("../package.json") as { version: string };
 
 const repoFlag = process.argv.indexOf("--repo");
 const repo = repoFlag !== -1 ? process.argv[repoFlag + 1] : process.cwd();
 const graft = new Graft(repo);
 
-const server = new McpServer({ name: "graft", version: "0.0.1" });
+const server = new McpServer({ name: "graft", version });
 
 const text = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] });
 
@@ -78,16 +81,18 @@ server.registerTool(
   "graft_land",
   {
     description:
-      "Commit the change with its record attached as git trailers and a git note. Stages all changes unless stageAll is false. Refuses to land without evidence unless allowNoEvidence is true.",
+      "Commit the change with its record attached as git trailers and a git note. Commits what is already staged plus any paths you name; pass stageAll only when you mean every change in the tree. Refuses to land without evidence unless allowNoEvidence is true, and refuses staged files that look like credentials (.env, *.pem, ...) unless allowSecrets is true.",
     inputSchema: {
       title: z.string().optional().describe("Commit title; defaults to the task"),
       plan: z.string().optional().describe("Final plan, if it changed"),
-      stageAll: z.boolean().optional().default(true),
+      paths: z.array(z.string()).optional().describe("Files to stage before committing"),
+      stageAll: z.boolean().optional().default(false).describe("Stage every change in the tree (git add -A)"),
       allowNoEvidence: z.boolean().optional().default(false),
+      allowSecrets: z.boolean().optional().default(false),
     },
   },
-  async ({ title, plan, stageAll, allowNoEvidence }) =>
-    guarded(() => graft.land({ title, plan, all: stageAll, allowNoEvidence })),
+  async ({ title, plan, paths, stageAll, allowNoEvidence, allowSecrets }) =>
+    guarded(() => graft.land({ title, plan, paths, all: stageAll, allowNoEvidence, allowSecrets })),
 );
 
 server.registerTool(

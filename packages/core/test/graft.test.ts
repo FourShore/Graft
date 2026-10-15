@@ -96,6 +96,49 @@ describe("land", () => {
     await graft.evidenceNote("checked");
     await expect(graft.land()).rejects.toThrow(/Nothing staged/);
   });
+
+  it("stages only the named paths", async () => {
+    await graft.start({ task: "t" });
+    await graft.evidenceNote("checked");
+    await writeFile(join(dir, "a.txt"), "a\n");
+    await writeFile(join(dir, "b.txt"), "b\n");
+    const { commit } = await graft.land({ paths: ["a.txt"] });
+    expect(sh(["show", "--format=", "--name-only", commit])).toBe("a.txt");
+    expect(sh(["status", "--porcelain"])).toBe("?? b.txt");
+  });
+
+  it("refuses staged files that look like credentials unless allowed", async () => {
+    await graft.start({ task: "t" });
+    await graft.evidenceNote("checked");
+    await writeFile(join(dir, "src.ts"), "x\n");
+    await writeFile(join(dir, ".env"), "SECRET=1\n");
+    await writeFile(join(dir, ".env.example"), "SECRET=\n");
+    await expect(graft.land({ all: true })).rejects.toThrow(/look like credentials: \.env\./);
+    sh(["rm", "-q", "--cached", ".env"]);
+    const { commit } = await graft.land();
+    expect(sh(["show", "--format=", "--name-only", commit]).split("\n").sort()).toEqual([".env.example", "src.ts"]);
+    await graft.start({ task: "t2" });
+    await graft.evidenceNote("checked");
+    const landed = await graft.land({ all: true, allowSecrets: true });
+    expect(sh(["show", "--format=", "--name-only", landed.commit])).toBe(".env");
+  });
+});
+
+describe("redaction", () => {
+  it("scrubs secret-looking env values from evidence output and notes", async () => {
+    process.env.GRAFT_TEST_API_KEY = "hunter2hunter2";
+    process.env.GRAFT_TEST_COLOR = "bluebluebluex";
+    try {
+      await graft.start({ task: "t" });
+      const ev = await graft.evidenceCommand("echo key=$GRAFT_TEST_API_KEY color=$GRAFT_TEST_COLOR");
+      expect(ev.kind === "command" && ev.output.trim()).toBe("key=[redacted GRAFT_TEST_API_KEY] color=bluebluebluex");
+      const note = await graft.evidenceNote("token was hunter2hunter2, oops");
+      expect(note.kind === "note" && note.text).toBe("token was [redacted GRAFT_TEST_API_KEY], oops");
+    } finally {
+      delete process.env.GRAFT_TEST_API_KEY;
+      delete process.env.GRAFT_TEST_COLOR;
+    }
+  });
 });
 
 describe("log and show", () => {
