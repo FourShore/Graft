@@ -8,7 +8,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { Graft, GraftError } from "./graft.js";
+import { Graft, GraftError } from "@fourshore/graft-core";
 
 const repoFlag = process.argv.indexOf("--repo");
 const repo = repoFlag !== -1 ? process.argv[repoFlag + 1] : process.cwd();

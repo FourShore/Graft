@@ -1,0 +1,44 @@
+{
+  "name": "@fourshore/graft-core",
+  "version": "0.0.1",
+  "description": "Graft change records on plain git: the record model, git plumbing, start/evidence/land/log.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/FourShore/Graft.git"
+  },
+  "homepage": "https://github.com/FourShore/Graft#readme",
+  "bugs": {
+    "url": "https://github.com/FourShore/Graft/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "git",
+    "version-control",
+    "ai-agents",
+    "mcp",
+    "code-review"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "test": "vitest run"
+  }
+}

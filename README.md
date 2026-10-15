@@ -8,9 +8,9 @@ It stores all of that in plain git, as commit trailers and a git note, so
 GitHub, `git log`, and every tool you already use keep working. Graft never
 replaces git; it is grafted onto it.
 
-> Status: Phase 0. The change record spec, a CLI, and an MCP server. See
-> [docs/CHANGE.md](docs/CHANGE.md) for the spec and the roadmap at the bottom
-> of this file for what comes next.
+> Status: Phase 0 plus a first review view. The change record spec, a CLI,
+> an MCP server, and `graft review`. See [docs/CHANGE.md](docs/CHANGE.md) for
+> the spec and the roadmap at the bottom of this file for what comes next.
 
 ## Why
 
@@ -77,6 +77,28 @@ Graft-Evidence: 1 command, 1 passed; 1 note
 
 plus the full record, with test output, as a note on `refs/notes/graft`.
 
+## Review it as a human
+
+```
+graft review
+```
+
+opens a local page (no server, no account) that lists recent changes ranked
+by how much attention they need, and for each change leads with the claim:
+task, plan, and evidence with pass/fail and output. The diff comes after,
+grouped into behavior, tests and mechanical files so a reviewer reads what
+matters and collapses the rest.
+
+| Badge | Meaning |
+| --- | --- |
+| Needs reading | Behavior changed and no passing test run is recorded |
+| Verified | Behavior changed and the recorded test run passed |
+| Mechanical | Only tests, docs, lockfiles or generated files changed |
+| No record | The commit has no Graft record at all |
+
+The badges are heuristics on paths and recorded evidence, and the page says
+so. They tell a reviewer where to start, not what to approve.
+
 ## Use it from an agent
 
 Graft ships an MCP server so agents call it as tools rather than shelling out:
@@ -137,17 +159,26 @@ Graft is being built in phases. Each one is useful on its own.
 | 0 | Change records on plain git: spec, CLI, MCP server | here |
 | 1 | Instant workspaces: copy-on-write checkouts handed to agents through an API, no clone | next |
 | 2 | Optimistic merge: concurrent landing by footprint, conflicts as structured objects an agent resolves, post-merge checks and auto-revert | |
-| 3 | History as a query service and intent-first review | |
+| 3 | History as a query service; review grows re-run evidence, approve-the-intent and a server-backed queue | started (`graft review`) |
 
 Phases 1 to 3 are a server. Phase 0 is deliberately server-free so the record
 format gets used, and fixed, before anything depends on it.
 
 ## Development
 
+This is an npm workspace with three packages:
+
+| Package | What |
+| --- | --- |
+| `packages/core` (`@fourshore/graft-core`) | The record model, git plumbing, start/evidence/land/log/sync |
+| `packages/review` (`@fourshore/graft-review`) | The review pages and local server |
+| `packages/cli` (`@fourshore/graft`) | The `graft` and `graft-mcp` binaries |
+
 ```
 npm install
-npm test
-npm run build
+npm test          # all packages
+npm run build     # tsc -b across the workspace
+node packages/cli/dist/cli.js review
 ```
 
 Releases: `npm version patch && git push --follow-tags` publishes to npm from
