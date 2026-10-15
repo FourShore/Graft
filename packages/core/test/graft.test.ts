@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -145,5 +145,121 @@ describe("log and show", () => {
     expect(found?.trailers["Graft-Task"]).toBe("feature work");
     // The note is keyed by SHA and does not follow by default; the trailers do.
     expect(found?.record).toBeNull();
+  });
+});
+
+describe("init", () => {
+  it("sets notes config, adds the fetch refspec, writes a policy file, and is idempotent", async () => {
+    const remote = await mkdtemp(join(tmpdir(), "graft-remote-"));
+    execFileSync("git", ["init", "-q", "--bare", remote]);
+    sh(["remote", "add", "origin", remote]);
+
+    const first = await graft.init();
+    expect(first.policyWritten).toBe(true);
+    expect(first.configured).toContain("notes.rewriteRef");
+    expect(first.configured).toContain("remote.origin.fetch");
+    expect(sh(["config", "--get", "notes.rewriteRef"])).toBe("refs/notes/graft");
+    expect(sh(["config", "--get-all", "remote.origin.fetch"])).toContain("+refs/notes/graft:refs/notes/graft");
+    const policy = JSON.parse(await readFile(join(dir, ".graft/policy.json"), "utf8"));
+    expect(policy).toEqual({ version: 1, requireEvidence: true });
+
+    const second = await graft.init();
+    expect(second.configured).toEqual([]);
+    expect(second.policyWritten).toBe(false);
+  });
+
+  it("works with no remote and reports it", async () => {
+    const r = await graft.init();
+    expect(r.remote).toBeUndefined();
+    expect(r.policyWritten).toBe(true);
+  });
+});
+
+describe("policy", () => {
+  it("requireEvidence: false lets a change land without evidence", async () => {
+    await mkdir(join(dir, ".graft"), { recursive: true });
+    await writeFile(join(dir, ".graft/policy.json"), JSON.stringify({ version: 1, requireEvidence: false }));
+    await graft.start({ task: "t" });
+    await writeFile(join(dir, "a.txt"), "a\n");
+    const { commit } = await graft.land({ all: true });
+    expect(commit).toHaveLength(40);
+  });
+
+  it("rejects an unknown policy version", async () => {
+    await mkdir(join(dir, ".graft"), { recursive: true });
+    await writeFile(join(dir, ".graft/policy.json"), JSON.stringify({ version: 2 }));
+    await graft.start({ task: "t" });
+    await graft.evidenceNote("ok");
+    await writeFile(join(dir, "a.txt"), "a\n");
+    await expect(graft.land({ all: true })).rejects.toThrow(/Unsupported policy version/);
+  });
+});
+
+describe("sync", () => {
+  it("pushes notes to a bare remote and a second clone receives the full record", async () => {
+    const remote = await mkdtemp(join(tmpdir(), "graft-remote-"));
+    execFileSync("git", ["init", "-q", "--bare", "-b", "main", remote]);
+    sh(["remote", "add", "origin", remote]);
+    await graft.init();
+
+    await graft.start({ task: "shared work" });
+    await writeFile(join(dir, "s.txt"), "s\n");
+    await graft.evidenceNote("ok");
+    const { record, commit } = await graft.land({ all: true });
+    sh(["push", "-q", "origin", "main"]);
+
+    const r1 = await graft.sync();
+    expect(r1).toMatchObject({ remote: "origin", pushed: true });
+
+    const clone = await mkdtemp(join(tmpdir(), "graft-clone-"));
+    execFileSync("git", ["clone", "-q", remote, clone]);
+    const other = new Graft(clone);
+    expect((await other.show(commit))?.record).toBeNull();
+    const r2 = await other.sync();
+    expect(r2).toMatchObject({ fetched: true, merged: true });
+    expect((await other.show(commit))?.record?.id).toBe(record.id);
+  });
+
+  it("merges records from two clones instead of overwriting", async () => {
+    const remote = await mkdtemp(join(tmpdir(), "graft-remote-"));
+    execFileSync("git", ["init", "-q", "--bare", "-b", "main", remote]);
+    sh(["remote", "add", "origin", remote]);
+    await writeFile(join(dir, "base.txt"), "b\n");
+    sh(["add", "-A"]);
+    sh(["commit", "-q", "-m", "base"]);
+    sh(["push", "-q", "origin", "main"]);
+
+    const clone = await mkdtemp(join(tmpdir(), "graft-clone-"));
+    execFileSync("git", ["clone", "-q", remote, clone]);
+    execFileSync("git", ["config", "user.email", "b@b"], { cwd: clone });
+    execFileSync("git", ["config", "user.name", "b"], { cwd: clone });
+    const other = new Graft(clone);
+
+    await graft.start({ task: "a" });
+    await writeFile(join(dir, "a.txt"), "a\n");
+    await graft.evidenceNote("ok");
+    const a = await graft.land({ all: true });
+    sh(["push", "-q", "origin", "main"]);
+    await graft.sync();
+
+    await other.start({ task: "b" });
+    await writeFile(join(clone, "b.txt"), "b\n");
+    await other.evidenceNote("ok");
+    const b = await other.land({ all: true });
+    execFileSync("git", ["push", "-q", "origin", "HEAD:refs/heads/other"], { cwd: clone });
+    await other.sync();
+
+    sh(["fetch", "-q", "origin"]);
+    await graft.sync();
+    expect((await graft.show(a.commit))?.record?.task).toBe("a");
+    expect((await graft.show(b.commit))?.record?.task).toBe("b");
+  });
+
+  it("show returns null for an unknown ref", async () => {
+    expect(await graft.show("deadbeef")).toBeNull();
+  });
+
+  it("fails clearly with no remote", async () => {
+    await expect(graft.sync()).rejects.toThrow(/No remote/);
   });
 });

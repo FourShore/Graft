@@ -8,7 +8,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { Graft, GraftError } from "./graft.js";
+import { Graft, GraftError } from "@fourshore/graft-core";
 
 const repoFlag = process.argv.indexOf("--repo");
 const repo = repoFlag !== -1 ? process.argv[repoFlag + 1] : process.cwd();
@@ -112,6 +112,15 @@ server.registerTool(
   "graft_show",
   { description: "Show one change by change id or commit SHA.", inputSchema: { ref: z.string() } },
   async ({ ref }) => guarded(() => graft.show(ref)),
+);
+
+server.registerTool(
+  "graft_sync",
+  {
+    description: "Fetch, merge and push change records (git notes) with the remote so other clones see full records.",
+    inputSchema: { remote: z.string().optional(), push: z.boolean().optional().default(true) },
+  },
+  async ({ remote, push }) => guarded(() => graft.sync({ remote, push })),
 );
 
 server.registerTool(
