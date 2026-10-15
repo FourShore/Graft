@@ -24,8 +24,10 @@ jobs:
           registry-url: https://registry.npmjs.org
           cache: npm
       - run: npm ci
-      - run: npm test
+      # Build first: the review tests import @fourshore/graft-core, which
+      # resolves to packages/core/dist.
       - run: npm run build
+      - run: npm test
       - run: npm publish --workspaces --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
