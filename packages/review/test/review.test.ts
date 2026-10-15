@@ -116,6 +116,12 @@ describe("triage", () => {
   it("is unrecorded without a record", () => {
     expect(triage(null, behavior).risk).toBe("unrecorded");
   });
+  it("treats policy behaviorFiles as behavior whatever the path says", () => {
+    const docsOnly = "diff --git" + SAMPLE.split("diff --git")[1];
+    const docs = parseDiff(docsOnly.replaceAll("src/a.ts", "docs/platinum-schema.md"));
+    expect(triage(record([]), docs, {}, "note", ["docs/*.md"]).risk).toBe("read");
+    expect(triage(record([]), docs, {}, "note", ["specs/**"]).risk).toBe("mechanical");
+  });
 });
 
 describe("Review over a real repo", () => {
@@ -199,6 +205,19 @@ describe("Review over a real repo", () => {
     } finally {
       await new Promise<void>((r) => server.close(() => r()));
     }
+  });
+
+  it("reads behaviorFiles from the repo's policy", async () => {
+    await mkdir(join(dir, ".graft"), { recursive: true });
+    await writeFile(join(dir, ".graft/policy.json"), JSON.stringify({ version: 1, requireEvidence: false, behaviorFiles: ["schema.md"] }));
+    await mkdir(join(dir, "docs"), { recursive: true });
+    await writeFile(join(dir, "docs/schema.md"), "# schema\n");
+    await graft.start({ task: "schema change" });
+    await graft.land({ all: true });
+    const [item] = await new Review({ repo: dir }).queue();
+    expect(item.triage.groups.behavior.map((f) => f.path)).toContain("docs/schema.md");
+    expect(item.triage.groups.mechanical).toEqual([]);
+    expect(item.triage.risk).toBe("read");
   });
 
   it("falls back to the trailer summary when the message has no evidence list", async () => {

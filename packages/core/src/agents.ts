@@ -31,7 +31,7 @@ With the Graft MCP server the same steps are \`graft_start\`, \`graft_evidence\`
 export interface AgentsResult {
   /** True if AGENTS.md was created or the section appended. */
   written: boolean;
-  /** True if AGENTS.md already mentioned Graft and was left alone. */
+  /** True if AGENTS.md or CLAUDE.md already mentioned Graft, so nothing was written. */
   alreadyThere: boolean;
   /** True if CLAUDE.md is absent or does not import AGENTS.md, so Claude Code won't read it. */
   claudeHint: boolean;
@@ -39,13 +39,19 @@ export interface AgentsResult {
 
 const MENTIONS_GRAFT = /graft start|graft_start/;
 
-/** Add the Graft section to AGENTS.md at `topLevel`, creating the file if needed. Idempotent. */
+/**
+ * Add the Graft section to AGENTS.md at `topLevel`, creating the file if
+ * needed. Idempotent: nothing is written when AGENTS.md or CLAUDE.md already
+ * mentions Graft, so a hook that runs `graft init` every session does not
+ * leave a new file behind in a repo that documents Graft in CLAUDE.md.
+ */
 export async function writeAgentsSection(topLevel: string): Promise<AgentsResult> {
   const agentsFile = join(topLevel, AGENTS_PATH);
   const existing = await readOrNull(agentsFile);
   const claude = await readOrNull(join(topLevel, CLAUDE_PATH));
   const claudeHint = !claude || !/^@AGENTS\.md\s*$/m.test(claude);
-  if (existing && MENTIONS_GRAFT.test(existing)) return { written: false, alreadyThere: true, claudeHint };
+  if (MENTIONS_GRAFT.test(existing ?? "")) return { written: false, alreadyThere: true, claudeHint };
+  if (MENTIONS_GRAFT.test(claude ?? "")) return { written: false, alreadyThere: true, claudeHint: false };
   const body = existing ? existing.replace(/\s*$/, "\n\n") + AGENTS_SECTION : AGENTS_SECTION;
   await writeFile(agentsFile, body);
   return { written: true, alreadyThere: false, claudeHint };

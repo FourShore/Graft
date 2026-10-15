@@ -16,7 +16,7 @@ const RISK_LABEL: Record<Risk, string> = {
 const RISK_HELP: Record<Risk, string> = {
   read: "Behavior changed and no passing test run is recorded. Read the diff.",
   verified: "Behavior changed and the recorded test run passed. Check the claim, skim the diff.",
-  mechanical: "Only tests, docs, lockfiles or generated files changed.",
+  mechanical: "Only tests, docs, lockfiles or generated files changed. List load-bearing docs under behaviorFiles in .graft/policy.json to review them as behavior.",
   partial:
     "The commit carries Graft trailers but neither the note nor an evidence list in its message is in this clone, so the evidence cannot be inspected. Run graft sync, then read the diff.",
   unrecorded: "This commit has no change record, so nothing is known about why or whether it was checked.",

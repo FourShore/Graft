@@ -1,5 +1,5 @@
 import { createServer, type Server } from "node:http";
-import { Graft, type LogEntry } from "@fourshore/graft-core";
+import { Graft, readPolicy, type LogEntry } from "@fourshore/graft-core";
 import { parseDiff } from "./diff.js";
 import { renderChange, renderQueue, type QueueItem } from "./html.js";
 import { RISK_ORDER, triage, type Triage } from "./triage.js";
@@ -54,7 +54,8 @@ export class Review {
 
   private async triageEntry(entry: LogEntry): Promise<ReviewedChange> {
     const files = parseDiff(await this.graft.diff(entry.commit));
-    return { entry, triage: triage(entry.record, files, entry.trailers, entry.recordSource) };
+    const policy = await readPolicy(await this.graft.git.topLevel());
+    return { entry, triage: triage(entry.record, files, entry.trailers, entry.recordSource, policy.behaviorFiles) };
   }
 }
 

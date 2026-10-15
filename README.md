@@ -105,7 +105,7 @@ Plan:
   Token bucket per key
 
 Evidence:
-  [pass] unit tests: npm test (12.3s)
+  [pass unit tests] npm test (12.3s)
   [note] Hit the endpoint 200 times; 429 after 100 as expected
 
 Graft-Change: m4z1gs7jgdyp3pj2za9c
@@ -180,6 +180,8 @@ to `"command"` to require at least one recorded command that exited 0, so a
 note alone (`--note "checked"`) doesn't pass.
 `secretFiles` adds repo-specific globs to the credential guard; `graft init`
 doesn't write it, add it when the repo has its own credential file names.
+`behaviorFiles` lists globs that `graft review` must treat as behavior even
+though they look mechanical, such as a schema or spec kept in Markdown.
 [docs/CHANGE.md](docs/CHANGE.md#where-it-lives) covers what survives rebases,
 amends, and squashes.
 
