@@ -94,7 +94,11 @@ graft land -a -m "Add rate limiting"
 ```
 
 `land` refuses to commit without evidence unless you say `--allow-no-evidence`.
-That is the point.
+That is the point. It commits what is staged; name files (`graft land src/
+api.ts`) or pass `-a` to stage first. It also refuses to land a staged file
+that looks like a credential (`.env`, `*.pem`, `*.key`, ...) unless you pass
+`--allow-secrets`, and scrubs evidence output and notes of any value held in an
+environment variable whose name looks secret.
 
 Then:
 
@@ -157,7 +161,9 @@ Tools: `graft_start`, `graft_plan`, `graft_evidence`, `graft_note`,
 `graft_land`, `graft_sync`, `graft_status`, `graft_log`, `graft_show`,
 `graft_abandon`.
 `graft_log` is the one agents should call first: it is how they learn why the
-code is the way it is before touching it.
+code is the way it is before touching it. `graft_land` commits what is staged
+plus any `paths` it is given; `stageAll` is off by default so an agent cannot
+sweep a stray `.env` into history by accident.
 
 ## Use it from code
 

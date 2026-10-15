@@ -99,17 +99,21 @@ program
 
 program
   .command("land")
-  .description("commit the staged changes with the record attached")
+  .description("commit the staged changes (or the named paths) with the record attached")
+  .argument("[paths...]", "files to stage before committing")
   .option("-m, --title <title>", "commit title (default: the task)")
   .option("-a, --all", "stage all changes first")
   .option("--plan <plan>", "final plan")
   .option("--allow-no-evidence", "land even though nothing was verified")
-  .action(async (o) => {
+  .option("--allow-secrets", "land even though a staged file looks like a credential")
+  .action(async (paths: string[], o) => {
     const { record, commit } = await graft().land({
       title: o.title,
       all: o.all,
+      paths,
       plan: o.plan,
       allowNoEvidence: o.allowNoEvidence,
+      allowSecrets: o.allowSecrets,
     });
     out({ record, commit }, `Landed ${record.id} as ${commit.slice(0, 10)}`);
   });

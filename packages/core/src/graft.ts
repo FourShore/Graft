@@ -14,6 +14,7 @@ import {
 } from "./record.js";
 import { OpenChangeStore } from "./store.js";
 import { DEFAULT_POLICY, POLICY_PATH, readPolicy } from "./policy.js";
+import { looksLikeSecretFile, redact } from "./redact.js";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -33,8 +34,12 @@ export interface StartOptions {
 export interface LandOptions {
   /** Commit title. Defaults to the task, truncated to 72 chars. */
   title?: string;
-  /** Stage everything (git add -A) before committing. */
+  /** Stage everything (git add -A) before committing. Off by default; prefer `paths`. */
   all?: boolean;
+  /** Stage these paths (git add -- <paths>) before committing. */
+  paths?: string[];
+  /** Land even though a staged file looks like a credential (.env, *.pem, ...). */
+  allowSecrets?: boolean;
   /** Final plan, overriding whatever was recorded at start. */
   plan?: string;
   /** Allow landing with no evidence recorded. */
@@ -133,7 +138,7 @@ export class Graft {
       command,
       exitCode,
       durationMs: Date.now() - started,
-      output: capOutput(output),
+      output: capOutput(redact(output)),
       label,
     };
     open.evidence.push(ev);
@@ -145,7 +150,7 @@ export class Graft {
   async evidenceNote(text: string, label?: string): Promise<Evidence> {
     const open = await this.requireOpen();
     if (!text.trim()) throw new GraftError("Evidence text is required.");
-    const ev: Evidence = { kind: "note", at: new Date().toISOString(), text: text.trim(), label };
+    const ev: Evidence = { kind: "note", at: new Date().toISOString(), text: redact(text.trim()), label };
     open.evidence.push(ev);
     await this.store.write(open);
     return ev;
@@ -161,9 +166,18 @@ export class Graft {
         "No evidence recorded. Run `graft evidence -- <command>` or pass --allow-no-evidence.",
       );
     }
+    if (opts.paths?.length) await this.git.run(["add", "--", ...opts.paths]);
     if (opts.all) await this.git.run(["add", "-A"]);
-    if (!(await this.git.hasStagedChanges())) {
-      throw new GraftError("Nothing staged to commit. Stage files or pass --all.");
+    const staged = await this.git.stagedFiles();
+    if (staged.length === 0) {
+      throw new GraftError("Nothing staged to commit. Stage files, name paths, or pass --all.");
+    }
+    const suspicious = staged.filter(looksLikeSecretFile);
+    if (suspicious.length > 0 && !opts.allowSecrets) {
+      throw new GraftError(
+        `Refusing to land: staged files look like credentials: ${suspicious.join(", ")}. ` +
+          "Unstage them (git restore --staged <file>) or pass --allow-secrets if they are not.",
+      );
     }
 
     open.landedAt = new Date().toISOString();

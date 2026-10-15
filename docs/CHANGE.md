@@ -184,8 +184,11 @@ These are deliberate omissions, not oversights. Each is a candidate for version
   the model.
 - **Footprint.** The files and symbols a change touched, declared up front, for
   concurrent landing in a Graft server.
-- **Redaction.** Tasks and evidence output can contain secrets. Version 1 trusts
-  the author; a server must not.
+- **Redaction, beyond the basics.** Version 1 scrubs evidence output and notes
+  of the values of environment variables whose names look secret (`SECRET`,
+  `TOKEN`, `PASSWORD`, `API_KEY`, ...), and `land` refuses files that look like
+  credentials (`.env`, `*.pem`, ...) unless told otherwise. Pattern-based
+  scanning of the diff itself is for a server.
 - **Signing.** Nothing stops a record from lying about its author or evidence.
   A server that runs the evidence commands itself is the real fix.
 - **Multiple open changes per worktree.** One at a time keeps the model simple

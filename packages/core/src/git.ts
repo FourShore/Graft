@@ -59,8 +59,13 @@ export class Git {
   }
 
   async hasStagedChanges(): Promise<boolean> {
+    return (await this.stagedFiles()).length > 0;
+  }
+
+  /** Paths staged for the next commit, relative to the working tree root. */
+  async stagedFiles(): Promise<string[]> {
     const out = await this.run(["diff", "--cached", "--name-only"]);
-    return out.length > 0;
+    return out.split("\n").filter(Boolean);
   }
 
   async hasWorkingTreeChanges(): Promise<boolean> {
