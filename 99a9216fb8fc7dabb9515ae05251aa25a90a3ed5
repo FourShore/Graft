@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "id": "m50apeqxeq95v6hewwxw",
+  "task": "Release v0.0.7: bump every package to 0.0.7",
+  "plan": "scripts/release.mjs rewrites the version fields and the lockfile; the Release workflow publishes on the tag",
+  "author": {
+    "kind": "human",
+    "name": "zachrasavanh"
+  },
+  "startedAt": "2026-10-15T17:45:26.013Z",
+  "evidence": [
+    {
+      "kind": "command",
+      "at": "2026-10-15T17:45:54.355Z",
+      "command": "npm run build && npm test",
+      "exitCode": 0,
+      "durationMs": 28164,
+      "output": "\n> graft-monorepo@0.0.7 build\n> tsc -b packages/core packages/review packages/cli\n\n\n> graft-monorepo@0.0.7 test\n> vitest run\n\n\n RUN  v3.2.7 /Users/zachrasavanh/Documents/Git/Graft\n\nRemoving note for object 6a5f3c0d2924fd4b66b72b026e85267a34a0bd52\n ✓ packages/review/test/review.test.ts (14 tests) 7633ms\n   ✓ Review over a real repo > queues changes by risk and serves pages  3028ms\n   ✓ Review over a real repo > reads the evidence list from the commit message when the note is missing  1143ms\n   ✓ Review over a real repo > reads behaviorFiles from the repo's policy  607ms\n   ✓ Review over a real repo > falls back to the trailer summary when the message has no evidence list  755ms\n   ✓ Review over a real repo > escapes HTML in tasks and diffs  831ms\nRemoving note for object 723af721a145a4dc1fa496c2cfd2299777730938\nRemoving note for object 6ec40f20dec6a2483fea500944e09c11a98bf494\n ✓ packages/core/test/graft.test.ts (30 tests) 23204ms\n   ✓ start / status / abandon > opens one change at a time  536ms\n   ✓ evidence > records a command's exit code and output  587ms\n   ✓ land > writes trailers and a note, then clears the open change  1032ms\n   ✓ land > refuses to land without evidence unless allowed  880ms\n   ✓ land > refuses to land with nothing staged  384ms\n   ✓ land > stages only the named paths  608ms\n   ✓ land > refuses staged files that look like credentials unless allowed  1093ms\n   ✓ extra trailers > appends them after Graft's own and rejects bad or reserved ones  810ms\n   ✓ redaction > scrubs secret-looking env values from evidence output and notes  323ms\n   ✓ log and show > returns changes with records and finds by id  1178ms\n   ✓ log and show > survives a rebase: the id in the trailer follows the commit  989ms\n   ✓ log and show > rebuilds a record from the commit message when the note is missing  1049ms\n   ✓ log and show > reads back unlabeled entries that contain ': ' exactly, and strips brackets from labels  809ms\n   ✓ init > sets notes config, adds the fetch refspec, writes a policy file, and is idempotent  797ms\n   ✓ init > writes the agent instructions to AGENTS.md once and reports the CLAUDE.md hint  798ms\n   ✓ init > leaves AGENTS.md alone when CLAUDE.md already covers Graft  441ms\n   ✓ init > creates AGENTS.md when there is none  434ms\n   ✓ init > works with no remote and reports it  421ms\n   ✓ policy > requireEvidence: false lets a change land without evidence  450ms\n   ✓ policy > requireEvidence: \"command\" refuses notes-only evidence  848ms\n   ✓ policy > rejects an unknown policy version  341ms\n   ✓ sync > pushes notes to a bare remote and a second clone receives the full record  2270ms\n   ✓ sync > merges records from two clones instead of overwriting  3165ms\n   ✓ sync > reports a refused notes push instead of failing  1201ms\n   ✓ policy secretFiles > extends the credential guard with repo-specific globs  837ms\n\n Test Files  2 passed (2)\n      Tests  44 passed (44)\n   Start at  12:45:29\n   Duration  24.46s (transform 491ms, setup 0ms, collect 662ms, tests 30.84s, environment 1ms, prepare 367ms)\n\n",
+      "label": "build and tests"
+    }
+  ],
+  "landedAt": "2026-10-15T17:45:54.592Z",
+  "commit": "99a9216fb8fc7dabb9515ae05251aa25a90a3ed5"
+}
