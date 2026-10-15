@@ -9,6 +9,12 @@ export interface Policy {
   version: 1;
   /** Refuse to land a change that has no evidence. Default true. */
   requireEvidence: boolean;
+  /**
+   * Extra files that must not be landed without --allow-secrets, as globs
+   * relative to the repo root ("nova.json", "config/*.secret", "keys/**").
+   * Added to the built-in list (.env, *.pem, ...).
+   */
+  secretFiles?: string[];
 }
 
 export const DEFAULT_POLICY: Policy = { version: 1, requireEvidence: true };

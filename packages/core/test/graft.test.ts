@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -147,14 +147,18 @@ describe("redaction", () => {
     process.env.GRAFT_TEST_API_KEY = "hunter2hunter2";
     process.env.GRAFT_TEST_COLOR = "bluebluebluex";
     try {
+      process.env.GRAFT_TEST_AUTH_SERVER_URI = "https://auth.example.com";
       await graft.start({ task: "t" });
-      const ev = await graft.evidenceCommand("echo key=$GRAFT_TEST_API_KEY color=$GRAFT_TEST_COLOR");
-      expect(ev.kind === "command" && ev.output.trim()).toBe("key=[redacted GRAFT_TEST_API_KEY] color=bluebluebluex");
+      const ev = await graft.evidenceCommand("echo key=$GRAFT_TEST_API_KEY color=$GRAFT_TEST_COLOR uri=$GRAFT_TEST_AUTH_SERVER_URI");
+      expect(ev.kind === "command" && ev.output.trim()).toBe(
+        "key=[redacted GRAFT_TEST_API_KEY] color=bluebluebluex uri=https://auth.example.com",
+      );
       const note = await graft.evidenceNote("token was hunter2hunter2, oops");
       expect(note.kind === "note" && note.text).toBe("token was [redacted GRAFT_TEST_API_KEY], oops");
     } finally {
       delete process.env.GRAFT_TEST_API_KEY;
       delete process.env.GRAFT_TEST_COLOR;
+      delete process.env.GRAFT_TEST_AUTH_SERVER_URI;
     }
   });
 });
@@ -322,5 +326,43 @@ describe("sync", () => {
 
   it("fails clearly with no remote", async () => {
     await expect(graft.sync()).rejects.toThrow(/No remote/);
+  });
+
+  it("reports a refused notes push instead of failing", async () => {
+    const remote = await mkdtemp(join(tmpdir(), "graft-remote-"));
+    execFileSync("git", ["init", "-q", "--bare", remote]);
+    await writeFile(join(remote, "hooks", "pre-receive"), "#!/bin/sh\necho 'notes refused' >&2\nexit 1\n", { mode: 0o755 });
+    sh(["remote", "add", "origin", remote]);
+    await graft.start({ task: "t" });
+    await graft.evidenceNote("checked");
+    await writeFile(join(dir, "a.txt"), "a\n");
+    await graft.land({ all: true });
+    const r = await graft.sync();
+    expect(r.pushed).toBe(false);
+    expect(r.pushError).toMatch(/notes refused/);
+  });
+});
+
+describe("policy secretFiles", () => {
+  it("extends the credential guard with repo-specific globs", async () => {
+    await mkdir(join(dir, ".graft"), { recursive: true });
+    await writeFile(
+      join(dir, ".graft/policy.json"),
+      JSON.stringify({ version: 1, requireEvidence: true, secretFiles: ["nova.json", "config/*.secret"] }),
+    );
+    await graft.start({ task: "t" });
+    await graft.evidenceNote("checked");
+    await writeFile(join(dir, "nova.json"), "{}\n");
+    await expect(graft.land({ all: true })).rejects.toThrow(/credentials: nova\.json/);
+    sh(["rm", "-q", "--cached", "nova.json"]);
+    await rm(join(dir, "nova.json"));
+    await mkdir(join(dir, "config"), { recursive: true });
+    await writeFile(join(dir, "config/db.secret"), "x\n");
+    await writeFile(join(dir, "config/db.json"), "x\n");
+    await expect(graft.land({ all: true })).rejects.toThrow(/config\/db\.secret/);
+    sh(["rm", "-q", "--cached", "config/db.secret"]);
+    await rm(join(dir, "config/db.secret"));
+    const { commit } = await graft.land();
+    expect(sh(["show", "--format=", "--name-only", commit]).split("\n").sort()).toEqual([".graft/policy.json", "config/db.json"]);
   });
 });

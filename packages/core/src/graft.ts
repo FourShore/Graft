@@ -62,6 +62,8 @@ export interface SyncResult {
   fetched: boolean;
   merged: boolean;
   pushed: boolean;
+  /** Why the push was refused, when it was. Fetch and merge still happened. */
+  pushError?: string;
 }
 
 export interface LandedChange {
@@ -174,7 +176,7 @@ export class Graft {
     if (staged.length === 0) {
       throw new GraftError("Nothing staged to commit. Stage files, name paths, or pass --all.");
     }
-    const suspicious = staged.filter(looksLikeSecretFile);
+    const suspicious = staged.filter((p) => looksLikeSecretFile(p, policy.secretFiles));
     if (suspicious.length > 0 && !opts.allowSecrets) {
       throw new GraftError(
         `Refusing to land: staged files look like credentials: ${suspicious.join(", ")}. ` +
@@ -267,11 +269,18 @@ export class Graft {
       merged = true;
     }
     let pushed = false;
+    let pushError: string | undefined;
     if (opts.push !== false && (await this.refExists(NOTES_REF))) {
-      await this.git.run(["push", "-q", remote, `${NOTES_REF}:${NOTES_REF}`]);
-      pushed = true;
+      try {
+        await this.git.run(["push", "-q", remote, `${NOTES_REF}:${NOTES_REF}`]);
+        pushed = true;
+      } catch (err) {
+        // Some hosts (and some agent sandboxes) refuse pushes to refs/notes.
+        // The merge above still happened, so this is a warning, not a failure.
+        pushError = (err as Error).message;
+      }
     }
-    return { remote, fetched, merged, pushed };
+    return { remote, fetched, merged, pushed, pushError };
   }
 
   /** History as changes. Commits without a Graft record are included with record: null. */

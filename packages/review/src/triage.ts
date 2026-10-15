@@ -55,9 +55,11 @@ export function judgeEvidence(evidence: Evidence[]): EvidenceVerdict {
  *   read:       behavior changed and nothing proves it works
  *   verified:   behavior changed and a test run passed
  *   mechanical: no behavior files changed
+ *   partial:    the commit has Graft trailers but the full record (note) is
+ *               not in this clone, so the evidence cannot be inspected
  *   unrecorded: commit has no change record at all
  */
-export type Risk = "read" | "verified" | "mechanical" | "unrecorded";
+export type Risk = "read" | "verified" | "mechanical" | "partial" | "unrecorded";
 
 export interface Triage {
   risk: Risk;
@@ -65,16 +67,20 @@ export interface Triage {
   verdict: EvidenceVerdict;
 }
 
-export function triage(record: ChangeRecord | null, files: DiffFile[]): Triage {
+export function triage(
+  record: ChangeRecord | null,
+  files: DiffFile[],
+  trailers: Record<string, string> = {},
+): Triage {
   const groups: Record<FileGroup, DiffFile[]> = { behavior: [], tests: [], mechanical: [] };
   for (const f of files) groups[groupFile(f)].push(f);
   const verdict = judgeEvidence(record?.evidence ?? []);
   let risk: Risk;
-  if (!record) risk = "unrecorded";
+  if (!record) risk = trailers["Graft-Change"] ? "partial" : "unrecorded";
   else if (groups.behavior.length === 0) risk = "mechanical";
   else if (verdict.testsPassed) risk = "verified";
   else risk = "read";
   return { risk, groups, verdict };
 }
 
-export const RISK_ORDER: Risk[] = ["read", "unrecorded", "verified", "mechanical"];
+export const RISK_ORDER: Risk[] = ["read", "partial", "unrecorded", "verified", "mechanical"];

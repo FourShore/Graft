@@ -10,7 +10,9 @@
  * Neither is a substitute for a secret scanner; they catch the common case.
  */
 
-const SECRET_ENV_NAME = /(SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|PRIVATE_?KEY|CREDENTIAL|AUTH)/i;
+// Names that hold a secret, not names that merely mention auth: AUTH_SERVER_URI
+// is a public address, AUTH_TOKEN is caught by TOKEN.
+const SECRET_ENV_NAME = /(SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|PRIVATE_?KEY|ACCESS_?KEY|SIGNING_?KEY|CREDENTIALS?)(_|$)/i;
 const MIN_SECRET_LENGTH = 8;
 
 /** Values of environment variables that look like secrets, longest first. */
@@ -41,9 +43,24 @@ const SECRET_FILE_PATTERNS: RegExp[] = [
   /(^|\/)\.(npmrc|pypirc|netrc)$/,
 ];
 
-/** True if a path looks like it holds credentials rather than code. */
-export function looksLikeSecretFile(path: string): boolean {
+/**
+ * True if a path looks like it holds credentials rather than code. `extra`
+ * are repo-specific globs from policy: a pattern without a slash matches the
+ * file name anywhere in the tree, one with a slash is anchored at the root.
+ */
+export function looksLikeSecretFile(path: string, extra: string[] = []): boolean {
   const p = path.replace(/\\/g, "/");
   if (/(^|\/)\.env\.(example|sample|template)$/.test(p)) return false;
-  return SECRET_FILE_PATTERNS.some((re) => re.test(p));
+  return SECRET_FILE_PATTERNS.some((re) => re.test(p)) || extra.some((g) => globToRegExp(g).test(p));
+}
+
+/** Minimal glob: `**` spans directories, `*` and `?` stay within one segment. */
+export function globToRegExp(glob: string): RegExp {
+  const body = glob
+    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*\*\/?/g, "\u0000")
+    .replace(/\*/g, "[^/]*")
+    .replace(/\?/g, "[^/]")
+    .replace(/\u0000/g, "(?:.*/)?");
+  return new RegExp(glob.includes("/") ? `^${body}$` : `(^|/)${body}$`);
 }
