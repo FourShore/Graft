@@ -1,13 +1,15 @@
 # Graft
 
-Graft adds a change record to every git commit: the task the author was given,
-the plan, who (or which agent) did the work, and the commands they ran to check
-it. The record lives in the commit message as trailers and in a git note, so
-nothing about git, GitHub, or your existing tools changes.
+**Git records what changed. Graft records why, and whether it was tested.**
 
-It exists because agents now write most of the code in a lot of repos, and the
-question six weeks later is rarely "what changed" but "why, and did anyone test
-it". Git doesn't keep that. Graft does.
+Every commit gets a record: the task the author was given, the plan, who (or
+which agent) did the work, and the commands they ran to check it. It's stored
+as commit trailers and a git note, so git, GitHub, and your tools keep working
+as they are.
+
+Agents now write most of the code in a lot of repos. Six weeks later the
+question is rarely "what changed" but "why, and did anyone test it". Git
+doesn't keep that. Graft does.
 
 Status: early. The record format, a CLI, an MCP server, and a local review page
 work and are used on this repo. See [docs/CHANGE.md](docs/CHANGE.md) for the
