@@ -19,6 +19,13 @@ export interface Policy {
    * Added to the built-in list (.env, *.pem, ...).
    */
   secretFiles?: string[];
+  /**
+   * Files the review view must treat as behavior even though its heuristics
+   * would file them as mechanical or tests: globs relative to the repo root,
+   * for example a schema written in Markdown ("docs/platinum-schema.md",
+   * "specs/**"). Same glob rules as secretFiles.
+   */
+  behaviorFiles?: string[];
 }
 
 export const DEFAULT_POLICY: Policy = { version: 1, requireEvidence: true };

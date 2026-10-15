@@ -12,7 +12,7 @@
 
 // Names that hold a secret, not names that merely mention auth: AUTH_SERVER_URI
 // is a public address, AUTH_TOKEN is caught by TOKEN.
-const SECRET_ENV_NAME = /(SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|PRIVATE_?KEY|ACCESS_?KEY|SIGNING_?KEY|CREDENTIALS?)(_|$)/i;
+const SECRET_ENV_NAME = /(SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|PRIVATE_?KEY|ACCESS_?KEY|SIGNING_?KEY|CREDENTIALS?)(_|$)|(^|_)KEY$/i;
 const MIN_SECRET_LENGTH = 8;
 
 /** Values of environment variables that look like secrets, longest first. */

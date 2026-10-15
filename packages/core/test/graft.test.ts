@@ -149,18 +149,22 @@ describe("redaction", () => {
   it("scrubs secret-looking env values from evidence output and notes", async () => {
     process.env.GRAFT_TEST_API_KEY = "hunter2hunter2";
     process.env.GRAFT_TEST_COLOR = "bluebluebluex";
+    process.env.GRAFT_TEST_SEND_GRID_KEY = "SG.abcdefghij";
     try {
       process.env.GRAFT_TEST_AUTH_SERVER_URI = "https://auth.example.com";
       await graft.start({ task: "t" });
-      const ev = await graft.evidenceCommand("echo key=$GRAFT_TEST_API_KEY color=$GRAFT_TEST_COLOR uri=$GRAFT_TEST_AUTH_SERVER_URI");
+      const ev = await graft.evidenceCommand(
+        "echo key=$GRAFT_TEST_API_KEY color=$GRAFT_TEST_COLOR uri=$GRAFT_TEST_AUTH_SERVER_URI sg=$GRAFT_TEST_SEND_GRID_KEY",
+      );
       expect(ev.kind === "command" && ev.output.trim()).toBe(
-        "key=[redacted GRAFT_TEST_API_KEY] color=bluebluebluex uri=https://auth.example.com",
+        "key=[redacted GRAFT_TEST_API_KEY] color=bluebluebluex uri=https://auth.example.com sg=[redacted GRAFT_TEST_SEND_GRID_KEY]",
       );
       const note = await graft.evidenceNote("token was hunter2hunter2, oops");
       expect(note.kind === "note" && note.text).toBe("token was [redacted GRAFT_TEST_API_KEY], oops");
     } finally {
       delete process.env.GRAFT_TEST_API_KEY;
       delete process.env.GRAFT_TEST_COLOR;
+      delete process.env.GRAFT_TEST_SEND_GRID_KEY;
       delete process.env.GRAFT_TEST_AUTH_SERVER_URI;
     }
   });
@@ -224,7 +228,7 @@ describe("log and show", () => {
     await graft.evidenceNote("looked at it: twice", "manual");
     const { record, commit } = await graft.land({ all: true });
     const body = sh(["log", "-1", "--format=%B"]);
-    expect(body).toMatch(/Evidence:\n  \[pass\] unit tests: true \(\d+\.\ds\)\n  \[fail 3\] exit 3 \(\d+\.\ds\)\n  \[note\] manual: looked at it: twice\n/);
+    expect(body).toMatch(/Evidence:\n  \[pass unit tests\] true \(\d+\.\ds\)\n  \[fail 3\] exit 3 \(\d+\.\ds\)\n  \[note manual\] looked at it: twice\n/);
 
     const withNote = await graft.show(commit);
     expect(withNote?.recordSource).toBe("note");
@@ -243,6 +247,22 @@ describe("log and show", () => {
       { kind: "note", text: "looked at it: twice", label: "manual" },
     ]);
     expect((await graft.log())[0].recordSource).toBe("message");
+  });
+
+  it("reads back unlabeled entries that contain ': ' exactly, and strips brackets from labels", async () => {
+    await graft.start({ task: "colons" });
+    await writeFile(join(dir, "a.txt"), "a\n");
+    await graft.evidenceCommand("echo status: ok");
+    await graft.evidenceNote("Docs only: nova.exe not rebuilt");
+    await graft.evidenceCommand("true", "step [1]: lint");
+    const { commit } = await graft.land({ all: true });
+    sh(["notes", "--ref=refs/notes/graft", "remove", commit]);
+    const rebuilt = (await graft.show(commit))?.record?.evidence;
+    expect(rebuilt).toMatchObject([
+      { kind: "command", command: "echo status: ok", label: undefined },
+      { kind: "note", text: "Docs only: nova.exe not rebuilt", label: undefined },
+      { kind: "command", command: "true", label: "step 1: lint" },
+    ]);
   });
 });
 
@@ -281,6 +301,13 @@ describe("init", () => {
     expect(await readFile(join(dir, "AGENTS.md"), "utf8")).toBe(agents);
 
     expect((await graft.init({ agents: false })).agents).toBeUndefined();
+  });
+
+  it("leaves AGENTS.md alone when CLAUDE.md already covers Graft", async () => {
+    await writeFile(join(dir, "CLAUDE.md"), "## Version control\n\nRun `graft start` before editing.\n");
+    const r = await graft.init();
+    expect(r.agents).toEqual({ written: false, alreadyThere: true, claudeHint: false });
+    await expect(readFile(join(dir, "AGENTS.md"), "utf8")).rejects.toThrow();
   });
 
   it("creates AGENTS.md when there is none", async () => {

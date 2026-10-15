@@ -3,10 +3,14 @@
 // each other by that version, commit, and tag. Pushing the tag triggers the
 // Release workflow, which publishes all three packages to npm.
 //
+// The commit is landed with Graft itself (build and tests as evidence), so
+// the release is a recorded change like every other commit in this repo.
+//
 //   npm run release -- patch     (or minor, major, or an exact version)
 //   git push --follow-tags
 import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
+import { Graft } from "../packages/core/dist/index.js";
 
 const bump = process.argv[2];
 if (!bump) {
@@ -38,8 +42,28 @@ for (const file of ["package.json", ...workspaces.map((w) => `${w}/package.json`
 }
 run("npm", ["install", "--package-lock-only", "--no-audit", "--no-fund"]);
 
-run("git", ["add", "package.json", "package-lock.json", ...workspaces.map((w) => `${w}/package.json`)]);
-run("git", ["commit", "-q", "-m", `v${version}`]);
+const graft = new Graft(process.cwd());
+if (await graft.status()) {
+  console.error("a Graft change is already open; land or abandon it before releasing");
+  process.exit(1);
+}
+await graft.start({
+  task: `Release v${version}: bump every package to ${version}`,
+  plan: "scripts/release.mjs rewrites the version fields and the lockfile; the Release workflow publishes on the tag",
+  author: { kind: "human", name: process.env.GRAFT_AUTHOR ?? process.env.USER ?? "release" },
+});
+console.log("running build and tests as evidence...");
+const check = await graft.evidenceCommand("npm run build && npm test", "build and tests");
+if (check.exitCode !== 0) {
+  await graft.abandon();
+  console.error(check.output);
+  console.error("build or tests failed; nothing committed (the version files are still modified)");
+  process.exit(1);
+}
+await graft.land({
+  title: `v${version}`,
+  paths: ["package.json", "package-lock.json", ...workspaces.map((w) => `${w}/package.json`)],
+});
 run("git", ["tag", "-a", `v${version}`, "-m", `v${version}`]);
 console.log(`v${version} committed and tagged. Now: git push --follow-tags`);
 

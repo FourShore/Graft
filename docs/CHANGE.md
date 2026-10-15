@@ -104,7 +104,7 @@ Plan:
   Token bucket per API key in middleware; 429 with Retry-After.
 
 Evidence:
-  [pass] unit tests: npm test (12.3s)
+  [pass unit tests] npm test (12.3s)
   [note] Hit the endpoint 200 times; 429 after 100 as expected
 
 Graft-Change: m4z1gs7jgdyp3pj2za9c
@@ -120,19 +120,21 @@ Graft-Evidence: 1 command, 1 passed; 1 note
 | `Graft-Task` | The task, collapsed to one line. |
 | `Graft-Author` | `<kind>:<name>`. |
 | `Graft-Model` | Present only for agents with a known model. |
+| `Graft-Evidence` | Human-readable summary of the evidence list. |
 
 Other trailers can be added at land time (`graft land --trailer "Co-Authored-By: ..."`,
 or `trailers` on `graft_land`); they go after Graft's own. The `Graft-` prefix
 is reserved.
-| `Graft-Evidence` | Human-readable summary of the evidence list. |
 
 The commit title is the task truncated to 72 characters unless the author gives
 a better one. The plan, if any, goes in the body under `Plan:` so it reads well
-in any git tool. The evidence list goes under `Evidence:`, one line per entry:
-`[pass]` or `[fail <exit code>]` followed by the optional label, the command and
-its duration, or `[note]` followed by the optional label and the text. Commands
-and notes are collapsed to one line and cut at 200 characters. Output is not in
-the message.
+in any git tool. The evidence list goes under `Evidence:`, one line per entry.
+The bracket holds the status, `pass`, `fail <exit code>` or `note`, and then
+the label if there is one (`[pass unit tests]`, `[note manual]`); after it
+come the command and its duration, or the note text. Keeping the label inside
+the bracket means a command or note containing `: ` is read back exactly.
+Labels lose any square brackets; commands and notes are collapsed to one line
+and cut at 200 characters. Output is not in the message.
 
 Readers rebuild a record from the message alone when the note is missing
 (`graft log`, `graft show`, `graft review` all do): the trailers give the id,
@@ -187,7 +189,10 @@ alone does not satisfy the gate, since a note is only a claim. `secretFiles`, op
 list of globs relative to the root (`"nova.json"`, `"config/*.secret"`,
 `"keys/**"`) that `land` refuses to commit without `--allow-secrets`, on top
 of the built-in list (`.env`, `*.pem`, `*.key`, ...). A glob without a slash
-matches a file name anywhere in the tree. Readers
+matches a file name anywhere in the tree. `behaviorFiles`, optional, is a
+list of globs (same rules) for files `graft review` must group as behavior
+even though its heuristics would file them under mechanical, such as a schema
+or a spec kept in Markdown. Readers
 reject unknown policy versions. The file is committed, so changing policy is a
 reviewed change like any other.
 

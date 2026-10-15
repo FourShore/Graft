@@ -135,24 +135,30 @@ const MESSAGE_LINE_CAP = 200;
 /**
  * The evidence list as commit-message lines: one per entry, so the record
  * travels with the commit even when the note does not. Output stays in the
- * note; the message carries the command, its exit code and duration.
+ * note; the message carries the command, its exit code and duration. The
+ * status and the optional label share the bracket, so a command or note that
+ * contains ": " is never mistaken for a label.
  *
- *   [pass] unit tests: npm test (12.3s)
+ *   [pass unit tests] npm test (12.3s)
  *   [fail 1] npm run lint (0.4s)
  *   [note] manually verified in browser
  */
 export function evidenceLines(evidence: Evidence[]): string[] {
   return evidence.map((ev) => {
-    const label = ev.label ? `${oneLine(ev.label)}: ` : "";
-    if (ev.kind === "note") return `  [note] ${label}${clip(oneLine(ev.text))}`;
+    const label = ev.label ? ` ${bracketSafe(ev.label)}` : "";
+    if (ev.kind === "note") return `  [note${label}] ${clip(oneLine(ev.text))}`;
     const status = ev.exitCode === 0 ? "pass" : `fail ${ev.exitCode}`;
-    return `  [${status}] ${label}${clip(oneLine(ev.command))} (${(ev.durationMs / 1000).toFixed(1)}s)`;
+    return `  [${status}${label}] ${clip(oneLine(ev.command))} (${(ev.durationMs / 1000).toFixed(1)}s)`;
   });
 }
 
-const EVIDENCE_LINE = /^\s*\[(pass|fail (-?\d+)|note)\] (.*)$/;
+/** A label on one line with no brackets, so the bracket that holds it still closes where it should. */
+function bracketSafe(label: string): string {
+  return oneLine(label).replace(/[[\]]/g, "").slice(0, 60);
+}
+
+const EVIDENCE_LINE = /^\s*\[(pass|fail (-?\d+)|note)(?: ([^\]]*))?\] (.*)$/;
 const DURATION = /^(.*) \((\d+(?:\.\d+)?)s\)$/;
-const LABEL = /^([^:]{1,60}): (.*)$/;
 
 /**
  * Rebuild a record from a commit message alone: trailers, the Plan: block and
@@ -170,7 +176,8 @@ export function parseMessageRecord(message: string, authoredAt: string): ChangeR
   for (const line of readBlock(lines, EVIDENCE_HEADER)?.split("\n") ?? []) {
     const m = EVIDENCE_LINE.exec(line);
     if (!m) continue;
-    let rest = m[3];
+    const label = m[3] || undefined;
+    let rest = m[4];
     let durationMs = 0;
     if (m[1] !== "note") {
       const d = DURATION.exec(rest);
@@ -178,12 +185,6 @@ export function parseMessageRecord(message: string, authoredAt: string): ChangeR
         rest = d[1];
         durationMs = Math.round(Number(d[2]) * 1000);
       }
-    }
-    let label: string | undefined;
-    const l = LABEL.exec(rest);
-    if (l) {
-      label = l[1];
-      rest = l[2];
     }
     if (m[1] === "note") evidence.push({ kind: "note", at: authoredAt, text: rest, label });
     else evidence.push({ kind: "command", at: authoredAt, command: rest, exitCode: m[2] ? Number(m[2]) : 0, durationMs, output: "", label });
