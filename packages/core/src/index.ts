@@ -3,3 +3,4 @@ export type { InitResult, LandOptions, LandedChange, LogEntry, StartOptions, Syn
 export * from "./policy.js";
 export * from "./record.js";
 export * from "./redact.js";
+export * from "./agents.js";

@@ -266,6 +266,29 @@ describe("init", () => {
     expect(second.policyWritten).toBe(false);
   });
 
+  it("writes the agent instructions to AGENTS.md once and reports the CLAUDE.md hint", async () => {
+    await writeFile(join(dir, "AGENTS.md"), "# My repo\n\nRun the linter.\n");
+    const first = await graft.init();
+    expect(first.agents).toEqual({ written: true, alreadyThere: false, claudeHint: true });
+    const agents = await readFile(join(dir, "AGENTS.md"), "utf8");
+    expect(agents.startsWith("# My repo\n\nRun the linter.\n\n## Version control\n")).toBe(true);
+    expect(agents).toContain("graft start");
+    expect(agents).toContain("graft_land");
+
+    await writeFile(join(dir, "CLAUDE.md"), "Notes.\n\n@AGENTS.md\n");
+    const second = await graft.init();
+    expect(second.agents).toEqual({ written: false, alreadyThere: true, claudeHint: false });
+    expect(await readFile(join(dir, "AGENTS.md"), "utf8")).toBe(agents);
+
+    expect((await graft.init({ agents: false })).agents).toBeUndefined();
+  });
+
+  it("creates AGENTS.md when there is none", async () => {
+    const r = await graft.init();
+    expect(r.agents?.written).toBe(true);
+    expect((await readFile(join(dir, "AGENTS.md"), "utf8")).startsWith("## Version control\n")).toBe(true);
+  });
+
   it("works with no remote and reports it", async () => {
     const r = await graft.init();
     expect(r.remote).toBeUndefined();

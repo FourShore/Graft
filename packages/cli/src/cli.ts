@@ -21,15 +21,22 @@ const json = () => Boolean(program.opts<{ json?: boolean }>().json);
 
 program
   .command("init")
-  .description("prepare this repo: carry notes through rebases, fetch them from the remote, write .graft/policy.json")
+  .description(
+    "prepare this repo: carry notes through rebases, fetch them from the remote, write .graft/policy.json, tell agents how to use Graft in AGENTS.md",
+  )
   .option("--remote <name>", "remote to configure (default: origin)")
   .option("--force", "overwrite an existing policy file")
+  .option("--no-agents", "leave AGENTS.md alone")
   .action(async (o) => {
-    const r = await graft().init({ remote: o.remote, force: o.force });
+    const r = await graft().init({ remote: o.remote, force: o.force, agents: o.agents });
     const lines = [
       r.configured.length ? `Set ${r.configured.join(", ")}` : "Git config already set",
       r.policyWritten ? `Wrote .graft/policy.json` : ".graft/policy.json already exists",
     ];
+    if (r.agents) {
+      lines.push(r.agents.written ? "Added a Version control section to AGENTS.md; commit it" : "AGENTS.md already covers Graft");
+      if (r.agents.claudeHint) lines.push("Claude Code reads CLAUDE.md, not AGENTS.md: add a line `@AGENTS.md` to CLAUDE.md.");
+    }
     if (!r.remote) lines.push("No remote yet; run `graft init` again after `git remote add`.");
     out(r, lines.join("\n"));
   });

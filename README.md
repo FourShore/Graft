@@ -48,32 +48,27 @@ graft init
 
 Safe on an existing repo; it doesn't touch history. It sets a few git config
 keys so records survive `commit --amend` and `rebase`, adds the notes ref to
-`origin`'s fetch list, and writes `.graft/policy.json`. Commit that file.
+`origin`'s fetch list, writes `.graft/policy.json`, and adds a "Version
+control" section to `AGENTS.md`. Commit both files.
 
 ## Point your agent at it
 
-For Claude Code, register the MCP server:
+The `AGENTS.md` section that `graft init` writes tells an agent to open a
+change before editing, record each check it runs, commit with `graft land`,
+and sync after pushing. Most agent harnesses read `AGENTS.md`. Claude Code
+reads `CLAUDE.md`, so put a line containing `@AGENTS.md` in it. Pass
+`--no-agents` to `graft init` to leave the file alone.
+
+Agents with MCP support can use the same steps as tools. For Claude Code:
 
 ```
 claude mcp add graft -- graft-mcp --repo /path/to/your/repo
 ```
 
-Then put this in `CLAUDE.md` or `AGENTS.md`:
-
-```markdown
-## Version control
-
-This repo uses Graft. Call `graft_start` with your task before editing.
-Record each check you run with `graft_evidence` (tests, lint, build) or
-`graft_note` (anything checked by hand). Commit with `graft_land`, not
-`git commit`. After `git push`, call `graft_sync`. Call `graft_log` when you
-need to know why code is the way it is.
-```
-
 Tools: `graft_start`, `graft_plan`, `graft_evidence`, `graft_note`,
 `graft_land`, `graft_sync`, `graft_status`, `graft_log`, `graft_show`,
 `graft_abandon`. `graft_land` commits what's staged plus any `paths` you give
-it; `stageAll` is off by default. Agents without MCP can use the CLI below.
+it; `stageAll` is off by default.
 
 ## Use it from the shell
 
