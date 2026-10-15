@@ -115,6 +115,15 @@ server.registerTool(
 );
 
 server.registerTool(
+  "graft_sync",
+  {
+    description: "Fetch, merge and push change records (git notes) with the remote so other clones see full records.",
+    inputSchema: { remote: z.string().optional(), push: z.boolean().optional().default(true) },
+  },
+  async ({ remote, push }) => guarded(() => graft.sync({ remote, push })),
+);
+
+server.registerTool(
   "graft_abandon",
   { description: "Drop the open change without committing.", inputSchema: {} },
   async () => guarded(() => graft.abandon()),

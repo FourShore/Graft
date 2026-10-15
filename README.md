@@ -30,6 +30,15 @@ Requires Node 20+ and git on your PATH.
 
 ## Use it from the shell
 
+Once per repo:
+
+```
+graft init
+```
+
+This makes git carry records through `commit --amend` and `rebase`, adds the
+records ref to `origin`'s fetch list, and writes `.graft/policy.json`. Then:
+
 ```
 graft start "Add rate limiting to the public API" --plan "Token bucket per key"
 # ...edit code...
@@ -77,7 +86,8 @@ claude mcp add graft -- graft-mcp --repo /path/to/repo
 ```
 
 Tools: `graft_start`, `graft_plan`, `graft_evidence`, `graft_note`,
-`graft_land`, `graft_status`, `graft_log`, `graft_show`, `graft_abandon`.
+`graft_land`, `graft_sync`, `graft_status`, `graft_log`, `graft_show`,
+`graft_abandon`.
 `graft_log` is the one agents should call first: it is how they learn why the
 code is the way it is before touching it.
 
@@ -92,13 +102,28 @@ await g.evidenceCommand("npm test", "unit tests");
 const { commit, record } = await g.land({ all: true });
 ```
 
-## Pushing records
+## Sharing records
 
-Trailers travel with commits. Notes live on a separate ref and need pushing:
+Trailers travel with commits. The full records live on `refs/notes/graft`, and
+`graft sync` exchanges them with the remote: fetch theirs, merge, push ours.
 
 ```
-git push origin refs/notes/graft
+graft sync
 ```
+
+Run it after `git push` and after `git pull`. The MCP server exposes it as
+`graft_sync` so agents can do the same.
+
+## Policy
+
+`.graft/policy.json`, written by `graft init`:
+
+```json
+{ "version": 1, "requireEvidence": true }
+```
+
+`requireEvidence` is the landing gate. Set it to `false` for a repo where
+you don't want it yet. More rules arrive with the review view.
 
 See [docs/CHANGE.md](docs/CHANGE.md#where-it-lives) for what survives rebases,
 amends and squashes.
@@ -124,6 +149,10 @@ npm install
 npm test
 npm run build
 ```
+
+Releases: `npm version patch && git push --follow-tags` publishes to npm from
+CI. The repository needs an `NPM_TOKEN` secret with publish rights to the
+`@fourshore` scope.
 
 This repository uses Graft on itself. Run `graft log` here to see it.
 

@@ -13,6 +13,9 @@ import {
   trailersFor,
 } from "./record.js";
 import { OpenChangeStore } from "./store.js";
+import { DEFAULT_POLICY, POLICY_PATH, readPolicy } from "./policy.js";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 
 export class GraftError extends Error {
   constructor(message: string) {
@@ -36,6 +39,22 @@ export interface LandOptions {
   plan?: string;
   /** Allow landing with no evidence recorded. */
   allowNoEvidence?: boolean;
+}
+
+export interface InitResult {
+  topLevel: string;
+  /** Config keys that were set by this call (already-correct keys are omitted). */
+  configured: string[];
+  /** True if .graft/policy.json was written. */
+  policyWritten: boolean;
+  remote?: string;
+}
+
+export interface SyncResult {
+  remote: string;
+  fetched: boolean;
+  merged: boolean;
+  pushed: boolean;
 }
 
 export interface LandedChange {
@@ -133,7 +152,8 @@ export class Graft {
   async land(opts: LandOptions = {}): Promise<LandedChange> {
     const open = await this.requireOpen();
     if (opts.plan) open.plan = opts.plan.trim();
-    if (open.evidence.length === 0 && !opts.allowNoEvidence) {
+    const policy = await readPolicy(await this.git.topLevel());
+    if (open.evidence.length === 0 && policy.requireEvidence && !opts.allowNoEvidence) {
       throw new GraftError(
         "No evidence recorded. Run `graft evidence -- <command>` or pass --allow-no-evidence.",
       );
@@ -154,6 +174,85 @@ export class Graft {
     });
     await this.store.clear();
     return { record: open, commit };
+  }
+
+  /**
+   * Prepare a repository: make git carry notes through amend and rebase,
+   * fetch the notes ref alongside branches, and write a starter policy file.
+   * Safe to run more than once.
+   */
+  async init(opts: { remote?: string; force?: boolean } = {}): Promise<InitResult> {
+    const topLevel = await this.git.topLevel();
+    const configured: string[] = [];
+    const want: Array<[string, string]> = [
+      ["notes.rewriteRef", NOTES_REF],
+      ["notes.rewriteMode", "overwrite"],
+      ["notes.rewrite.amend", "true"],
+      ["notes.rewrite.rebase", "true"],
+    ];
+    for (const [key, value] of want) {
+      if ((await this.configGet(key)) !== value) {
+        await this.git.run(["config", key, value]);
+        configured.push(key);
+      }
+    }
+
+    const remote = opts.remote ?? (await this.defaultRemote());
+    if (remote) {
+      const refspec = `+${NOTES_REF}:${NOTES_REF}`;
+      const existing = await this.configGetAll(`remote.${remote}.fetch`);
+      if (!existing.includes(refspec)) {
+        await this.git.run(["config", "--add", `remote.${remote}.fetch`, refspec]);
+        configured.push(`remote.${remote}.fetch`);
+      }
+    }
+
+    let policyWritten = false;
+    const policyFile = join(topLevel, POLICY_PATH);
+    try {
+      await readFile(policyFile, "utf8");
+      if (opts.force) throw Object.assign(new Error("force"), { code: "ENOENT" });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+      await mkdir(join(topLevel, ".graft"), { recursive: true });
+      await writeFile(policyFile, JSON.stringify(DEFAULT_POLICY, null, 2) + "\n");
+      policyWritten = true;
+    }
+    return { topLevel, configured, policyWritten, remote: remote ?? undefined };
+  }
+
+  /**
+   * Exchange change records with a remote: fetch its notes, merge them into
+   * ours (records never conflict in practice since each commit has one), push.
+   */
+  async sync(opts: { remote?: string; push?: boolean } = {}): Promise<SyncResult> {
+    const remote = opts.remote ?? (await this.defaultRemote());
+    if (!remote) throw new GraftError("No remote configured. Pass --remote or add one with `git remote add`.");
+    const theirs = `refs/notes/graft-${remote}`;
+    let fetched = false;
+    try {
+      await this.git.run(["fetch", "-q", remote, `+${NOTES_REF}:${theirs}`]);
+      fetched = true;
+    } catch (err) {
+      // A remote with no notes yet is normal on first sync; anything else is real.
+      if (!/couldn't find remote ref|fatal: .*not found/i.test((err as Error).message)) throw err;
+    }
+    let merged = false;
+    if (fetched) {
+      const haveLocal = Boolean(await this.refExists(NOTES_REF));
+      if (!haveLocal) {
+        await this.git.run(["update-ref", NOTES_REF, theirs]);
+      } else {
+        await this.git.run(["notes", `--ref=${NOTES_REF}`, "merge", "-q", "-s", "cat_sort_uniq", theirs]);
+      }
+      merged = true;
+    }
+    let pushed = false;
+    if (opts.push !== false && (await this.refExists(NOTES_REF))) {
+      await this.git.run(["push", "-q", remote, `${NOTES_REF}:${NOTES_REF}`]);
+      pushed = true;
+    }
+    return { remote, fetched, merged, pushed };
   }
 
   /** History as changes. Commits without a Graft record are included with record: null. */
@@ -185,7 +284,12 @@ export class Graft {
       if (!commit) return null;
       ref = commit;
     }
-    const sha = await this.git.run(["rev-parse", "--verify", `${ref}^{commit}`]);
+    let sha: string;
+    try {
+      sha = await this.git.run(["rev-parse", "--verify", "-q", `${ref}^{commit}`]);
+    } catch {
+      return null;
+    }
     const body = await this.git.run(["log", "-1", "--format=%B", sha]);
     const title = await this.git.run(["log", "-1", "--format=%s", sha]);
     const trailers = parseTrailers(body);
@@ -199,6 +303,36 @@ export class Graft {
     } catch {
       return null;
     }
+  }
+
+  private async configGet(key: string): Promise<string | null> {
+    try {
+      return await this.git.run(["config", "--get", key]);
+    } catch {
+      return null;
+    }
+  }
+
+  private async configGetAll(key: string): Promise<string[]> {
+    try {
+      return (await this.git.run(["config", "--get-all", key])).split("\n").filter(Boolean);
+    } catch {
+      return [];
+    }
+  }
+
+  private async refExists(ref: string): Promise<string | null> {
+    try {
+      return await this.git.run(["rev-parse", "--verify", "-q", ref]);
+    } catch {
+      return null;
+    }
+  }
+
+  private async defaultRemote(): Promise<string | null> {
+    const remotes = (await this.git.run(["remote"])).split("\n").filter(Boolean);
+    if (remotes.includes("origin")) return "origin";
+    return remotes[0] ?? null;
   }
 
   private async requireOpen(): Promise<ChangeRecord> {

@@ -1,3 +1,4 @@
 export { Graft, GraftError, buildCommitMessage } from "./graft.js";
-export type { LandOptions, LandedChange, LogEntry, StartOptions } from "./graft.js";
+export type { InitResult, LandOptions, LandedChange, LogEntry, StartOptions, SyncResult } from "./graft.js";
+export * from "./policy.js";
 export * from "./record.js";

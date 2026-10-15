@@ -131,8 +131,10 @@ git push origin refs/notes/graft
 git fetch origin refs/notes/graft:refs/notes/graft
 ```
 
-The CLI will grow a `graft sync` that does this; until then, do it by hand or
-add `refs/notes/graft` to the remote's fetch refspec.
+`graft sync` does this: it fetches the remote's notes, merges them with
+`cat_sort_uniq` (so two clones' records combine rather than overwrite), and
+pushes. `graft init` adds the notes ref to the remote's fetch refspec so a
+plain `git fetch` brings records along too.
 
 ### What survives what
 
@@ -144,10 +146,23 @@ add `refs/notes/graft` to the remote's fetch refspec.
 | `git push` / `git fetch` | kept | only if the notes ref is pushed/fetched |
 
 So: the change id in the trailer is the durable identity, and the note is a
-cache of detail that can be recovered. Setting `git config notes.rewriteRef
-refs/notes/graft` makes git carry notes through amend and rebase; Graft may set
-this on first use. A future `graft fsck` can find commits whose note is missing
-and report them.
+cache of detail that can be recovered. `graft init` sets `notes.rewriteRef`
+and the `notes.rewrite.*` keys so git carries notes through amend and rebase in
+that clone. A future `graft fsck` can find commits whose note is missing and
+report them.
+
+## Policy
+
+`.graft/policy.json` at the working tree root, written by `graft init`:
+
+```json
+{ "version": 1, "requireEvidence": true }
+```
+
+Version 1 has one rule. `requireEvidence` makes `land` refuse a change with an
+empty evidence list unless the author passes `--allow-no-evidence`. Readers
+reject unknown policy versions. The file is committed, so changing policy is a
+reviewed change like any other.
 
 ## Reading records
 

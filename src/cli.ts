@@ -14,6 +14,34 @@ const graft = () => new Graft(program.opts<{ C: string }>().C);
 const json = () => Boolean(program.opts<{ json?: boolean }>().json);
 
 program
+  .command("init")
+  .description("prepare this repo: carry notes through rebases, fetch them from the remote, write .graft/policy.json")
+  .option("--remote <name>", "remote to configure (default: origin)")
+  .option("--force", "overwrite an existing policy file")
+  .action(async (o) => {
+    const r = await graft().init({ remote: o.remote, force: o.force });
+    const lines = [
+      r.configured.length ? `Set ${r.configured.join(", ")}` : "Git config already set",
+      r.policyWritten ? `Wrote .graft/policy.json` : ".graft/policy.json already exists",
+    ];
+    if (!r.remote) lines.push("No remote yet; run `graft init` again after `git remote add`.");
+    out(r, lines.join("\n"));
+  });
+
+program
+  .command("sync")
+  .description("fetch, merge and push change records (refs/notes/graft) with the remote")
+  .option("--remote <name>", "remote to sync with (default: origin)")
+  .option("--no-push", "fetch and merge only")
+  .action(async (o) => {
+    const r = await graft().sync({ remote: o.remote, push: o.push });
+    out(
+      r,
+      `${r.remote}: ${r.fetched ? "fetched" : "nothing to fetch"}${r.merged ? ", merged" : ""}${r.pushed ? ", pushed" : ""}`,
+    );
+  });
+
+program
   .command("start")
   .description("open a change: record what you were asked to do")
   .argument("<task...>", "the task, in your own words")
