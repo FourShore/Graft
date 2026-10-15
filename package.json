@@ -26,8 +26,8 @@
     "typecheck": "tsc -b packages/core packages/review packages/cli",
     "test": "vitest run",
     "clean": "rm -rf packages/*/dist packages/*/tsconfig.tsbuildinfo",
-    "version:all": "npm version --workspaces --no-git-tag-version",
-    "dev:review": "node packages/cli/dist/cli.js review"
+    "dev:review": "node packages/cli/dist/cli.js review",
+    "release": "node scripts/release.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

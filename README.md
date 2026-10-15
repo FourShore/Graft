@@ -234,8 +234,9 @@ npm run build     # tsc -b across the workspace
 node packages/cli/dist/cli.js review
 ```
 
-Releases: `npm version patch && git push --follow-tags` publishes to npm from
-CI. The repository needs an `NPM_TOKEN` secret with publish rights to the
+Releases: `npm run release -- patch` bumps all three packages to one version,
+commits and tags; `git push --follow-tags` then publishes them to npm from CI.
+The repository needs an `NPM_TOKEN` secret with publish rights to the
 `@fourshore` scope.
 
 This repository uses Graft on itself. Run `graft log` here to see it.
