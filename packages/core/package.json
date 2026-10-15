@@ -1,6 +1,6 @@
 {
   "name": "@fourshore/graft-core",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "description": "Graft change records on plain git: the record model, git plumbing, start/evidence/land/log.",
   "license": "MIT",
   "type": "module",
