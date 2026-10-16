@@ -52,6 +52,9 @@ export interface CheckResult {
   nested?: boolean;
 }
 
+/** The mark the commit message puts on a command it cut short. */
+const CLIPPED = "\u2026";
+
 /** Set in the environment of every re-run command, so a recorded `graft check --rerun` does not re-run itself without end. */
 export const RERUN_ENV = "GRAFT_CHECK_RERUN";
 
@@ -131,6 +134,11 @@ export async function runCheck(opts: CheckOptions): Promise<CheckResult> {
         findings.push({ kind: "rerun-skipped", command, commits: shas, reason: "not in policy checkCommands" });
         continue;
       }
+      if (command.endsWith(CLIPPED)) {
+        // The record came from the commit message, which cuts long commands; running the stump would prove nothing.
+        findings.push({ kind: "rerun-skipped", command, commits: shas, reason: "cut short in the commit message; fetch refs/notes/graft for the full command" });
+        continue;
+      }
       const started = Date.now();
       const previous = process.env[RERUN_ENV];
       process.env[RERUN_ENV] = "1";
@@ -165,7 +173,7 @@ async function resolveBase(graft: Graft, base: string): Promise<string> {
     }
   };
   if (await exists(base)) return base;
-  if (!base.includes("/") && (await exists(`origin/${base}`))) return `origin/${base}`;
+  if (await exists(`origin/${base}`)) return `origin/${base}`;
   throw new GraftError(`Base "${base}" is not a commit in this clone (nor is origin/${base}). Fetch it, or pass --base <ref>.`);
 }
 
