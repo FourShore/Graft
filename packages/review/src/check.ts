@@ -130,7 +130,7 @@ export async function runCheck(opts: CheckOptions): Promise<CheckResult> {
         const name = named && policy.commands?.[named] ? named : undefined;
         const command = name ? policy.commands![name] : ev.command;
         const slot = byCommand.get(command) ?? { shas: [], ...(name ? { name } : {}) };
-        slot.shas.push(c.entry.commit);
+        if (!slot.shas.includes(c.entry.commit)) slot.shas.push(c.entry.commit);
         byCommand.set(command, slot);
       }
     }
@@ -222,9 +222,15 @@ export function renderCheckText(r: CheckResult): string {
       lines.push(`  ${x.exitCode === 0 ? "pass" : `FAIL ${x.exitCode}`}  ${x.name ? `${x.name}: ` : ""}${x.command} (${(x.durationMs / 1000).toFixed(1)}s, recorded on ${x.commits.map((s) => s.slice(0, 10)).join(", ")})`);
     }
   }
-  if (r.findings.length) {
+  const skipped = r.findings.filter((f) => f.kind === "rerun-skipped");
+  const blocking = r.findings.filter((f) => f.kind !== "rerun-skipped");
+  if (skipped.length) {
+    lines.push("", `Not re-run (${skipped.length}):`);
+    for (const f of skipped) lines.push(`  - ${describeFinding(f)}`);
+  }
+  if (blocking.length) {
     lines.push("", "Findings:");
-    for (const f of r.findings) lines.push(`  - ${describeFinding(f)}`);
+    for (const f of blocking) lines.push(`  - ${describeFinding(f)}`);
   }
   lines.push("", r.ok ? "PASS: every behavior change carries evidence that meets the policy." : "FAIL: see findings above.");
   return lines.join("\n");
@@ -275,7 +281,12 @@ export function renderCheckGithub(r: CheckResult): { annotations: string[]; summ
     ...(r.reruns.length
       ? ["", "#### Re-run on this checkout", "", "| | Command | Recorded on |", "| --- | --- | --- |", ...r.reruns.map((x) => `| ${x.exitCode === 0 ? "✅" : `❌ exit ${x.exitCode}`} | \`${escapePipes(x.command)}\` | ${x.commits.map((s) => `\`${s.slice(0, 10)}\``).join(", ")} |`)]
       : []),
-    ...(r.findings.length ? ["", "#### Findings", "", ...r.findings.map((f) => `- ${describeFinding(f).split("\n")[0]}`)] : []),
+    ...(r.findings.some((f) => f.kind === "rerun-skipped")
+      ? ["", "#### Not re-run", "", ...r.findings.filter((f) => f.kind === "rerun-skipped").map((f) => `- ${describeFinding(f).split("\n")[0]}`)]
+      : []),
+    ...(r.findings.some((f) => f.kind !== "rerun-skipped")
+      ? ["", "#### Findings", "", ...r.findings.filter((f) => f.kind !== "rerun-skipped").map((f) => `- ${describeFinding(f).split("\n")[0]}`)]
+      : []),
     "",
   ].join("\n");
   return { annotations, summary };

@@ -377,12 +377,20 @@ describe("check", () => {
     await graft.start({ task: "x" });
     await writeFile(join(dir, "src", "a.ts"), "export const a = 9;\n");
     await graft.evidenceCommand("echo fine");
+    await graft.evidenceCommand("echo fine"); // the same command twice names the commit once
     await graft.evidenceCommand("true");
     await graft.land({ all: true });
     const r = await runCheck({ repo: dir, base, rerun: true });
-    expect(r.reruns.map((x) => x.command)).toEqual(["echo fine"]);
+    expect(r.reruns.map((x) => [x.command, x.commits.length])).toEqual([["echo fine", 1]]);
     expect(r.findings).toMatchObject([{ kind: "rerun-skipped", command: "true" }]);
     expect(r.ok).toBe(true);
+    const text = renderCheckText(r);
+    expect(text).toContain("Not re-run (1):\n  - \"true\" was not re-run: not in policy checkCommands.");
+    expect(text).not.toContain("Findings:");
+    const gh = renderCheckGithub(r);
+    expect(gh.summary).toContain("#### Not re-run");
+    expect(gh.summary).not.toContain("#### Findings");
+    expect(gh.annotations).toEqual([]);
   });
 
   it("does not re-run when it is itself a re-run command of an outer check", async () => {

@@ -186,6 +186,14 @@ function bracketSafe(label: string): string {
 
 const EVIDENCE_LINE = /^\s*\[(pass|fail (-?\d+)|note|attested(?: fail (-?\d+))?)(?: ([^\]]*))?\] (.*)$/;
 const DURATION = /^(.*) \((\d+(?:\.\d+)?)s\)$/;
+/** A bracket that carries a label, which only the current format writes. */
+const LABELLED_BRACKET = /^\s*\[(?:pass|fail -?\d+|note|attested(?: fail -?\d+)?) [^\]]+\] /;
+/**
+ * The 0.0.6 `label: command` split, taken only when the label reads like one
+ * (plain words) and what follows reads like a command rather than the rest of
+ * a sentence: more than one word, or a path. `echo status: ok` stays whole.
+ */
+const LEGACY_LABEL = /^([A-Za-z0-9][A-Za-z0-9 _-]{0,59}): (\S+(?:[ /.]\S*)+)$/;
 
 /**
  * Rebuild a record from a commit message alone: trailers, the Plan: block and
@@ -200,11 +208,15 @@ export function parseMessageRecord(message: string, authoredAt: string): ChangeR
   const lines = message.split("\n");
   const plan = readBlock(lines, "Plan:");
   const evidence: Evidence[] = [];
-  for (const line of readBlock(lines, EVIDENCE_HEADER)?.split("\n") ?? []) {
+  const evidenceBlock = readBlock(lines, EVIDENCE_HEADER)?.split("\n") ?? [];
+  // Graft 0.0.6 wrote the label outside the bracket, as `[pass] label: command`.
+  // Such a block never has a label inside a bracket, which is how it is told apart.
+  const legacy = evidenceBlock.every((l) => !LABELLED_BRACKET.test(l));
+  for (const line of evidenceBlock) {
     const m = EVIDENCE_LINE.exec(line);
     if (!m) continue;
     const [, status, failCode, attestedFailCode, rawLabel, tail] = m;
-    const label = rawLabel || undefined;
+    let label = rawLabel || undefined;
     if (status === "note") {
       evidence.push({ kind: "note", at: authoredAt, text: tail, label });
       continue;
@@ -220,6 +232,10 @@ export function parseMessageRecord(message: string, authoredAt: string): ChangeR
     if (d) {
       rest = d[1];
       durationMs = Math.round(Number(d[2]) * 1000);
+    }
+    if (legacy && !label) {
+      const old = LEGACY_LABEL.exec(rest);
+      if (old) [, label, rest] = old;
     }
     evidence.push({ kind: "command", at: authoredAt, command: rest, exitCode: failCode ? Number(failCode) : 0, durationMs, output: "", label });
   }
