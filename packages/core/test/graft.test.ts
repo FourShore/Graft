@@ -6,7 +6,8 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { Graft, GraftError } from "../src/graft.js";
 import { isChangeId, newChangeId, parseTrailers, shellJoin } from "../src/record.js";
 import { expandTrailers } from "../src/policy.js";
-import { classifyCommand } from "../src/capture.js";
+import { classifyCommand, relativizeCommand } from "../src/capture.js";
+import { secretFilesNamed } from "../src/redact.js";
 import { handleClaudeCodeEvent } from "../src/claude-code.js";
 import { installHooks, CLAUDE_SETTINGS_PATH } from "../src/hooks.js";
 import { existsSync } from "node:fs";
@@ -212,6 +213,13 @@ describe("policy trailers", () => {
     ]);
   });
 
+  it("strips a literal prefix or suffix with ${NAME#p} and ${NAME%s}", () => {
+    const env = { ID: "cse_01abc", FILE: "notes.md" };
+    const r = expandTrailers(["Session: https://x/session_${ID#cse_}", "Base: ${FILE%.md}", "Same: ${ID#zzz}", "Gone: ${NOPE#cse_}"], env);
+    expect(r.trailers).toEqual(["Session: https://x/session_01abc", "Base: notes", "Same: cse_01abc"]);
+    expect(r.skipped).toEqual([{ trailer: "Gone: ${NOPE#cse_}", missing: "NOPE" }]);
+  });
+
   it("writes policy trailers on land, after Graft's own and without duplicating explicit ones", async () => {
     await mkdir(join(dir, ".graft"), { recursive: true });
     await writeFile(
@@ -249,6 +257,30 @@ describe("capture", () => {
     expect(classifyCommand("git status")).toBeNull();
     expect(classifyCommand("./scripts/verify.sh", ["^\\./scripts/verify"])).toBe("custom");
     expect(classifyCommand("./scripts/verify.sh", ["("])).toBeNull();
+  });
+
+  it("rewrites absolute paths under the repository root so a captured command re-runs elsewhere", () => {
+    const top = "/home/me/repo";
+    expect(relativizeCommand("cd /home/me/repo && go test ./...", top)).toBe("go test ./...");
+    expect(relativizeCommand("cd /home/me/repo/pkg && go test ./...", top)).toBe("cd ./pkg && go test ./...");
+    expect(relativizeCommand('cd "/home/me/repo/" && npm test', top)).toBe("npm test");
+    expect(relativizeCommand("npm test -- /home/me/repo/src/a.test.ts", top)).toBe("npm test -- ./src/a.test.ts");
+    expect(relativizeCommand("echo a && cd /home/me/repo; npm test", top)).toBe("echo a && npm test");
+    expect(relativizeCommand("cd /home/me/repository && x", top)).toBe("cd /home/me/repository && x");
+    expect(relativizeCommand("cd /mnt/backup/home/me/repo/x && npm test", top)).toBe("cd /mnt/backup/home/me/repo/x && npm test");
+    expect(relativizeCommand("cd /home/me/repo/ && npm test", top)).toBe("npm test");
+    expect(relativizeCommand("ROOT=/home/me/repo npm test", top)).toBe("ROOT=. npm test");
+    expect(relativizeCommand("npm test", top)).toBe("npm test");
+    expect(relativizeCommand("cd C:\\Users\\z\\repo\\pkg && go test ./...", "C:/Users/z/repo")).toBe("cd ./pkg && go test ./...");
+    expect(relativizeCommand("cd c:/users/z/repo && go test ./...", "C:/Users/z/repo")).toBe("go test ./...");
+  });
+
+  it("finds the credential files a command names", () => {
+    expect(secretFilesNamed("cat nova.json && go test ./...", ["nova.json"])).toEqual(["nova.json"]);
+    expect(secretFilesNamed("cat nova.json && go test ./...")).toEqual([]);
+    expect(secretFilesNamed('docker run --env-file=.env img; cat "keys/id_rsa" | wc')).toEqual([".env", "keys/id_rsa"]);
+    expect(secretFilesNamed("cp .env.example .env")).toEqual([".env"]);
+    expect(secretFilesNamed("go test ./... -run TestKey")).toEqual([]);
   });
 
   it("opens a change from the prompt, records matching Bash runs with the harness's exit code, ignores the rest", async () => {
@@ -295,6 +327,24 @@ describe("capture", () => {
     await graft.abandon();
 
     // A run with nothing open opens a placeholder change so the evidence is not lost.
+    const top = await graft.git.topLevel();
+    const moved = await handleClaudeCodeEvent(graft, {
+      hook_event_name: "PostToolUse",
+      tool_name: "Bash",
+      tool_input: { command: `cd ${top}/sub && npm test` },
+      tool_response: { stdout: "ok" },
+    });
+    expect(moved).toMatchObject({ action: "recorded", command: "cd ./sub && npm test" });
+    const leaky = await handleClaudeCodeEvent(graft, {
+      hook_event_name: "PostToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "cat .env && npm test" },
+      tool_response: { stdout: "API_KEY=hunter2hunter2\n12 passed" },
+    });
+    expect(leaky).toMatchObject({ action: "recorded", exitCode: 0 });
+    const captured = (await graft.status())!.evidence.at(-1);
+    expect(captured).toMatchObject({ kind: "command", command: "cat .env && npm test", output: "[output withheld: the command names .env, which looks like a credential file]" });
+    await graft.abandon();
     const orphan = await handleClaudeCodeEvent(graft, { hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: { command: "npm run build" }, tool_response: { stdout: "" } });
     expect(orphan).toMatchObject({ action: "recorded", opened: true });
     expect((await graft.status())?.task).toMatch(/prompt not captured/);
@@ -417,15 +467,30 @@ describe("attested evidence", () => {
     ]);
   });
 
-  it("satisfies a policy that requires a passing command", async () => {
+  it("does not satisfy a policy that requires a passing command, since it is a claim", async () => {
     await mkdir(join(dir, ".graft"), { recursive: true });
     await writeFile(join(dir, ".graft/policy.json"), JSON.stringify({ version: 1, requireEvidence: "command" }));
     await graft.start({ task: "attach under policy" });
     await writeFile(join(dir, "a.txt"), "a\n");
-    await graft.evidenceAttested("make check", 1);
-    await expect(graft.land({ all: true })).rejects.toThrow(/passing command/);
     await graft.evidenceAttested("make check", 0);
+    await expect(graft.land({ all: true })).rejects.toThrow(/attested runs alone do not count/);
+    await graft.evidenceCommand("true", "smoke");
     await expect(graft.land({ all: true })).resolves.toBeTruthy();
+  });
+
+  it("withholds the output of a command that names a credential file", async () => {
+    await mkdir(join(dir, ".graft"), { recursive: true });
+    await writeFile(join(dir, ".graft/policy.json"), JSON.stringify({ version: 1, requireEvidence: true, secretFiles: ["nova.json"] }));
+    await writeFile(join(dir, "nova.json"), '{"agentKey":"k-1234567890"}\n');
+    await graft.start({ task: "leaky" });
+    const run = await graft.evidenceCommand("cat nova.json && echo tests passed", "go tests");
+    expect(run).toMatchObject({ kind: "command", exitCode: 0, output: "[output withheld: the command names nova.json, which looks like a credential file]" });
+    const attested = await graft.evidenceAttested("cat nova.json && go test ./...", 0, '{"agentKey":"k-1234567890"}');
+    expect(attested).toMatchObject({ output: "[output withheld: the command names nova.json, which looks like a credential file]" });
+    const clean = await graft.evidenceCommand("echo nova", "clean");
+    expect(clean).toMatchObject({ output: "nova\n" });
+    const stored = (await graft.status())!;
+    expect(JSON.stringify(stored)).not.toContain("k-1234567890");
   });
 });
 
@@ -466,7 +531,16 @@ describe("context", () => {
 
     const all = await graft.context(["src/a.ts"], { all: true });
     expect(all.entries).toHaveLength(3);
-    expect(all.text).toContain("plain commit touching a\n  (no change record)");
+    expect(all.text).toContain("plain commit touching a\n  (no change record)\n  files: src/a.ts");
+
+    await writeFile(join(dir, "old.txt"), "old\n");
+    sh(["add", "-A"]);
+    sh(["commit", "-q", "-m", "plain commit touching old"]);
+    const onlyPlain = await graft.context(["old.txt"]);
+    expect(onlyPlain.entries).toHaveLength(0);
+    expect(onlyPlain.unrecorded).toBe(1);
+    expect(onlyPlain.text).toContain("pass --all to list them");
+    expect((await graft.context(["old.txt"], { all: true })).text).not.toContain("pass --all");
 
     const whole = await graft.context([]);
     expect(whole.entries).toHaveLength(3);

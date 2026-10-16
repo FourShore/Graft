@@ -1,5 +1,5 @@
 import type { Graft } from "./graft.js";
-import { classifyCommand } from "./capture.js";
+import { classifyCommand, relativizeCommand } from "./capture.js";
 import { readPolicy } from "./policy.js";
 
 /** The subset of a Claude Code hook payload Graft reads. */
@@ -44,10 +44,12 @@ export async function handleClaudeCodeEvent(graft: Graft, event: ClaudeCodeEvent
     return { action: "ignored", reason: `event ${event.hook_event_name}` };
   }
   if (event.tool_name !== "Bash") return { action: "ignored", reason: `tool ${event.tool_name}` };
-  const command = (event.tool_input?.command ?? "").trim();
-  if (!command) return { action: "ignored", reason: "no command" };
+  const typed = (event.tool_input?.command ?? "").trim();
+  if (!typed) return { action: "ignored", reason: "no command" };
   if (event.is_interrupt || event.tool_response?.interrupted) return { action: "ignored", reason: "interrupted" };
-  const policy = await readPolicy(await graft.git.topLevel());
+  const topLevel = await graft.git.topLevel();
+  const policy = await readPolicy(topLevel);
+  const command = relativizeCommand(typed, topLevel);
   const kind = classifyCommand(command, policy.captureCommands);
   if (!kind) return { action: "ignored", reason: "not a test, build, lint or type-check command" };
 

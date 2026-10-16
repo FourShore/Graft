@@ -2,6 +2,6 @@
   "version": 1,
   "requireEvidence": true,
   "trailers": [
-    "Claude-Session: $CLAUDE_SESSION_URL"
+    "Claude-Session: https://claude.ai/code/session_${CLAUDE_CODE_REMOTE_SESSION_ID#cse_}"
   ]
 }

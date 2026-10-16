@@ -335,20 +335,62 @@ describe("check", () => {
     await graft.land({ all: true });
     sh(["rm", "-q", "gate"]);
     sh(["commit", "-q", "-m", "remove gate"]); // also unrecorded, and "gate" counts as behavior
+    // 4: an attested run only: a claim, re-run but not enough for the gate
+    await graft.start({ task: "attested only" });
+    await writeFile(join(dir, "src", "a.ts"), "export const a = 5;\n");
+    await graft.evidenceAttested("echo attested", 0);
+    await graft.land({ all: true, allowNoEvidence: true });
+    // 5: a record from before 0.0.6: trailers say evidence exists, but it lives only in a note this clone lacks
+    await writeFile(join(dir, "src", "a.ts"), "export const a = 6;\n");
+    sh(["commit", "-q", "-am", "old record\n\nGraft-Change: 01hzzzzzzzzzzzzzzzzz\nGraft-Task: old task\nGraft-Author: agent:x\nGraft-Evidence: 1 command, 1 passed\n"]);
 
     const r = await runCheck({ repo: dir, base, rerun: true });
     expect(r.ok).toBe(false);
-    expect(r.findings.map((f) => f.kind).sort()).toEqual(["no-passing-command", "no-record", "no-record", "rerun-failed"]);
+    expect(r.findings.map((f) => f.kind).sort()).toEqual(["no-passing-command", "no-passing-command", "no-record", "no-record", "note-missing", "rerun-failed"]);
+    expect(r.reruns.map((x) => [x.command, x.exitCode])).toEqual([["echo attested", 0], ["test -f gate", 1]]);
     const text = renderCheckText(r);
     expect(text).toContain('"plain edit" changed src/a.ts with no change record');
-    expect(text).toContain('policy requireEvidence: "command"');
+    expect(text).toContain('policy requireEvidence: "command"; notes and attested runs do not count');
     expect(text).toContain('"test -f gate" was recorded as passing');
+    expect(text).toContain("0 passing commands (1 more attested), 1 evidence");
+    expect(text).toContain('"old record" changed src/a.ts and its evidence lives only in the git note');
     expect(text).toMatch(/FAIL: see findings/);
     const gh = renderCheckGithub(r);
-    expect(gh.annotations).toHaveLength(4);
+    expect(gh.annotations).toHaveLength(6);
     expect(gh.annotations[0]).toMatch(/^::error title=Graft check::/);
     expect(gh.summary).toContain("### Graft check: fail");
     expect(gh.summary).toContain("| ❌ |");
+  });
+
+  it("falls back to origin/<base> when the base is not a local ref, and names a base that is neither", async () => {
+    const base = await seed();
+    const remote = await mkdtemp(join(tmpdir(), "graft-remote-"));
+    execFileSync("git", ["init", "-q", "--bare", remote]);
+    sh(["remote", "add", "origin", remote]);
+    sh(["branch", "release/1"]);
+    sh(["push", "-q", "origin", "main", "release/1"]);
+    sh(["checkout", "-q", "-b", "feature"]);
+    sh(["branch", "-D", "main", "release/1"]);
+    await graft.start({ task: "y" });
+    await writeFile(join(dir, "src", "a.ts"), "export const a = 7;\n");
+    // Longer than the commit message keeps, so a record read from the message cannot re-run it.
+    const long = `echo ${"x".repeat(220)}`;
+    await graft.evidenceCommand(long);
+    await graft.evidenceCommand("true");
+    const { commit } = await graft.land({ all: true });
+    const r = await runCheck({ repo: dir, base: "main" });
+    expect(r.base).toBe("origin/main");
+    expect(r.commits).toHaveLength(1);
+    expect(renderCheckText(r)).toContain("in origin/main..");
+    expect(sh(["rev-parse", "origin/main"])).toBe(base);
+    expect((await runCheck({ repo: dir, base: "release/1" })).base).toBe("origin/release/1");
+
+    sh(["notes", "--ref=refs/notes/graft", "remove", commit]);
+    const rerun = await runCheck({ repo: dir, base: "main", rerun: true });
+    expect(rerun.reruns.map((x) => x.command)).toEqual(["true"]);
+    expect(rerun.findings).toMatchObject([{ kind: "rerun-skipped", command: `${long.slice(0, 199)}\u2026`, reason: expect.stringContaining("cut short") }]);
+    expect(rerun.ok).toBe(true);
+    await expect(runCheck({ repo: dir, base: "nope" })).rejects.toThrow(/"nope" is not a commit in this clone/);
   });
 
   it("re-runs only commands allowed by checkCommands and reports the rest as skipped without failing", async () => {

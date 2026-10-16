@@ -27,6 +27,28 @@ const PATTERNS: [CaptureKind, RegExp][] = [
 ];
 
 /**
+ * Rewrite absolute paths under the repository root as relative ones, so a
+ * captured `cd /home/me/repo/pkg && go test ./...` re-runs on another
+ * machine, where `graft check --rerun` executes it from the repository root.
+ * A leading `cd` to the root itself is dropped. Both slash styles match.
+ */
+export function relativizeCommand(command: string, topLevel: string): string {
+  const top = topLevel.replace(/[\\/]+$/, "");
+  if (!top) return command;
+  const root = top
+    .split(/[\\/]/)
+    .map((seg) => seg.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join("[\\\\/]");
+  const flags = /^[A-Za-z]:/.test(top) ? "gi" : "g";
+  // Only a path that starts here (after a space, quote, `=` or an operator) is the root; `/mnt/x/home/me/repo` is not.
+  const at = `(?<=^|[\\s"'=;&|(])${root}`;
+  return command
+    .replace(new RegExp(`${at}[\\\\/](?=[^\\s"';&|)])`, flags), "./")
+    .replace(new RegExp(`${at}[\\\\/]?(?=["'\\s;&|)]|$)`, flags), ".")
+    .replace(/(^|(?:&&|\|\||;)\s*)cd\s+["']?\.\/?["']?\s*(?:&&|;)\s*/g, "$1");
+}
+
+/**
  * Classify a command, or null when it is not one Graft records on its own.
  * `extra` holds policy patterns (regular expressions as strings) that also
  * count; a match there is labelled "custom".

@@ -18,7 +18,7 @@ import {
 } from "./record.js";
 import { OpenChangeStore } from "./store.js";
 import { DEFAULT_POLICY, POLICY_PATH, readPolicy, expandTrailers, type Policy } from "./policy.js";
-import { looksLikeSecretFile, redact } from "./redact.js";
+import { looksLikeSecretFile, redact, secretFilesNamed } from "./redact.js";
 import { writeAgentsSection, type AgentsResult } from "./agents.js";
 import { installHooks, type HooksResult } from "./hooks.js";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -188,10 +188,21 @@ export class Graft {
     return open;
   }
 
+  private topLevelCache?: Promise<string>;
+
+  /** The working tree root, asked of git once per Graft instance. */
+  private topLevel(): Promise<string> {
+    this.topLevelCache ??= this.git.topLevel().catch((err) => {
+      this.topLevelCache = undefined;
+      throw err;
+    });
+    return this.topLevelCache;
+  }
+
   /** Run a command, capture its result as evidence. The command runs in the repo root. */
   async evidenceCommand(command: string, label?: string): Promise<Evidence> {
     const open = await this.requireOpen();
-    const cwd = await this.git.topLevel();
+    const cwd = await this.topLevel();
     const started = Date.now();
     const { exitCode, output } = await runShell(command, cwd);
     const ev: Evidence = {
@@ -200,7 +211,7 @@ export class Graft {
       command,
       exitCode,
       durationMs: Date.now() - started,
-      output: capOutput(redact(output)),
+      output: await this.keepOutput(command, output),
       label,
     };
     open.evidence.push(ev);
@@ -223,7 +234,7 @@ export class Graft {
       command: command.trim(),
       exitCode,
       durationMs: 0,
-      output: capOutput(redact(output)),
+      output: await this.keepOutput(command, output),
       label,
       attested: true,
     };
@@ -256,13 +267,26 @@ export class Graft {
       command: run.command.trim(),
       exitCode: run.exitCode,
       durationMs: run.durationMs ?? 0,
-      output: capOutput(redact(run.output ?? "")),
+      output: await this.keepOutput(run.command, run.output ?? ""),
       label: run.label,
       via: run.via,
     };
     open.evidence.push(ev);
     await this.store.write(open);
     return ev;
+  }
+
+  /**
+   * The output a record may keep: scrubbed of secret-looking environment
+   * values and capped, or withheld entirely when the command names a file
+   * that looks like credentials (`cat .env && npm test`), since a captured
+   * hook sees the whole transcript and the record outlives the key.
+   */
+  private async keepOutput(command: string, output: string): Promise<string> {
+    const policy = await readPolicy(await this.topLevel());
+    const named = secretFilesNamed(command, policy.secretFiles);
+    if (named.length) return `[output withheld: the command names ${named.join(", ")}, which looks like a credential file]`;
+    return capOutput(redact(output));
   }
 
   /** The landing gate: policy on evidence, then on staged files. Shared by land and the commit hook. */
@@ -278,10 +302,10 @@ export class Graft {
           "No evidence recorded. Run `graft evidence -- <command>` or pass --allow-no-evidence.",
         );
       }
-      const passed = open.evidence.some((e) => e.kind === "command" && e.exitCode === 0);
+      const passed = open.evidence.some((e) => e.kind === "command" && e.exitCode === 0 && !e.attested);
       if (policy.requireEvidence === "command" && !passed) {
         throw new GraftError(
-          "Policy requires a passing command as evidence; notes alone do not count. " +
+          "Policy requires a passing command that Graft or a harness ran; notes and attested runs alone do not count. " +
             "Run `graft evidence -- <command>` or pass --allow-no-evidence.",
         );
       }

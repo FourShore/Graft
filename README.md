@@ -81,7 +81,11 @@ remembers Graft:
   with the exit code and output the harness itself reported, so it is a pass
   or a fail, not a claim. Other commands are ignored. Widen the filter with
   `captureCommands` in the policy. An explicit `graft start` afterwards just
-  names the task and keeps what was captured.
+  names the task and keeps what was captured. A captured command that `cd`s
+  to an absolute path inside the repository is recorded relative to the root
+  (`cd ./pkg && go test ./...`), so it re-runs on another machine. The
+  settings file is tracked: `init` edits it in place, and the edit is meant
+  to be committed, so a per-session `init` leaves a diff until it is.
 - **Git hooks** (`prepare-commit-msg` and `post-commit`). A plain
   `git commit` with a change open gets the Plan and Evidence blocks and the
   trailers in its message and the full record as a note, exactly like
@@ -116,14 +120,19 @@ If you already ran the slow thing through your own tools, attach it instead of
 running it twice: `graft evidence --attach --label "go tests" --exit 0 --output-file
 out.txt -- go test ./...`. Nothing is run; the record carries the command, exit
 code and output as `attested` rather than `pass`, so a reader knows Graft did
-not see it run. Over MCP, pass `exitCode` (and `output`) to `graft_evidence`.
+not see it run, and it does not satisfy `requireEvidence: "command"`, since
+that policy exists to demand a run Graft or a harness saw. Over MCP, pass
+`exitCode` (and `output`) to `graft_evidence`.
 
 `land` commits what's staged, plus any files you name, or everything with
 `-a`. Add your own trailers with `--trailer "Co-Authored-By: ..."` (repeatable;
 `trailers` on `graft_land`). It refuses to commit without evidence (`--allow-no-evidence` overrides)
 and refuses staged files that look like credentials such as `.env`, `*.pem`,
 `*.key` (`--allow-secrets` overrides). Evidence output and notes are scrubbed
-of any value held in an environment variable whose name looks secret.
+of any value held in an environment variable whose name looks secret, and the
+output of a command that names a credential file (`cat nova.json && go test
+./...`, with `nova.json` in `secretFiles`) is withheld from the record
+entirely; the command line itself is kept.
 
 ```
 graft context <paths>  # before editing: the changes that touched these files, sized for a prompt
@@ -138,9 +147,10 @@ newest first, each with its task, plan, evidence lines and the files it
 changed, then stops at `--budget` characters (default 8000), dropping plans
 before it drops older commits. It reads the note when it is in the clone and
 the commit message when it is not, so it works in a fresh clone. `--all` adds
-commits that have no record as one line each; `--json` returns the entries
-with the same text in a `text` field, which is also what `graft_context`
-returns.
+commits that have no record, with their title and files, and the output says
+to pass it when a path's history is all pre-Graft; `--json` returns the
+entries with the same text in a `text` field, which is also what
+`graft_context` returns.
 
 The commit ends up looking like this:
 
@@ -216,17 +226,20 @@ graft check --base origin/main --rerun    # and every recorded passing command i
 
 It walks `base..HEAD`, groups each commit's files the way `graft review`
 does, and fails when a commit that changed behavior has no record, no
-evidence, or (under `requireEvidence: "command"`) no passing command.
-Commits that only touch tests, docs or lockfiles need nothing. With
-`--rerun` each distinct recorded passing command runs once on the current
-checkout and a non-zero exit fails the check, with the output; a recorded
-`graft check --rerun` is run but does not re-run anything itself. `--format
-github` adds annotations and a step summary. The workflow in
-[.github/workflows/graft-check.yml](.github/workflows/graft-check.yml) runs
-it on every pull request; copy it into any repo that uses Graft. It re-runs
-commands only for branches of the same repository, since a fork's commit
-messages are text a stranger wrote, and `checkCommands` in the policy can
-restrict what is re-run further.
+evidence, or (under `requireEvidence: "command"`) no passing command that
+Graft or a harness ran. A commit whose trailers promise evidence that only
+the git note holds fails as "note missing" and says to fetch
+`refs/notes/graft`, rather than as a commit with none. Commits that only
+touch tests, docs or lockfiles need nothing. With `--rerun` each distinct
+recorded passing command, attested ones included, runs once from the root
+of the current checkout and a non-zero exit fails the check, with the
+output; a recorded `graft check --rerun` is run but does not re-run anything
+itself. `--format github` adds annotations and a step summary. The workflow
+in [.github/workflows/graft-check.yml](.github/workflows/graft-check.yml)
+fetches the notes and runs the check on every pull request; copy it into any
+repo that uses Graft. It re-runs commands only for branches of the same
+repository, since a fork's commit messages are text a stranger wrote, and
+`checkCommands` in the policy can restrict what is re-run further.
 
 ## Use it from code
 
@@ -248,8 +261,9 @@ const { commit, record } = await g.land({ paths: ["src/api.ts"] });
 ```
 
 Set `requireEvidence` to `false` to turn off the landing gate for a repo, or
-to `"command"` to require at least one recorded command that exited 0, so a
-note alone (`--note "checked"`) doesn't pass.
+to `"command"` to require at least one recorded command that exited 0 and
+that Graft or a harness ran, so a note alone (`--note "checked"`) or an
+attested run (`--attach --exit 0`) doesn't pass.
 `secretFiles` adds repo-specific globs to the credential guard; `graft init`
 doesn't write it, add it when the repo has its own credential file names.
 `behaviorFiles` lists globs that `graft review` must treat as behavior even
@@ -259,11 +273,13 @@ filled from the environment, so the lines you would otherwise pass with
 `--trailer` on every land cannot be forgotten:
 
 ```json
-{ "version": 1, "requireEvidence": "command", "trailers": ["Claude-Session: $CLAUDE_SESSION_URL"] }
+{ "version": 1, "requireEvidence": "command", "trailers": ["Claude-Session: https://claude.ai/code/session_${CLAUDE_CODE_REMOTE_SESSION_ID#cse_}"] }
 ```
 
 A trailer whose variable is not set is left out of that commit, and `land`
-says so, rather than written with an empty value.
+says so, rather than written with an empty value. `${NAME#prefix}` and
+`${NAME%suffix}` strip a literal affix, as in `sh`, for the case above where
+the variable carries an id in one spelling and the link needs another.
 `captureCommands` lists extra regular expressions for commands the capture
 hooks record on top of the built-in test, build, lint and type-check patterns.
 `checkCommands` lists regular expressions for the commands `graft check

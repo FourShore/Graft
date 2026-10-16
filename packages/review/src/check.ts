@@ -1,4 +1,4 @@
-import { Graft, readPolicy, runShell, type CommandEvidence, type LogEntry, type Policy } from "@fourshore/graft-core";
+import { Graft, GraftError, readPolicy, runShell, type CommandEvidence, type LogEntry, type Policy } from "@fourshore/graft-core";
 import { parseDiff } from "./diff.js";
 import { triage, type Triage } from "./triage.js";
 
@@ -14,6 +14,7 @@ export interface CheckOptions {
 
 export type Finding =
   | { kind: "no-record"; commit: string; title: string; files: string[] }
+  | { kind: "note-missing"; commit: string; title: string; files: string[] }
   | { kind: "no-evidence"; commit: string; title: string; files: string[] }
   | { kind: "no-passing-command"; commit: string; title: string; files: string[] }
   | { kind: "rerun-failed"; command: string; commits: string[]; exitCode: number; output: string }
@@ -35,6 +36,7 @@ export interface Rerun {
 }
 
 export interface CheckResult {
+  /** The base as resolved: `main` becomes `origin/main` in a clone that has no local branch of that name. */
   base: string;
   head: string;
   policy: Policy;
@@ -46,6 +48,9 @@ export interface CheckResult {
   /** Set when `rerun` was asked for but this check is itself a re-run command of an outer check, so it ran nothing. */
   nested?: boolean;
 }
+
+/** The mark the commit message puts on a command it cut short. */
+const CLIPPED = "\u2026";
 
 /** Set in the environment of every re-run command, so a recorded `graft check --rerun` does not re-run itself without end. */
 export const RERUN_ENV = "GRAFT_CHECK_RERUN";
@@ -62,7 +67,8 @@ export async function runCheck(opts: CheckOptions): Promise<CheckResult> {
   const topLevel = await graft.git.topLevel();
   const policy = await readPolicy(topLevel);
   const head = (await graft.git.head()) ?? "";
-  const entries = await graft.log({ range: `${opts.base}..HEAD`, limit: opts.limit ?? 200, noMerges: true });
+  const base = await resolveBase(graft, opts.base);
+  const entries = await graft.log({ range: `${base}..HEAD`, limit: opts.limit ?? 200, noMerges: true });
   const findings: Finding[] = [];
   const commits: CheckedCommit[] = [];
   for (const entry of entries) {
@@ -74,6 +80,9 @@ export async function runCheck(opts: CheckOptions): Promise<CheckResult> {
       const base = { commit: entry.commit, title: entry.title, files: behavior };
       if (!entry.record) {
         findings.push({ kind: "no-record", ...base });
+        ok = false;
+      } else if (noteMissing(entry)) {
+        findings.push({ kind: "note-missing", ...base });
         ok = false;
       } else if (entry.record.evidence.length === 0) {
         findings.push({ kind: "no-evidence", ...base });
@@ -91,7 +100,7 @@ export async function runCheck(opts: CheckOptions): Promise<CheckResult> {
   if (opts.rerun && !nested) {
     const byCommand = new Map<string, string[]>();
     for (const c of commits) {
-      for (const ev of passingCommands(c.entry)) {
+      for (const ev of passingCommands(c.entry, true)) {
         const list = byCommand.get(ev.command) ?? [];
         list.push(c.entry.commit);
         byCommand.set(ev.command, list);
@@ -100,6 +109,11 @@ export async function runCheck(opts: CheckOptions): Promise<CheckResult> {
     for (const [command, shas] of byCommand) {
       if (policy.checkCommands && !policy.checkCommands.some((p) => safeTest(p, command))) {
         findings.push({ kind: "rerun-skipped", command, commits: shas, reason: "not in policy checkCommands" });
+        continue;
+      }
+      if (command.endsWith(CLIPPED)) {
+        // The record came from the commit message, which cuts long commands; running the stump would prove nothing.
+        findings.push({ kind: "rerun-skipped", command, commits: shas, reason: "cut short in the commit message; fetch refs/notes/graft for the full command" });
         continue;
       }
       const started = Date.now();
@@ -118,11 +132,50 @@ export async function runCheck(opts: CheckOptions): Promise<CheckResult> {
     }
   }
   const ok = findings.every((f) => f.kind === "rerun-skipped");
-  return { base: opts.base, head, policy, commits, reruns, findings, ok, ...(nested ? { nested: true } : {}) };
+  return { base, head, policy, commits, reruns, findings, ok, ...(nested ? { nested: true } : {}) };
 }
 
-function passingCommands(entry: LogEntry): CommandEvidence[] {
-  return (entry.record?.evidence ?? []).filter((e): e is CommandEvidence => e.kind === "command" && e.exitCode === 0);
+/**
+ * A CI checkout has `origin/main` but no local `main`, so a recorded
+ * `graft check --base main` would fail there for no reason of its own: when
+ * the base is not a ref in this clone, try the same name under `origin/`.
+ */
+async function resolveBase(graft: Graft, base: string): Promise<string> {
+  const exists = async (ref: string) => {
+    try {
+      await graft.git.run(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (await exists(base)) return base;
+  if (await exists(`origin/${base}`)) return `origin/${base}`;
+  throw new GraftError(`Base "${base}" is not a commit in this clone (nor is origin/${base}). Fetch it, or pass --base <ref>.`);
+}
+
+/**
+ * The commands recorded as exiting 0. An attested run is the author's claim,
+ * so it does not satisfy the policy unless `withAttested` is set; re-runs
+ * include it, since running it is how the claim becomes a fact.
+ */
+function passingCommands(entry: LogEntry, withAttested = false): CommandEvidence[] {
+  return (entry.record?.evidence ?? []).filter(
+    (e): e is CommandEvidence => e.kind === "command" && e.exitCode === 0 && (withAttested || !e.attested),
+  );
+}
+
+/**
+ * The commit's trailer says it carries evidence, but the clone has no note
+ * and the message holds no Evidence block (records older than 0.0.6 kept it
+ * in the note alone), so nothing can be judged until the note is fetched.
+ */
+function noteMissing(entry: LogEntry): boolean {
+  return (
+    entry.recordSource === "message" &&
+    entry.record?.evidence.length === 0 &&
+    (entry.trailers["Graft-Evidence"] ?? "none") !== "none"
+  );
 }
 
 function safeTest(pattern: string, s: string): boolean {
@@ -142,9 +195,7 @@ export function renderCheckText(r: CheckResult): string {
     const r0 = c.entry.record;
     const who = r0 ? `${r0.author.kind}:${r0.author.name}` : c.entry.authorName;
     const files = `${c.triage.groups.behavior.length} behavior, ${c.triage.groups.tests.length} tests, ${c.triage.groups.mechanical.length} mechanical`;
-    const ev = r0
-      ? `${passingCommands(c.entry).length} passing command${passingCommands(c.entry).length === 1 ? "" : "s"}, ${r0.evidence.length} evidence`
-      : "no record";
+    const ev = r0 ? `${describePassing(c.entry)}, ${r0.evidence.length} evidence` : "no record";
     lines.push(`  ${c.ok ? "ok  " : "FAIL"} ${c.entry.commit.slice(0, 10)}  ${c.entry.title}`);
     lines.push(`       ${c.triage.risk} · ${who} · ${files} · ${ev}`);
   }
@@ -163,14 +214,22 @@ export function renderCheckText(r: CheckResult): string {
   return lines.join("\n");
 }
 
+function describePassing(entry: LogEntry): string {
+  const run = passingCommands(entry).length;
+  const attested = passingCommands(entry, true).length - run;
+  return `${run} passing command${run === 1 ? "" : "s"}${attested ? ` (${attested} more attested)` : ""}`;
+}
+
 export function describeFinding(f: Finding): string {
   switch (f.kind) {
     case "no-record":
       return `${f.commit.slice(0, 10)} "${f.title}" changed ${f.files.join(", ")} with no change record. Land it with graft land, or commit with the Graft hooks installed.`;
+    case "note-missing":
+      return `${f.commit.slice(0, 10)} "${f.title}" changed ${f.files.join(", ")} and its evidence lives only in the git note, which this clone does not have. Fetch it (git fetch origin '+refs/notes/graft:refs/notes/graft', or graft sync) and check again.`;
     case "no-evidence":
       return `${f.commit.slice(0, 10)} "${f.title}" changed ${f.files.join(", ")} with a record but no evidence.`;
     case "no-passing-command":
-      return `${f.commit.slice(0, 10)} "${f.title}" changed ${f.files.join(", ")} with no passing command as evidence (policy requireEvidence: "command").`;
+      return `${f.commit.slice(0, 10)} "${f.title}" changed ${f.files.join(", ")} with no passing command as evidence (policy requireEvidence: "command"; notes and attested runs do not count).`;
     case "rerun-failed":
       return `"${f.command}" was recorded as passing on ${f.commits.map((s) => s.slice(0, 10)).join(", ")} but exits ${f.exitCode} on this checkout.\n${indent(tail(f.output, 20))}`;
     case "rerun-skipped":
