@@ -188,10 +188,21 @@ export class Graft {
     return open;
   }
 
+  private topLevelCache?: Promise<string>;
+
+  /** The working tree root, asked of git once per Graft instance. */
+  private topLevel(): Promise<string> {
+    this.topLevelCache ??= this.git.topLevel().catch((err) => {
+      this.topLevelCache = undefined;
+      throw err;
+    });
+    return this.topLevelCache;
+  }
+
   /** Run a command, capture its result as evidence. The command runs in the repo root. */
   async evidenceCommand(command: string, label?: string): Promise<Evidence> {
     const open = await this.requireOpen();
-    const cwd = await this.git.topLevel();
+    const cwd = await this.topLevel();
     const started = Date.now();
     const { exitCode, output } = await runShell(command, cwd);
     const ev: Evidence = {
@@ -272,7 +283,7 @@ export class Graft {
    * hook sees the whole transcript and the record outlives the key.
    */
   private async keepOutput(command: string, output: string): Promise<string> {
-    const policy = await readPolicy(await this.git.topLevel());
+    const policy = await readPolicy(await this.topLevel());
     const named = secretFilesNamed(command, policy.secretFiles);
     if (named.length) return `[output withheld: the command names ${named.join(", ")}, which looks like a credential file]`;
     return capOutput(redact(output));
