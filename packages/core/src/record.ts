@@ -71,6 +71,18 @@ export interface CommandEvidence {
    * readers show it as "attested", not "pass".
    */
   attested?: true;
+  /**
+   * Hash of the working tree (tracked and untracked files, ignored ones left
+   * out) when the run finished, so land can tell whether the files being
+   * committed are the ones the run checked. Absent when git could not say.
+   */
+  tree?: string;
+  /**
+   * Set at land when a passing run's `tree` differs, for a file a policy rule
+   * covers, from what was committed: the run happened before the last edit.
+   * A stale run does not satisfy a rule; the message line says `stale`.
+   */
+  stale?: true;
 }
 
 export interface NoteEvidence {
@@ -161,6 +173,7 @@ const MESSAGE_LINE_CAP = 200;
  * contains ": " is never mistaken for a label.
  *
  *   [pass unit tests] npm test (12.3s)
+ *   [stale test] npm test (12.3s)
  *   [fail 1] npm run lint (0.4s)
  *   [attested go tests] go test ./...
  *   [attested fail 2 build] yarn build
@@ -174,7 +187,7 @@ export function evidenceLines(evidence: Evidence[]): string[] {
     if (ev.kind === "note") return `  [note${label}] ${clip(oneLine(ev.text))}`;
     const failed = ev.exitCode === 0 ? "" : ` fail ${ev.exitCode}`;
     if (ev.attested) return `  [attested${failed}${label}] ${clip(oneLine(ev.command))}`;
-    const status = ev.exitCode === 0 ? "pass" : `fail ${ev.exitCode}`;
+    const status = ev.exitCode !== 0 ? `fail ${ev.exitCode}` : ev.stale ? "stale" : "pass";
     return `  [${status}${label}] ${clip(oneLine(ev.command))} (${(ev.durationMs / 1000).toFixed(1)}s)`;
   });
 }
@@ -184,7 +197,7 @@ function bracketSafe(label: string): string {
   return oneLine(label).replace(/[[\]]/g, "").slice(0, 60);
 }
 
-const EVIDENCE_LINE = /^\s*\[(pass|fail (-?\d+)|note|attested(?: fail (-?\d+))?)(?: ([^\]]*))?\] (.*)$/;
+const EVIDENCE_LINE = /^\s*\[(pass|stale|fail (-?\d+)|note|attested(?: fail (-?\d+))?)(?: ([^\]]*))?\] (.*)$/;
 const DURATION = /^(.*) \((\d+(?:\.\d+)?)s\)$/;
 
 /**
@@ -221,7 +234,16 @@ export function parseMessageRecord(message: string, authoredAt: string): ChangeR
       rest = d[1];
       durationMs = Math.round(Number(d[2]) * 1000);
     }
-    evidence.push({ kind: "command", at: authoredAt, command: rest, exitCode: failCode ? Number(failCode) : 0, durationMs, output: "", label });
+    evidence.push({
+      kind: "command",
+      at: authoredAt,
+      command: rest,
+      exitCode: failCode ? Number(failCode) : 0,
+      durationMs,
+      output: "",
+      label,
+      ...(status === "stale" ? { stale: true as const } : {}),
+    });
   }
   const [kind, ...name] = (trailers[TRAILER_KEYS.author] ?? "human:unknown").split(":");
   return {

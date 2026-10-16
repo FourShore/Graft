@@ -382,6 +382,96 @@ describe("command catalog and rules", () => {
   });
 });
 
+describe("stale evidence", () => {
+  const policy = { version: 1, commands: { test: "true", lint: "true" }, rules: [{ paths: ["src/**"], require: ["test"] }] };
+  const tree = (ev: unknown) => (ev as { tree?: string }).tree;
+
+  it("records the tree a run checked and refuses a rule-required run that predates an edit to a covered file", async () => {
+    await mkdir(join(dir, ".graft"), { recursive: true });
+    await writeFile(join(dir, ".graft/policy.json"), JSON.stringify(policy));
+    await mkdir(join(dir, "src"), { recursive: true });
+    await graft.start({ task: "stale" });
+    await writeFile(join(dir, "src", "a.ts"), "1\n");
+    const first = await graft.evidenceNamed("test");
+    expect(tree(first)).toMatch(/^[0-9a-f]{40}$/);
+    await writeFile(join(dir, "src", "a.ts"), "2\n");
+    await expect(graft.land({ all: true })).rejects.toThrow(/"test" \(true\) last passed before src\/a\.ts changed.*graft evidence test again/);
+    sh(["reset", "-q"]);
+    const second = await graft.evidenceNamed("test");
+    expect(tree(second)).not.toBe(tree(first));
+    // An edit outside the rule's paths does not make the run stale for that rule.
+    await writeFile(join(dir, "README.md"), "docs\n");
+    const { commit } = await graft.land({ all: true });
+    const body = sh(["log", "-1", "--format=%B", commit]);
+    // The first run is marked stale in the message and the note: a.ts was edited after it ran.
+    expect(body).toMatch(/Evidence:\n  \[stale test\] true \(\d+\.\ds\)\n  \[pass test\] true \(\d+\.\ds\)\n/);
+    const note = JSON.parse(sh(["notes", "--ref=refs/notes/graft", "show", commit]));
+    expect(note.evidence.map((e: { stale?: true }) => e.stale)).toEqual([true, undefined]);
+    sh(["notes", "--ref=refs/notes/graft", "remove", commit]);
+    const rebuilt = (await graft.show(commit))!.record!;
+    expect(rebuilt.evidence.map((e) => e.kind === "command" && e.stale)).toEqual([true, undefined]);
+    expect(evaluateRules(await readPolicy(dir), ["src/a.ts"], rebuilt.evidence)).toEqual([]);
+  });
+
+  it("lets a stale run through with --allow-no-evidence, marked so that check sees the rule unmet", async () => {
+    await mkdir(join(dir, ".graft"), { recursive: true });
+    await writeFile(join(dir, ".graft/policy.json"), JSON.stringify(policy));
+    await mkdir(join(dir, "src"), { recursive: true });
+    await graft.start({ task: "bypass" });
+    await writeFile(join(dir, "src", "a.ts"), "1\n");
+    await graft.evidenceNamed("test");
+    await writeFile(join(dir, "src", "a.ts"), "2\n");
+    const { commit } = await graft.land({ all: true, allowNoEvidence: true });
+    expect(sh(["log", "-1", "--format=%B", commit])).toContain("[stale test] true");
+    sh(["notes", "--ref=refs/notes/graft", "remove", commit]);
+    const rebuilt = (await graft.show(commit))!.record!;
+    expect(evaluateRules(await readPolicy(dir), ["src/a.ts"], rebuilt.evidence).map((u) => u.name)).toEqual(["test"]);
+  });
+
+  it("takes a run with no recorded tree, or a tree this clone lacks, as fresh", async () => {
+    await mkdir(join(dir, ".graft"), { recursive: true });
+    await writeFile(join(dir, ".graft/policy.json"), JSON.stringify(policy));
+    await mkdir(join(dir, "src"), { recursive: true });
+    await graft.start({ task: "old record" });
+    await writeFile(join(dir, "src", "a.ts"), "1\n");
+    await graft.evidenceNamed("test");
+    const open = (await graft.status())!;
+    delete (open.evidence[0] as { tree?: string }).tree;
+    await writeFile(join(dir, ".git", "graft", "open.json"), JSON.stringify(open));
+    await writeFile(join(dir, "src", "a.ts"), "2\n");
+    await expect(graft.land({ all: true })).resolves.toBeTruthy();
+
+    await graft.start({ task: "pruned tree" });
+    await writeFile(join(dir, "src", "a.ts"), "3\n");
+    await graft.evidenceNamed("test");
+    const again = (await graft.status())!;
+    (again.evidence[0] as { tree?: string }).tree = "0".repeat(40);
+    await writeFile(join(dir, ".git", "graft", "open.json"), JSON.stringify(again));
+    await writeFile(join(dir, "src", "a.ts"), "4\n");
+    await expect(graft.land({ all: true })).resolves.toBeTruthy();
+    expect(sh(["log", "-1", "--format=%B"])).toContain("[pass test] true");
+  });
+
+  it("hashes untracked files too, so a new file the run never saw counts as a change", async () => {
+    await mkdir(join(dir, ".graft"), { recursive: true });
+    await writeFile(join(dir, ".graft/policy.json"), JSON.stringify(policy));
+    await mkdir(join(dir, "src"), { recursive: true });
+    await writeFile(join(dir, "src", "a.ts"), "1\n");
+    sh(["add", "-A"]);
+    sh(["commit", "-q", "-m", "base"]);
+    await graft.start({ task: "new file" });
+    await writeFile(join(dir, "src", "a.ts"), "2\n");
+    const captured = await handleClaudeCodeEvent(graft, { hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: { command: "true" }, tool_response: { stdout: "" } });
+    expect(captured).toMatchObject({ action: "recorded", name: "test" });
+    expect(tree((await graft.status())!.evidence[0])).toMatch(/^[0-9a-f]{40}$/);
+    await writeFile(join(dir, "src", "b.ts"), "new\n");
+    await expect(graft.land({ all: true })).rejects.toThrow(/before src\/b\.ts changed/);
+    sh(["reset", "-q"]);
+    await graft.evidenceNamed("test");
+    await expect(graft.land({ all: true })).resolves.toBeTruthy();
+  });
+});
+
 describe("capture", () => {
   it("classifies test, build, lint and type-check commands and nothing else", () => {
     expect(classifyCommand("npm test")).toBe("test");

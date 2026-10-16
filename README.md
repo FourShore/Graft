@@ -95,8 +95,12 @@ without invalidating history. `rules` are checked by `land` against the
 staged files and by `check` against each commit: a change that touches a
 file matching `paths` must carry a passing run, by Graft or a harness and
 not attested, of every name in `require`. `land` refuses otherwise and
-says which name to run; `check` fails the commit. A rule that names a
-command the catalog does not define is a policy error. This is how the
+says which name to run; `check` fails the commit. The run must also be of
+the files being committed: every run records a hash of the working tree it
+checked, and a run that predates an edit to a file the rule covers is
+`stale`, which `land` refuses the same way (`graft evidence test` again) and
+which the message records as `[stale test]` if it lands anyway. A rule that
+names a command the catalog does not define is a policy error. This is how the
 command list in a repo's CLAUDE.md becomes something the gate enforces
 rather than prose.
 

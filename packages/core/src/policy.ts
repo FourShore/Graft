@@ -150,11 +150,9 @@ export interface UnmetRule {
 export function evaluateRules(policy: Policy, files: string[], evidence: Evidence[]): UnmetRule[] {
   const commands = policy.commands ?? {};
   const unmet = new Map<string, Set<string>>();
-  for (const rule of policy.rules ?? []) {
-    const hit = files.filter((f) => rule.paths.some((g) => globToRegExp(g).test(f.replace(/\\/g, "/"))));
-    if (!hit.length) continue;
+  for (const { rule, files: hit } of rulesHit(policy, files)) {
     for (const name of rule.require) {
-      if (commands[name] && covers(evidence, name, commands[name])) continue;
+      if (commands[name] && coveringRuns(evidence, name, commands[name]).length) continue;
       const set = unmet.get(name) ?? new Set<string>();
       for (const f of hit) set.add(f);
       unmet.set(name, set);
@@ -163,13 +161,29 @@ export function evaluateRules(policy: Policy, files: string[], evidence: Evidenc
   return [...unmet].map(([name, set]) => ({ name, command: commands[name] ?? "", files: [...set] }));
 }
 
-function covers(evidence: Evidence[], name: string, command: string): boolean {
+/** The rules whose paths match any of `files`, each with the files that matched. */
+export function rulesHit(policy: Policy, files: string[]): { rule: CoverageRule; files: string[] }[] {
+  const out: { rule: CoverageRule; files: string[] }[] = [];
+  for (const rule of policy.rules ?? []) {
+    const hit = files.filter((f) => rule.paths.some((g) => globToRegExp(g).test(f.replace(/\\/g, "/"))));
+    if (hit.length) out.push({ rule, files: hit });
+  }
+  return out;
+}
+
+/**
+ * The runs that count for a named command: exited 0, run by Graft or a
+ * harness (not attested), not marked stale, and carrying the name, the name
+ * as label (a record rebuilt from a commit message), or the catalog's text.
+ */
+export function coveringRuns(evidence: Evidence[], name: string, command: string): CommandEvidence[] {
   const want = normalizeCommand(command);
-  return evidence.some(
+  return evidence.filter(
     (e): e is CommandEvidence =>
       e.kind === "command" &&
       e.exitCode === 0 &&
       !e.attested &&
+      !e.stale &&
       (e.name === name || e.label === name || normalizeCommand(e.command) === want),
   );
 }

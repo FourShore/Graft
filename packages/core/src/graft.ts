@@ -4,6 +4,7 @@ import { Git } from "./git.js";
 import {
   type ChangeAuthor,
   type ChangeRecord,
+  type CommandEvidence,
   type Evidence,
   EVIDENCE_OUTPUT_CAP,
   NOTES_REF,
@@ -17,12 +18,12 @@ import {
   trailersFor,
 } from "./record.js";
 import { OpenChangeStore } from "./store.js";
-import { DEFAULT_POLICY, POLICY_PATH, readPolicy, expandTemplate, expandTrailers, evaluateRules, type Policy } from "./policy.js";
+import { DEFAULT_POLICY, POLICY_PATH, readPolicy, expandTemplate, expandTrailers, evaluateRules, rulesHit, coveringRuns, type Policy } from "./policy.js";
 import { looksLikeSecretFile, redact, secretFilesNamed } from "./redact.js";
 import { writeCiWorkflow, type CiResult } from "./ci.js";
 import { writeAgentsSection, type AgentsResult } from "./agents.js";
 import { installHooks, type HooksResult } from "./hooks.js";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 export class GraftError extends Error {
@@ -244,6 +245,7 @@ export class Graft {
       output: await this.keepOutput(command, output),
       label,
       ...(name ? { name } : {}),
+      ...(await this.treeField()),
     };
     open.evidence.push(ev);
     await this.store.write(open);
@@ -293,6 +295,7 @@ export class Graft {
       label,
       ...(name ? { name } : {}),
       attested: true,
+      ...(await this.treeField()),
     };
     open.evidence.push(ev);
     await this.store.write(open);
@@ -327,10 +330,93 @@ export class Graft {
       label: run.label,
       ...(run.name ? { name: run.name } : {}),
       via: run.via,
+      ...(await this.treeField()),
     };
     open.evidence.push(ev);
     await this.store.write(open);
     return ev;
+  }
+
+  /** `{ tree }` for a new evidence entry, or nothing when the tree cannot be hashed. */
+  private async treeField(): Promise<{ tree?: string }> {
+    const tree = await this.worktreeHash();
+    return tree ? { tree } : {};
+  }
+
+  /**
+   * A hash of the working tree as it stands: tracked and untracked files,
+   * ignored ones left out, whatever is or is not staged. Built in an empty
+   * scratch index so the real one is untouched and every file is read, not
+   * trusted from a stat cache: a file rewritten within the same second at the
+   * same size would otherwise hash as its old content. The tree object stays
+   * in the object store, unreferenced, long enough for the change to land.
+   */
+  private async worktreeHash(): Promise<string | undefined> {
+    try {
+      const gitDir = await this.git.gitDir();
+      const dir = join(gitDir, "graft");
+      await mkdir(dir, { recursive: true });
+      const scratch = join(dir, `index.${process.pid}.${Date.now()}`);
+      const env = { GIT_INDEX_FILE: scratch };
+      try {
+        await this.git.run(["add", "-A"], { env });
+        return await this.git.run(["write-tree"], { env });
+      } finally {
+        await rm(scratch, { force: true });
+      }
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * The files among `files` whose staged content differs from `tree`, or null
+   * when the tree is not in this repository (recorded elsewhere, or pruned).
+   */
+  private async changedSince(tree: string, files: string[]): Promise<string[] | null> {
+    try {
+      const out = await this.git.run(["diff", "--cached", "--name-only", "--no-renames", tree, "--", ...files.map((f) => `:(top)${f}`)]);
+      return out.split("\n").filter(Boolean);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * For each rule the staged files hit, the required commands whose every
+   * covering run predates an edit to a file the rule covers. A run with no
+   * recorded tree, or a tree this clone no longer has, is taken as fresh:
+   * staleness is refused only when it is certain. Runs that are stale for a
+   * rule are marked so, so the commit message says `stale` where a reader
+   * would otherwise see `pass`.
+   */
+  private async staleRules(policy: Policy, staged: string[], evidence: Evidence[]): Promise<{ name: string; command: string; files: string[] }[]> {
+    const commands = policy.commands ?? {};
+    const stale = new Map<string, Set<string>>();
+    const staleRuns = new Set<CommandEvidence>();
+    for (const { rule, files } of rulesHit(policy, staged)) {
+      for (const name of rule.require) {
+        const command = commands[name];
+        if (!command) continue;
+        const runs = coveringRuns(evidence, name, command);
+        if (!runs.length) continue; // unmet, which the caller reports first
+        let fresh = false;
+        const changed = new Set<string>();
+        for (const run of runs) {
+          const diff = run.tree ? await this.changedSince(run.tree, files) : null;
+          if (diff === null || diff.length === 0) {
+            fresh = true;
+            continue;
+          }
+          staleRuns.add(run);
+          for (const f of diff) changed.add(f);
+        }
+        if (!fresh) stale.set(name, changed);
+      }
+    }
+    // Mark after judging every rule, so a run stale for one rule still counts for another it is fresh for.
+    for (const run of staleRuns) run.stale = true;
+    return [...stale].map(([name, files]) => ({ name, command: commands[name], files: [...files] }));
   }
 
   /**
@@ -370,16 +456,24 @@ export class Graft {
     if (staged.length === 0) {
       throw new GraftError("Nothing staged to commit. Stage files, name paths, or pass --all.");
     }
-    if (!opts.allowNoEvidence) {
-      const unmet = evaluateRules(policy, staged, open.evidence);
-      if (unmet.length) {
-        const wants = unmet.map((u) => `"${u.name}" (${u.command})`).join(" and ");
-        const files = [...new Set(unmet.flatMap((u) => u.files))];
-        throw new GraftError(
-          `Policy requires a passing run of ${wants} for changes to ${files.join(", ")}. ` +
-            `Run graft evidence ${unmet.map((u) => u.name).join(", graft evidence ")}, or pass --allow-no-evidence.`,
-        );
-      }
+    const unmet = opts.allowNoEvidence ? [] : evaluateRules(policy, staged, open.evidence);
+    if (unmet.length) {
+      const wants = unmet.map((u) => `"${u.name}" (${u.command})`).join(" and ");
+      const files = [...new Set(unmet.flatMap((u) => u.files))];
+      throw new GraftError(
+        `Policy requires a passing run of ${wants} for changes to ${files.join(", ")}. ` +
+          `Run graft evidence ${unmet.map((u) => u.name).join(", graft evidence ")}, or pass --allow-no-evidence.`,
+      );
+    }
+    // Marks stale runs as a side effect, so the message is honest even when the gate is bypassed.
+    const stale = await this.staleRules(policy, staged, open.evidence);
+    if (stale.length && !opts.allowNoEvidence) {
+      const wants = stale.map((s) => `"${s.name}" (${s.command})`).join(" and ");
+      const files = [...new Set(stale.flatMap((s) => s.files))];
+      throw new GraftError(
+        `${wants} last passed before ${files.join(", ")} changed, so the run did not check what is being committed. ` +
+          `Run graft evidence ${stale.map((s) => s.name).join(", graft evidence ")} again, or pass --allow-no-evidence.`,
+      );
     }
     const suspicious = staged.filter((p) => looksLikeSecretFile(p, policy.secretFiles));
     if (suspicious.length > 0 && !opts.allowSecrets) {

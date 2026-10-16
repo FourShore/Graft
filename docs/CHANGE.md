@@ -81,7 +81,18 @@ Two kinds in version 1.
   command that matched the catalog); the message line carries the name in
   place of any free label, so a record rebuilt from the message still
   satisfies the rules that ask for that name and `graft check --rerun` can
-  run the name's current definition without the note.
+  run the name's current definition without the note. `tree` is the hash of
+  the working tree (tracked and untracked files, ignored ones left out) when
+  the run finished, hashed from an empty scratch index so it reflects
+  content, not a stat cache; it stays in the note. At land, a passing run
+  that a rule relies on is compared with what is being committed: when a
+  file the rule covers differs from the run's tree, the run is `stale`, it
+  does not satisfy the rule, and `land` refuses unless another run of the
+  same name is fresh (or `--allow-no-evidence` is passed). A stale run that
+  lands is written as `[stale name]` in the message, so a record rebuilt
+  from the message still reads it as not covering the rule. A run with no
+  `tree`, or whose tree this clone no longer has, is taken as fresh:
+  staleness is asserted only when it is certain.
 - `note`: free text for verification that did not come from a command: a manual
   check, a link to a CI run, a screenshot description.
 
@@ -141,8 +152,8 @@ is reserved.
 The commit title is the task truncated to 72 characters unless the author gives
 a better one. The plan, if any, goes in the body under `Plan:` so it reads well
 in any git tool. The evidence list goes under `Evidence:`, one line per entry.
-The bracket holds the status, `pass`, `fail <exit code>` or `note`, and then
-the label if there is one (`[pass unit tests]`, `[note manual]`); after it
+The bracket holds the status, `pass`, `stale`, `fail <exit code>` or `note`,
+and then the label if there is one (`[pass unit tests]`, `[note manual]`); after it
 come the command and its duration, or the note text. Keeping the label inside
 the bracket means a command or note containing `: ` is read back exactly.
 Labels lose any square brackets; commands and notes are collapsed to one line
@@ -233,8 +244,9 @@ checks, named once, run by `graft evidence <name>`, recognised by the
 capture hooks, and re-run by `graft check --rerun` under their current
 definition. `rules`, optional, is a list of `{ "paths": [globs], "require":
 [names] }`: a change touching a file that matches `paths` must carry a
-passing, non-attested run of every named command, or `land` refuses and
-`check` fails the commit. A rule naming a command that `commands` does not
+passing, non-attested run of every named command, made on the content being
+committed (see `tree` under Evidence), or `land` refuses and `check` fails
+the commit. A rule naming a command that `commands` does not
 define makes the policy unreadable, so the mistake surfaces at once. Readers
 reject unknown policy versions. The file is committed, so changing policy is a
 reviewed change like any other.
