@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { beforeEach, describe, expect, it } from "vitest";
 import { Graft, GraftError } from "../src/graft.js";
-import { isChangeId, newChangeId, parseTrailers } from "../src/record.js";
+import { isChangeId, newChangeId, parseTrailers, shellJoin } from "../src/record.js";
 
 let dir: string;
 let graft: Graft;
@@ -43,6 +43,18 @@ describe("start / status / abandon", () => {
 
   it("requires a task", async () => {
     await expect(graft.start({ task: "  " })).rejects.toThrow(/task/i);
+  });
+});
+
+describe("shellJoin", () => {
+  it("quotes argv elements so the shell sees them as given", async () => {
+    expect(shellJoin(["npm", "test"])).toBe("npm test");
+    expect(shellJoin(["node", "-e", 'console.log("a b")'])).toBe(`node -e 'console.log("a b")'`);
+    expect(shellJoin(["echo", "it's"])).toBe(`echo 'it'\\''s'`);
+    expect(shellJoin(["npm test && npm run lint"])).toBe("npm test && npm run lint");
+    await graft.start({ task: "q" });
+    const ev = await graft.evidenceCommand(shellJoin(["node", "-e", 'console.log("a b", (1+1))']));
+    expect(ev.kind === "command" && [ev.exitCode, ev.output.trim()]).toEqual([0, "a b 2"]);
   });
 });
 
@@ -297,7 +309,7 @@ describe("init", () => {
 
     await writeFile(join(dir, "CLAUDE.md"), "Notes.\n\n@AGENTS.md\n");
     const second = await graft.init();
-    expect(second.agents).toEqual({ written: false, alreadyThere: true, claudeHint: false });
+    expect(second.agents).toEqual({ written: false, alreadyThere: true, coveredBy: "AGENTS.md", claudeHint: false });
     expect(await readFile(join(dir, "AGENTS.md"), "utf8")).toBe(agents);
 
     expect((await graft.init({ agents: false })).agents).toBeUndefined();
@@ -306,7 +318,7 @@ describe("init", () => {
   it("leaves AGENTS.md alone when CLAUDE.md already covers Graft", async () => {
     await writeFile(join(dir, "CLAUDE.md"), "## Version control\n\nRun `graft start` before editing.\n");
     const r = await graft.init();
-    expect(r.agents).toEqual({ written: false, alreadyThere: true, claudeHint: false });
+    expect(r.agents).toEqual({ written: false, alreadyThere: true, coveredBy: "CLAUDE.md", claudeHint: false });
     await expect(readFile(join(dir, "AGENTS.md"), "utf8")).rejects.toThrow();
   });
 

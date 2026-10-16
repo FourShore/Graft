@@ -233,3 +233,16 @@ function readBlock(lines: string[], header: string): string | null {
 function clip(s: string): string {
   return s.length > MESSAGE_LINE_CAP ? s.slice(0, MESSAGE_LINE_CAP - 1) + "…" : s;
 }
+
+const SAFE_ARG = /^[A-Za-z0-9_@%+=:,./-]+$/;
+
+/**
+ * Turn an argv into one POSIX shell command string. Every element is quoted
+ * unless it is plainly safe, so `node -e 'console.log("a b")'` survives the
+ * trip through /bin/sh. A single element is returned as written, so
+ * `graft evidence -- "npm test && npm run lint"` still runs through the shell.
+ */
+export function shellJoin(argv: string[]): string {
+  if (argv.length === 1) return argv[0];
+  return argv.map((a) => (SAFE_ARG.test(a) ? a : `'${a.replace(/'/g, `'\\''`)}'`)).join(" ");
+}

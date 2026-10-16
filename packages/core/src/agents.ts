@@ -1,8 +1,8 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-export const AGENTS_PATH = "AGENTS.md";
-export const CLAUDE_PATH = "CLAUDE.md";
+export const AGENTS_PATH = "AGENTS.md" as const;
+export const CLAUDE_PATH = "CLAUDE.md" as const;
 
 /**
  * The section `graft init` adds to AGENTS.md so an agent working in the repo
@@ -33,6 +33,8 @@ export interface AgentsResult {
   written: boolean;
   /** True if AGENTS.md or CLAUDE.md already mentioned Graft, so nothing was written. */
   alreadyThere: boolean;
+  /** Which file already covered Graft, when alreadyThere is true. */
+  coveredBy?: "AGENTS.md" | "CLAUDE.md";
   /** True if CLAUDE.md is absent or does not import AGENTS.md, so Claude Code won't read it. */
   claudeHint: boolean;
 }
@@ -50,8 +52,8 @@ export async function writeAgentsSection(topLevel: string): Promise<AgentsResult
   const existing = await readOrNull(agentsFile);
   const claude = await readOrNull(join(topLevel, CLAUDE_PATH));
   const claudeHint = !claude || !/^@AGENTS\.md\s*$/m.test(claude);
-  if (MENTIONS_GRAFT.test(existing ?? "")) return { written: false, alreadyThere: true, claudeHint };
-  if (MENTIONS_GRAFT.test(claude ?? "")) return { written: false, alreadyThere: true, claudeHint: false };
+  if (MENTIONS_GRAFT.test(existing ?? "")) return { written: false, alreadyThere: true, coveredBy: AGENTS_PATH, claudeHint };
+  if (MENTIONS_GRAFT.test(claude ?? "")) return { written: false, alreadyThere: true, coveredBy: CLAUDE_PATH, claudeHint: false };
   const body = existing ? existing.replace(/\s*$/, "\n\n") + AGENTS_SECTION : AGENTS_SECTION;
   await writeFile(agentsFile, body);
   return { written: true, alreadyThere: false, claudeHint };

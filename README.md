@@ -81,6 +81,11 @@ graft land src/api.ts src/api.test.ts -m "Add rate limiting"
 graft sync
 ```
 
+`evidence` runs what follows `--` with each argument passed as given, so
+quotes and parentheses survive (`graft evidence -- node -e 'console.log("ok")'`).
+A single argument is run through the shell as written, so pipes and `&&`
+work there (`graft evidence -- "npm test && npm run lint"`).
+
 `land` commits what's staged, plus any files you name, or everything with
 `-a`. Add your own trailers with `--trailer "Co-Authored-By: ..."` (repeatable;
 `trailers` on `graft_land`). It refuses to commit without evidence (`--allow-no-evidence` overrides)
