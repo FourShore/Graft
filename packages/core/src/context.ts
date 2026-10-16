@@ -100,7 +100,6 @@ export function renderContextEntry(e: ContextEntry, full: boolean): string {
     lines.push(`  evidence: ${evidenceSummary(r.evidence)}`);
   }
   if (e.files.length) lines.push(`  files: ${e.files.join(", ")}`);
-  if (e.recordSource === "message") lines.push(`  (note missing; rebuilt from the commit message)`);
   return lines.join("\n");
 }
 

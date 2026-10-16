@@ -19,6 +19,7 @@ import {
 import { OpenChangeStore } from "./store.js";
 import { DEFAULT_POLICY, POLICY_PATH, readPolicy, expandTrailers, evaluateRules, type Policy } from "./policy.js";
 import { looksLikeSecretFile, redact, secretFilesNamed } from "./redact.js";
+import { writeCiWorkflow, type CiResult } from "./ci.js";
 import { writeAgentsSection, type AgentsResult } from "./agents.js";
 import { installHooks, type HooksResult } from "./hooks.js";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -71,6 +72,8 @@ export interface InitResult {
   agents?: AgentsResult;
   /** What happened to the capture hooks; absent when `hooks: false`. */
   hooks?: HooksResult;
+  /** What happened to the check workflow; absent unless `ci: true`. */
+  ci?: CiResult;
 }
 
 export interface CapturedRun {
@@ -469,7 +472,7 @@ export class Graft {
    * fetch the notes ref alongside branches, write a starter policy file, and
    * tell agents how to use Graft in AGENTS.md. Safe to run more than once.
    */
-  async init(opts: { remote?: string; force?: boolean; agents?: boolean; hooks?: boolean } = {}): Promise<InitResult> {
+  async init(opts: { remote?: string; force?: boolean; agents?: boolean; hooks?: boolean; ci?: boolean } = {}): Promise<InitResult> {
     const topLevel = await this.git.topLevel();
     const configured: string[] = [];
     const want: Array<[string, string]> = [
@@ -508,7 +511,8 @@ export class Graft {
     }
     const agents = opts.agents === false ? undefined : await writeAgentsSection(topLevel);
     const hooks = opts.hooks === false ? undefined : await installHooks(this.git, topLevel);
-    return { topLevel, configured, policyWritten, remote: remote ?? undefined, agents, hooks };
+    const ci = opts.ci ? await writeCiWorkflow(topLevel) : undefined;
+    return { topLevel, configured, policyWritten, remote: remote ?? undefined, agents, hooks, ci };
   }
 
   /**
@@ -736,9 +740,8 @@ function indent(s: string): string {
 function defaultAuthor(partial?: Partial<ChangeAuthor>): ChangeAuthor {
   const env = process.env;
   const name = partial?.name ?? env.GRAFT_AUTHOR ?? (env.CLAUDECODE ? "claude-code" : env.USER ?? "unknown");
-  const model = partial?.model ?? env.GRAFT_MODEL ?? env.ANTHROPIC_MODEL ?? undefined;
-  const kind = partial?.kind ?? (model || env.CLAUDECODE || env.GRAFT_AUTHOR ? "agent" : "human");
-  return { kind, name, model };
+  const kind = partial?.kind ?? (env.CLAUDECODE || env.GRAFT_AUTHOR ? "agent" : "human");
+  return { kind, name };
 }
 
 function capOutput(s: string): string {

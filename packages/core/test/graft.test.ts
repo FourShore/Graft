@@ -96,7 +96,7 @@ describe("evidence", () => {
 
 describe("land", () => {
   it("writes trailers and a note, then clears the open change", async () => {
-    await graft.start({ task: "add greeting", plan: "write hello.txt", author: { name: "test-agent", model: "m-1", kind: "agent" } });
+    await graft.start({ task: "add greeting", plan: "write hello.txt", author: { name: "test-agent", kind: "agent" } });
     await writeFile(join(dir, "hello.txt"), "hi\n");
     await graft.evidenceCommand("test -f hello.txt", "file exists");
     const { record, commit } = await graft.land({ all: true });
@@ -107,7 +107,7 @@ describe("land", () => {
     expect(t["Graft-Change"]).toBe(record.id);
     expect(t["Graft-Task"]).toBe("add greeting");
     expect(t["Graft-Author"]).toBe("agent:test-agent");
-    expect(t["Graft-Model"]).toBe("m-1");
+    expect(t["Graft-Model"]).toBeUndefined();
     expect(t["Graft-Evidence"]).toBe("1 command, 1 passed");
     expect(body).toContain("Plan:\n  write hello.txt");
 
@@ -731,7 +731,7 @@ describe("log and show", () => {
   });
 
   it("rebuilds a record from the commit message when the note is missing", async () => {
-    await graft.start({ task: "message record", plan: "first paragraph\n\nsecond paragraph", author: { name: "bot", model: "m-2", kind: "agent" } });
+    await graft.start({ task: "message record", plan: "first paragraph\n\nsecond paragraph", author: { name: "bot", kind: "agent" } });
     await writeFile(join(dir, "a.txt"), "a\n");
     await graft.evidenceCommand("true", "unit tests");
     await graft.evidenceCommand("exit 3");
@@ -749,7 +749,7 @@ describe("log and show", () => {
       id: record.id,
       task: "message record",
       plan: "first paragraph\n\nsecond paragraph",
-      author: { kind: "agent", name: "bot", model: "m-2" },
+      author: { kind: "agent", name: "bot" },
     });
     expect(rebuilt?.record?.evidence).toMatchObject([
       { kind: "command", command: "true", exitCode: 0, label: "unit tests", output: "" },
@@ -811,6 +811,14 @@ describe("init", () => {
     expect(await readFile(join(dir, "AGENTS.md"), "utf8")).toBe(agents);
 
     expect((await graft.init({ agents: false })).agents).toBeUndefined();
+    expect((await graft.init({ agents: false })).ci).toBeUndefined();
+    const ci = (await graft.init({ agents: false, hooks: false, ci: true })).ci;
+    expect(ci).toEqual({ state: "written", path: ".github/workflows/graft-check.yml" });
+    const workflow = await readFile(join(dir, ".github/workflows/graft-check.yml"), "utf8");
+    expect(workflow).toContain("uses: FourShore/Graft@main");
+    expect(workflow).toContain("fetch-depth: 0");
+    expect((await graft.init({ agents: false, hooks: false, ci: true })).ci).toEqual({ state: "present", path: ".github/workflows/graft-check.yml" });
+    expect(await readFile(join(dir, ".github/workflows/graft-check.yml"), "utf8")).toBe(workflow);
   });
 
   it("leaves AGENTS.md alone when CLAUDE.md already covers Graft", async () => {

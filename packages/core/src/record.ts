@@ -42,8 +42,6 @@ export interface ChangeAuthor {
   kind: "agent" | "human";
   /** e.g. "claude-code", "cursor", or a person's handle. */
   name: string;
-  /** Model identifier when the author is an agent. */
-  model?: string;
 }
 
 export type Evidence = CommandEvidence | NoteEvidence;
@@ -121,7 +119,6 @@ export const TRAILER_KEYS = {
   task: "Graft-Task",
   ref: "Graft-Task-Ref",
   author: "Graft-Author",
-  model: "Graft-Model",
   evidence: "Graft-Evidence",
 } as const;
 
@@ -132,7 +129,6 @@ export function trailersFor(record: ChangeRecord): Array<[string, string]> {
   ];
   if (record.ref) t.push([TRAILER_KEYS.ref, oneLine(record.ref)]);
   t.push([TRAILER_KEYS.author, `${record.author.kind}:${record.author.name}`]);
-  if (record.author.model) t.push([TRAILER_KEYS.model, record.author.model]);
   t.push([TRAILER_KEYS.evidence, evidenceSummary(record.evidence)]);
   return t;
 }
@@ -237,7 +233,6 @@ export function parseMessageRecord(message: string, authoredAt: string): ChangeR
     author: {
       kind: kind === "agent" ? "agent" : "human",
       name: name.join(":") || "unknown",
-      model: trailers[TRAILER_KEYS.model] || undefined,
     },
     startedAt: authoredAt,
     landedAt: authoredAt,

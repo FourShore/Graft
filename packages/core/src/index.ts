@@ -8,3 +8,4 @@ export * from "./capture.js";
 export * from "./claude-code.js";
 export * from "./hooks.js";
 export * from "./context.js";
+export * from "./ci.js";

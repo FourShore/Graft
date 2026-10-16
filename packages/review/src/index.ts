@@ -1,7 +1,5 @@
-import { createServer, type Server } from "node:http";
 import { Graft, readPolicy, type LogEntry } from "@fourshore/graft-core";
 import { parseDiff } from "./diff.js";
-import { renderChange, renderQueue, type QueueItem } from "./html.js";
 import { RISK_ORDER, triage, type Triage } from "./triage.js";
 
 export { parseDiff } from "./diff.js";
@@ -25,7 +23,7 @@ export interface ReviewedChange {
   triage: Triage;
 }
 
-/** Everything the pages need, usable without the HTTP server (tests, other UIs). */
+/** Changes triaged by risk: the engine behind `graft check`, usable from code. */
 export class Review {
   readonly graft: Graft;
   constructor(private readonly opts: ReviewOptions = {}) {
@@ -59,47 +57,4 @@ export class Review {
     const policy = await readPolicy(await this.graft.git.topLevel());
     return { entry, triage: triage(entry.record, files, entry.trailers, entry.recordSource, policy.behaviorFiles) };
   }
-}
-
-/** A local HTTP server serving the review pages. Call .listen() yourself. */
-export function createReviewServer(opts: ReviewOptions = {}): Server {
-  const review = new Review(opts);
-  return createServer(async (req, res) => {
-    const url = new URL(req.url ?? "/", "http://localhost");
-    try {
-      const repo = await review.repoName();
-      if (url.pathname === "/") {
-        const items = await review.queue();
-        return html(res, 200, renderQueue(repo, items as QueueItem[]));
-      }
-      if (url.pathname === "/api/changes") {
-        return json(res, 200, await review.queue());
-      }
-      const page = /^\/change\/([^/]+)$/.exec(url.pathname);
-      if (page) {
-        const found = await review.change(decodeURIComponent(page[1]));
-        if (!found) return html(res, 404, "<h1>Not found</h1>");
-        return html(res, 200, renderChange(repo, found.entry, found.triage));
-      }
-      const api = /^\/api\/change\/([^/]+)$/.exec(url.pathname);
-      if (api) {
-        const found = await review.change(decodeURIComponent(api[1]));
-        return found ? json(res, 200, found) : json(res, 404, { error: "not found" });
-      }
-      html(res, 404, "<h1>Not found</h1>");
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      html(res, 500, `<pre>${msg.replace(/</g, "&lt;")}</pre>`);
-    }
-  });
-}
-
-function html(res: import("node:http").ServerResponse, status: number, body: string): void {
-  res.writeHead(status, { "content-type": "text/html; charset=utf-8" });
-  res.end(body);
-}
-
-function json(res: import("node:http").ServerResponse, status: number, body: unknown): void {
-  res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
-  res.end(JSON.stringify(body));
 }

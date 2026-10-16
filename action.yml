@@ -1,0 +1,53 @@
+# Reusable GitHub Action: verify the Graft records on a pull request.
+#
+#   - uses: actions/checkout@v4
+#     with: { fetch-depth: 0 }
+#   # your install step (npm ci, go mod download, ...), so recorded commands can run
+#   - uses: FourShore/Graft@main   # pin to a tag or SHA to fix the version
+#
+# It installs Graft, fetches the notes ref, and runs `graft check` against the
+# pull request's base branch with GitHub annotations and a step summary. The
+# recorded commands are re-run only for branches of the same repository, since
+# a fork's commit messages are text a stranger wrote and the check would
+# execute them; set `rerun: "false"` to never re-run, or `"true"` to always.
+name: Graft check
+description: Fail a pull request whose behavior changes carry no evidence that meets .graft/policy.json, re-running the recorded commands so a [pass] is a fact.
+branding:
+  icon: check-square
+  color: green
+inputs:
+  base:
+    description: The branch this pull request merges into.
+    default: ${{ github.base_ref }}
+  rerun:
+    description: Re-run the recorded passing commands on this checkout. "auto" does so for branches of this repository only.
+    default: auto
+  version:
+    description: The @fourshore/graft version to install.
+    default: latest
+  node-version:
+    description: Node.js version used to run Graft itself.
+    default: "22"
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+    - name: Install Graft
+      shell: bash
+      run: npm install -g "@fourshore/graft@${{ inputs.version }}"
+    - name: Fetch the Graft notes
+      shell: bash
+      # The full records live on refs/notes/graft, which checkout does not fetch.
+      run: git fetch origin '+refs/notes/graft:refs/notes/graft' || true
+    - name: Graft check
+      shell: bash
+      env:
+        RERUN: ${{ inputs.rerun }}
+        SAME_REPO: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+        BASE: ${{ inputs.base }}
+      run: |
+        flag=""
+        if [ "$RERUN" = "true" ] || { [ "$RERUN" = "auto" ] && [ "$SAME_REPO" = "true" ]; }; then flag="--rerun"; fi
+        graft check --base "origin/$BASE" --format github $flag

@@ -1,7 +1,7 @@
 {
   "name": "@fourshore/graft-review",
   "version": "0.0.9",
-  "description": "Claim-first review of Graft changes: a local web view that leads with task, plan and evidence, then a diff grouped by what evidence covers.",
+  "description": "Triage and verification of Graft changes: group a diff by what evidence covers, and check a branch's records against policy (graft check).",
   "license": "MIT",
   "type": "module",
   "engines": {

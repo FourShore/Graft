@@ -1,12 +1,11 @@
 import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
-import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Graft } from "@fourshore/graft-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { parseDiff } from "../src/diff.js";
-import { Review, createReviewServer } from "../src/index.js";
+import { Review } from "../src/index.js";
 import { renderCheckGithub, renderCheckText, runCheck } from "../src/check.js";
 import { groupFile, judgeEvidence, triage } from "../src/triage.js";
 
@@ -126,7 +125,7 @@ describe("triage", () => {
 });
 
 describe("Review over a real repo", () => {
-  it("queues changes by risk and serves pages", async () => {
+  it("queues changes by risk", async () => {
     await writeFile(join(dir, "README.md"), "# hi\n");
     sh(["add", "-A"]);
     sh(["commit", "-q", "-m", "plain docs commit"]);
@@ -148,35 +147,6 @@ describe("Review over a real repo", () => {
     expect(q[0].entry.commit).toBe(risky.commit);
     expect(q[2].entry.commit).toBe(safe.commit);
 
-    const server = createReviewServer({ repo: dir });
-    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
-    const port = (server.address() as AddressInfo).port;
-    try {
-      const home = await fetch(`http://127.0.0.1:${port}/`);
-      expect(home.status).toBe(200);
-      const homeText = await home.text();
-      expect(homeText).toContain("risky change");
-      expect(homeText).toContain("Needs reading");
-      expect(homeText.indexOf("risky change")).toBeLessThan(homeText.indexOf("safe change"));
-
-      const page = await fetch(`http://127.0.0.1:${port}/change/${safe.commit}`);
-      expect(page.status).toBe(200);
-      const pageText = await page.text();
-      expect(pageText).toContain("safe change");
-      expect(pageText).toContain("Verified");
-      expect(pageText).toContain("src/app.ts");
-      expect(pageText).toContain("+export const x = 2;");
-      expect(pageText).toContain("unit tests");
-
-      const api = await fetch(`http://127.0.0.1:${port}/api/change/${risky.record.id}`);
-      expect(api.status).toBe(200);
-      const body = (await api.json()) as { triage: { risk: string } };
-      expect(body.triage.risk).toBe("read");
-
-      expect((await fetch(`http://127.0.0.1:${port}/change/nope`)).status).toBe(404);
-    } finally {
-      await new Promise<void>((r) => server.close(() => r()));
-    }
   });
 
   it("reads the evidence list from the commit message when the note is missing", async () => {
@@ -190,22 +160,6 @@ describe("Review over a real repo", () => {
     const [item] = await review.queue();
     expect(item.triage.risk).toBe("verified");
     expect(item.entry.recordSource).toBe("message");
-
-    const server = createReviewServer({ repo: dir });
-    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
-    const port = (server.address() as AddressInfo).port;
-    try {
-      const home = await (await fetch(`http://127.0.0.1:${port}/`)).text();
-      expect(home).toContain("Verified");
-      expect(home).toContain("tests passed · 1 evidence, note missing");
-      const page = await (await fetch(`http://127.0.0.1:${port}/change/${commit}`)).text();
-      expect(page).toContain("agent:bot");
-      expect(page).toContain("unit tests");
-      expect(page).toContain("output not in this clone");
-      expect(page).toContain("graft sync");
-    } finally {
-      await new Promise<void>((r) => server.close(() => r()));
-    }
   });
 
   it("reads behaviorFiles from the repo's policy", async () => {
@@ -235,36 +189,6 @@ describe("Review over a real repo", () => {
     const review = new Review({ repo: dir });
     const [item] = await review.queue();
     expect(item.triage.risk).toBe("partial");
-
-    const server = createReviewServer({ repo: dir });
-    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
-    const port = (server.address() as AddressInfo).port;
-    try {
-      const home = await (await fetch(`http://127.0.0.1:${port}/`)).text();
-      expect(home).toContain("Note missing");
-      expect(home).toContain("1 command, 1 passed (summary only)");
-      const page = await (await fetch(`http://127.0.0.1:${port}/change/${commit}`)).text();
-      expect(page).toContain("graft sync");
-    } finally {
-      await new Promise<void>((r) => server.close(() => r()));
-    }
-  });
-
-  it("escapes HTML in tasks and diffs", async () => {
-    await graft.start({ task: "<script>alert(1)</script>", author: { kind: "agent", name: "bot" } });
-    await writeFile(join(dir, "x.ts"), "const s = '<b>';\n");
-    await graft.evidenceNote("ok");
-    await graft.land({ all: true });
-    const server = createReviewServer({ repo: dir });
-    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
-    const port = (server.address() as AddressInfo).port;
-    try {
-      const text = await (await fetch(`http://127.0.0.1:${port}/`)).text();
-      expect(text).not.toContain("<script>alert");
-      expect(text).toContain("&lt;script&gt;");
-    } finally {
-      await new Promise<void>((r) => server.close(() => r()));
-    }
   });
 });
 

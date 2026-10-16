@@ -40,15 +40,14 @@ server.registerTool(
       plan: z.string().optional().describe("How you intend to do it"),
       ref: z.string().optional().describe("Where the task came from: the thread, issue or ticket URL"),
       author: z.string().optional().describe("Your agent name, e.g. claude-code"),
-      model: z.string().optional().describe("Your model id"),
       replace: z
         .boolean()
         .optional()
         .describe("Drop a change another session left open instead of failing"),
     },
   },
-  async ({ task, plan, ref, author, model, replace }) =>
-    guarded(() => graft.start({ task, plan, ref, author: { name: author, model, kind: "agent" }, replace })),
+  async ({ task, plan, ref, author, replace }) =>
+    guarded(() => graft.start({ task, plan, ref, author: { name: author, kind: "agent" }, replace })),
 );
 
 server.registerTool(
