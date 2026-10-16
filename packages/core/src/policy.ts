@@ -40,6 +40,13 @@ export interface Policy {
    * type-check patterns: for example "^\\./scripts/verify".
    */
   captureCommands?: string[];
+  /**
+   * When `graft check --rerun` re-runs recorded commands, only commands
+   * matching one of these regular expressions (as strings) are run. Unset
+   * means every recorded passing command. Set it where a PR from a stranger
+   * could record a command you would not want CI to execute.
+   */
+  checkCommands?: string[];
 }
 
 export const DEFAULT_POLICY: Policy = { version: 1, requireEvidence: true };

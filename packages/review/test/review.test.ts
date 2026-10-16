@@ -4,9 +4,10 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Graft } from "@fourshore/graft-core";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { parseDiff } from "../src/diff.js";
 import { Review, createReviewServer } from "../src/index.js";
+import { renderCheckGithub, renderCheckText, runCheck } from "../src/check.js";
 import { groupFile, judgeEvidence, triage } from "../src/triage.js";
 
 let dir: string;
@@ -264,5 +265,137 @@ describe("Review over a real repo", () => {
     } finally {
       await new Promise<void>((r) => server.close(() => r()));
     }
+  });
+});
+
+describe("check", () => {
+  // An outer `graft check --rerun` (CI re-running this suite) hands down the
+  // nesting marker; these tests set it themselves, so clear it and put it back.
+  let inheritedMarker: string | undefined;
+  beforeEach(() => {
+    inheritedMarker = process.env.GRAFT_CHECK_RERUN;
+    delete process.env.GRAFT_CHECK_RERUN;
+  });
+  afterEach(() => {
+    if (inheritedMarker === undefined) delete process.env.GRAFT_CHECK_RERUN;
+    else process.env.GRAFT_CHECK_RERUN = inheritedMarker;
+  });
+
+  async function seed() {
+    await mkdir(join(dir, "src"), { recursive: true });
+    await writeFile(join(dir, "src", "a.ts"), "export const a = 1;\n");
+    await writeFile(join(dir, "README.md"), "hi\n");
+    sh(["add", "-A"]);
+    sh(["commit", "-q", "-m", "base"]);
+    const base = sh(["rev-parse", "HEAD"]);
+    return base;
+  }
+
+  it("passes a branch whose behavior commits carry passing commands, re-runs them, and lets mechanical commits through", async () => {
+    const base = await seed();
+    await graft.start({ task: "change a" });
+    await writeFile(join(dir, "src", "a.ts"), "export const a = 2;\n");
+    await graft.evidenceCommand("npm test", "unit tests"); // fails: no package.json, exit code non-zero
+    await graft.evidenceCommand("echo verified", "unit tests");
+    await graft.land({ all: true });
+    await writeFile(join(dir, "README.md"), "docs only\n");
+    sh(["commit", "-q", "-am", "docs tweak"]);
+
+    const r = await runCheck({ repo: dir, base, rerun: true });
+    expect(r.commits.map((c) => [c.entry.title, c.triage.risk, c.ok])).toEqual([
+      ["docs tweak", "unrecorded", true],
+      ["change a", "verified", true],
+    ]);
+    expect(r.reruns).toMatchObject([{ command: "echo verified", exitCode: 0 }]);
+    expect(r.findings).toEqual([]);
+    expect(r.ok).toBe(true);
+    const text = renderCheckText(r);
+    expect(text).toContain("ok   ");
+    expect(text).toContain("Re-ran 1 recorded command");
+    expect(text).toMatch(/PASS:/);
+  });
+
+  it("fails behavior changes without a record, without evidence under policy, and when a recorded command no longer passes", async () => {
+    const base = await seed();
+    await mkdir(join(dir, ".graft"), { recursive: true });
+    await writeFile(join(dir, ".graft/policy.json"), JSON.stringify({ version: 1, requireEvidence: "command" }));
+    // 1: behavior change with no record at all
+    await writeFile(join(dir, "src", "a.ts"), "export const a = 2;\n");
+    sh(["commit", "-q", "-am", "plain edit"]);
+    // 2: record with notes only
+    await graft.start({ task: "note only" });
+    await writeFile(join(dir, "src", "a.ts"), "export const a = 3;\n");
+    await graft.evidenceNote("looked");
+    await graft.land({ all: true, allowNoEvidence: true });
+    // 3: a command that passed then but fails now
+    await graft.start({ task: "flaky" });
+    await writeFile(join(dir, "src", "a.ts"), "export const a = 4;\n");
+    await writeFile(join(dir, "gate"), "");
+    await graft.evidenceCommand("test -f gate", "gate present");
+    await graft.land({ all: true });
+    sh(["rm", "-q", "gate"]);
+    sh(["commit", "-q", "-m", "remove gate"]); // also unrecorded, and "gate" counts as behavior
+
+    const r = await runCheck({ repo: dir, base, rerun: true });
+    expect(r.ok).toBe(false);
+    expect(r.findings.map((f) => f.kind).sort()).toEqual(["no-passing-command", "no-record", "no-record", "rerun-failed"]);
+    const text = renderCheckText(r);
+    expect(text).toContain('"plain edit" changed src/a.ts with no change record');
+    expect(text).toContain('policy requireEvidence: "command"');
+    expect(text).toContain('"test -f gate" was recorded as passing');
+    expect(text).toMatch(/FAIL: see findings/);
+    const gh = renderCheckGithub(r);
+    expect(gh.annotations).toHaveLength(4);
+    expect(gh.annotations[0]).toMatch(/^::error title=Graft check::/);
+    expect(gh.summary).toContain("### Graft check: fail");
+    expect(gh.summary).toContain("| ❌ |");
+  });
+
+  it("re-runs only commands allowed by checkCommands and reports the rest as skipped without failing", async () => {
+    const base = await seed();
+    await mkdir(join(dir, ".graft"), { recursive: true });
+    await writeFile(join(dir, ".graft/policy.json"), JSON.stringify({ version: 1, requireEvidence: true, checkCommands: ["^echo "] }));
+    await graft.start({ task: "x" });
+    await writeFile(join(dir, "src", "a.ts"), "export const a = 9;\n");
+    await graft.evidenceCommand("echo fine");
+    await graft.evidenceCommand("true");
+    await graft.land({ all: true });
+    const r = await runCheck({ repo: dir, base, rerun: true });
+    expect(r.reruns.map((x) => x.command)).toEqual(["echo fine"]);
+    expect(r.findings).toMatchObject([{ kind: "rerun-skipped", command: "true" }]);
+    expect(r.ok).toBe(true);
+  });
+
+  it("does not re-run when it is itself a re-run command of an outer check", async () => {
+    const base = await seed();
+    await graft.start({ task: "x" });
+    await writeFile(join(dir, "src", "a.ts"), "export const a = 5;\n");
+    await graft.evidenceCommand("echo once");
+    await graft.land({ all: true });
+    process.env.GRAFT_CHECK_RERUN = "1";
+    try {
+      const r = await runCheck({ repo: dir, base, rerun: true });
+      expect(r.reruns).toEqual([]);
+      expect(r.nested).toBe(true);
+      expect(r.ok).toBe(true);
+      expect(renderCheckText(r)).toContain("Re-run skipped");
+    } finally {
+      delete process.env.GRAFT_CHECK_RERUN;
+    }
+    // The outer check hands the marker to the commands it runs.
+    await graft.start({ task: "y" });
+    await writeFile(join(dir, "src", "a.ts"), "export const a = 6;\n");
+    await graft.evidenceCommand("test -n \"$GRAFT_CHECK_RERUN\" && exit 7; exit 0");
+    await graft.land({ all: true });
+    const outer = await runCheck({ repo: dir, base, rerun: true });
+    expect(outer.reruns.find((x) => x.command.startsWith("test -n"))?.exitCode).toBe(7);
+    expect(process.env.GRAFT_CHECK_RERUN).toBeUndefined();
+  });
+
+  it("is empty and passing when the branch has no commits past the base", async () => {
+    const base = await seed();
+    const r = await runCheck({ repo: dir, base });
+    expect(r.commits).toEqual([]);
+    expect(r.ok).toBe(true);
   });
 });

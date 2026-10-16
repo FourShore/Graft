@@ -485,13 +485,15 @@ export class Graft {
   }
 
   /** History as changes. Commits without a Graft record are included with record: null. */
-  async log(opts: { limit?: number; onlyGraft?: boolean } = {}): Promise<LogEntry[]> {
+  async log(opts: { limit?: number; onlyGraft?: boolean; range?: string; noMerges?: boolean } = {}): Promise<LogEntry[]> {
     if (!(await this.git.head())) return [];
     const limit = opts.limit ?? 20;
     const raw = await this.git.run([
       "log",
       `--max-count=${limit}`,
+      ...(opts.noMerges ? ["--no-merges"] : []),
       "--format=%H%x1f%s%x1f%an%x1f%aI%x1f%B%x1e",
+      ...(opts.range ? [opts.range] : []),
     ]);
     const entries: LogEntry[] = [];
     for (const chunk of raw.split("\x1e")) {
@@ -677,7 +679,8 @@ function capOutput(s: string): string {
   return "[... truncated ...]\n" + tail;
 }
 
-function runShell(command: string, cwd: string): Promise<{ exitCode: number; output: string }> {
+/** Run a shell command from `cwd`, capturing its exit code and combined output. Records nothing. */
+export function runShell(command: string, cwd: string): Promise<{ exitCode: number; output: string }> {
   return new Promise((resolve) => {
     const child = spawn(command, { cwd, shell: true, env: process.env, stdio: ["ignore", "pipe", "pipe"] });
     const chunks: Buffer[] = [];

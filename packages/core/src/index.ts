@@ -1,4 +1,4 @@
-export { Graft, GraftError, buildCommitMessage, recordBlock } from "./graft.js";
+export { Graft, GraftError, buildCommitMessage, recordBlock, runShell } from "./graft.js";
 export type { CapturedRun, FinishResult, InitResult, LandOptions, LandedChange, LogEntry, PrepareResult, StartOptions, SyncResult } from "./graft.js";
 export * from "./policy.js";
 export * from "./record.js";

@@ -205,7 +205,10 @@ and `${NAME}` expanded from the environment; a line naming an unset variable
 is left out of that commit, never written empty. `captureCommands`, optional,
 is a list of regular expressions (as strings) for commands the capture hooks
 record as evidence on top of the built-in test, build, lint and type-check
-patterns. Readers
+patterns.
+`checkCommands`, optional, is a list of regular
+expressions (as strings); when set, `graft check --rerun` re-runs only the
+recorded commands that match one of them. Readers
 reject unknown policy versions. The file is committed, so changing policy is a
 reviewed change like any other.
 
@@ -243,6 +246,8 @@ These are deliberate omissions, not oversights. Each is a candidate for version
   credentials (`.env`, `*.pem`, ...) unless told otherwise. Pattern-based
   scanning of the diff itself is for a server.
 - **Signing.** Nothing stops a record from lying about its author or evidence.
-  A server that runs the evidence commands itself is the real fix.
+  `graft check --rerun` in CI re-runs the recorded commands on the merge
+  commit, which turns the evidence claim into a fact at the point a human
+  merges; a server that runs them itself would also cover the author.
 - **Multiple open changes per worktree.** One at a time keeps the model simple
   and matches how agents actually work.

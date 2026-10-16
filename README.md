@@ -204,6 +204,30 @@ first, then the diff grouped into behavior, tests, and mechanical files.
 The badges come from file paths and recorded evidence. They say where to look
 first, not what to approve.
 
+## Verify at the pull request
+
+A `[pass]` in a record is the author's word. `graft check` makes it a fact
+where a human merges:
+
+```
+graft check --base origin/main            # every behavior change needs evidence that meets the policy
+graft check --base origin/main --rerun    # and every recorded passing command is run again, here
+```
+
+It walks `base..HEAD`, groups each commit's files the way `graft review`
+does, and fails when a commit that changed behavior has no record, no
+evidence, or (under `requireEvidence: "command"`) no passing command.
+Commits that only touch tests, docs or lockfiles need nothing. With
+`--rerun` each distinct recorded passing command runs once on the current
+checkout and a non-zero exit fails the check, with the output; a recorded
+`graft check --rerun` is run but does not re-run anything itself. `--format
+github` adds annotations and a step summary. The workflow in
+[.github/workflows/graft-check.yml](.github/workflows/graft-check.yml) runs
+it on every pull request; copy it into any repo that uses Graft. It re-runs
+commands only for branches of the same repository, since a fork's commit
+messages are text a stranger wrote, and `checkCommands` in the policy can
+restrict what is re-run further.
+
 ## Use it from code
 
 ```ts
@@ -242,6 +266,8 @@ A trailer whose variable is not set is left out of that commit, and `land`
 says so, rather than written with an empty value.
 `captureCommands` lists extra regular expressions for commands the capture
 hooks record on top of the built-in test, build, lint and type-check patterns.
+`checkCommands` lists regular expressions for the commands `graft check
+--rerun` may run again; unset means every recorded passing command.
 [docs/CHANGE.md](docs/CHANGE.md#where-it-lives) covers what survives rebases,
 amends, and squashes.
 
