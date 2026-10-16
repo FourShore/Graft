@@ -40,9 +40,11 @@ export function relativizeCommand(command: string, topLevel: string): string {
     .map((seg) => seg.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
     .join("[\\\\/]");
   const flags = /^[A-Za-z]:/.test(top) ? "gi" : "g";
+  // Only a path that starts here (after a space, quote, `=` or an operator) is the root; `/mnt/x/home/me/repo` is not.
+  const at = `(?<=^|[\\s"'=;&|(])${root}`;
   return command
-    .replace(new RegExp(`${root}[\\\\/](?=\\S)`, flags), "./")
-    .replace(new RegExp(`${root}(?=["'\\s;&|)]|[\\\\/]?$)`, flags), ".")
+    .replace(new RegExp(`${at}[\\\\/](?=[^\\s"';&|)])`, flags), "./")
+    .replace(new RegExp(`${at}[\\\\/]?(?=["'\\s;&|)]|$)`, flags), ".")
     .replace(/(^|(?:&&|\|\||;)\s*)cd\s+["']?\.\/?["']?\s*(?:&&|;)\s*/g, "$1");
 }
 

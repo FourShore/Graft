@@ -368,6 +368,9 @@ describe("capture", () => {
     expect(relativizeCommand("npm test -- /home/me/repo/src/a.test.ts", top)).toBe("npm test -- ./src/a.test.ts");
     expect(relativizeCommand("echo a && cd /home/me/repo; npm test", top)).toBe("echo a && npm test");
     expect(relativizeCommand("cd /home/me/repository && x", top)).toBe("cd /home/me/repository && x");
+    expect(relativizeCommand("cd /mnt/backup/home/me/repo/x && npm test", top)).toBe("cd /mnt/backup/home/me/repo/x && npm test");
+    expect(relativizeCommand("cd /home/me/repo/ && npm test", top)).toBe("npm test");
+    expect(relativizeCommand("ROOT=/home/me/repo npm test", top)).toBe("ROOT=. npm test");
     expect(relativizeCommand("npm test", top)).toBe("npm test");
     expect(relativizeCommand("cd C:\\Users\\z\\repo\\pkg && go test ./...", "C:/Users/z/repo")).toBe("cd ./pkg && go test ./...");
     expect(relativizeCommand("cd c:/users/z/repo && go test ./...", "C:/Users/z/repo")).toBe("go test ./...");
