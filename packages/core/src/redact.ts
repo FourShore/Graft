@@ -54,6 +54,20 @@ export function looksLikeSecretFile(path: string, extra: string[] = []): boolean
   return SECRET_FILE_PATTERNS.some((re) => re.test(p)) || extra.some((g) => globToRegExp(g).test(p));
 }
 
+/**
+ * The words of a shell command that name a credential file, so the output of
+ * `cat nova.json && go test ./...` is withheld from the record instead of
+ * copying the key into history. Quotes and `--flag=` prefixes are stripped;
+ * the split is on whitespace and shell operators, not a real parse.
+ */
+export function secretFilesNamed(command: string, extra: string[] = []): string[] {
+  const words = command
+    .split(/[\s;&|<>()`=]+/)
+    .map((w) => w.replace(/^["']+|["']+$/g, ""))
+    .filter((w) => w && !w.startsWith("-"));
+  return [...new Set(words.filter((w) => looksLikeSecretFile(w, extra)))];
+}
+
 /** Minimal glob: `**` spans directories, `*` and `?` stay within one segment. */
 export function globToRegExp(glob: string): RegExp {
   const body = glob

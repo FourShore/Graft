@@ -67,6 +67,9 @@ export function fitContext(
     break;
   }
   const parts = [header, ...blocks];
+  if (!matched.length && unrecorded) {
+    parts.push("No commit that touched these paths carries a change record; pass --all to list them by title and files.");
+  }
   if (omitted) parts.push(footerLine(omitted));
   return { paths, entries, omitted, unrecorded, text: parts.join("\n\n") };
 }
@@ -86,7 +89,7 @@ function footerLine(n: number): string {
 export function renderContextEntry(e: ContextEntry, full: boolean): string {
   const who = e.record ? `${e.record.author.kind}:${e.record.author.name}` : e.authorName;
   const head = `${e.commit.slice(0, 10)}  ${e.authoredAt.slice(0, 10)}  ${who}  ${e.title}`;
-  if (!e.record) return `${head}\n  (no change record)`;
+  if (!e.record) return [head, "  (no change record)", ...(e.files.length ? [`  files: ${e.files.join(", ")}`] : [])].join("\n");
   const r = e.record;
   const lines = [head, `  task: ${indentRest(r.task, 8)}`];
   if (full && r.plan) lines.push(`  plan: ${indentRest(r.plan, 8)}`);

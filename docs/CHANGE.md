@@ -72,7 +72,8 @@ Two kinds in version 1.
   just that something did. With `attested: true` the author attached a run
   they made themselves; Graft did not run it, the duration is 0, and readers
   say "attested" instead of "pass" so the record is honest about who ran it.
-  It still counts as a command for `requireEvidence: "command"`. With `via`
+  It does not satisfy `requireEvidence: "command"`, which asks for a run
+  Graft or a harness saw, though `graft check --rerun` runs it. With `via`
   set (for example `"claude-code"`) a harness reported the run through a
   hook, with its own exit code and output: a pass or fail like any other,
   marked only so a reader knows who ran it.
@@ -191,12 +192,16 @@ report them.
 
 `requireEvidence` makes `land` refuse a change with an empty evidence list
 unless the author passes `--allow-no-evidence`. Set it to `"command"` and
-`land` also requires at least one recorded command that exited 0: a note
-alone does not satisfy the gate, since a note is only a claim. `secretFiles`, optional, is a
+`land` also requires at least one recorded command that exited 0 and was
+run by Graft or reported by a harness hook: a note or an attested run does
+not satisfy the gate, since each is only a claim. `secretFiles`, optional, is a
 list of globs relative to the root (`"nova.json"`, `"config/*.secret"`,
 `"keys/**"`) that `land` refuses to commit without `--allow-secrets`, on top
 of the built-in list (`.env`, `*.pem`, `*.key`, ...). A glob without a slash
-matches a file name anywhere in the tree. `behaviorFiles`, optional, is a
+matches a file name anywhere in the tree. The same list decides whose output
+is withheld: a command that names one of these files keeps its command line,
+exit code and duration in the record, and its output is replaced with a
+line saying why. `behaviorFiles`, optional, is a
 list of globs (same rules) for files `graft review` must group as behavior
 even though its heuristics would file them under mechanical, such as a schema
 or a spec kept in Markdown. `trailers`, optional, is a list of `Key: value`

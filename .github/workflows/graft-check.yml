@@ -18,6 +18,11 @@ jobs:
         with:
           # The whole branch, so base..HEAD is available.
           fetch-depth: 0
+      - name: Fetch the Graft notes
+        # The full records live on refs/notes/graft, which checkout does not
+        # fetch. Without them a commit's evidence is read from its message, and
+        # a record from before 0.0.6 (note only) would fail as unverifiable.
+        run: git fetch origin '+refs/notes/graft:refs/notes/graft' || true
       - uses: actions/setup-node@v4
         with:
           node-version: 22

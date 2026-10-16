@@ -14,6 +14,7 @@ export interface CheckOptions {
 
 export type Finding =
   | { kind: "no-record"; commit: string; title: string; files: string[] }
+  | { kind: "note-missing"; commit: string; title: string; files: string[] }
   | { kind: "no-evidence"; commit: string; title: string; files: string[] }
   | { kind: "no-passing-command"; commit: string; title: string; files: string[] }
   | { kind: "rerun-failed"; command: string; commits: string[]; exitCode: number; output: string }
@@ -75,6 +76,9 @@ export async function runCheck(opts: CheckOptions): Promise<CheckResult> {
       if (!entry.record) {
         findings.push({ kind: "no-record", ...base });
         ok = false;
+      } else if (noteMissing(entry)) {
+        findings.push({ kind: "note-missing", ...base });
+        ok = false;
       } else if (entry.record.evidence.length === 0) {
         findings.push({ kind: "no-evidence", ...base });
         ok = false;
@@ -91,7 +95,7 @@ export async function runCheck(opts: CheckOptions): Promise<CheckResult> {
   if (opts.rerun && !nested) {
     const byCommand = new Map<string, string[]>();
     for (const c of commits) {
-      for (const ev of passingCommands(c.entry)) {
+      for (const ev of passingCommands(c.entry, true)) {
         const list = byCommand.get(ev.command) ?? [];
         list.push(c.entry.commit);
         byCommand.set(ev.command, list);
@@ -121,8 +125,28 @@ export async function runCheck(opts: CheckOptions): Promise<CheckResult> {
   return { base: opts.base, head, policy, commits, reruns, findings, ok, ...(nested ? { nested: true } : {}) };
 }
 
-function passingCommands(entry: LogEntry): CommandEvidence[] {
-  return (entry.record?.evidence ?? []).filter((e): e is CommandEvidence => e.kind === "command" && e.exitCode === 0);
+/**
+ * The commands recorded as exiting 0. An attested run is the author's claim,
+ * so it does not satisfy the policy unless `withAttested` is set; re-runs
+ * include it, since running it is how the claim becomes a fact.
+ */
+function passingCommands(entry: LogEntry, withAttested = false): CommandEvidence[] {
+  return (entry.record?.evidence ?? []).filter(
+    (e): e is CommandEvidence => e.kind === "command" && e.exitCode === 0 && (withAttested || !e.attested),
+  );
+}
+
+/**
+ * The commit's trailer says it carries evidence, but the clone has no note
+ * and the message holds no Evidence block (records older than 0.0.6 kept it
+ * in the note alone), so nothing can be judged until the note is fetched.
+ */
+function noteMissing(entry: LogEntry): boolean {
+  return (
+    entry.recordSource === "message" &&
+    entry.record?.evidence.length === 0 &&
+    (entry.trailers["Graft-Evidence"] ?? "none") !== "none"
+  );
 }
 
 function safeTest(pattern: string, s: string): boolean {
@@ -142,9 +166,7 @@ export function renderCheckText(r: CheckResult): string {
     const r0 = c.entry.record;
     const who = r0 ? `${r0.author.kind}:${r0.author.name}` : c.entry.authorName;
     const files = `${c.triage.groups.behavior.length} behavior, ${c.triage.groups.tests.length} tests, ${c.triage.groups.mechanical.length} mechanical`;
-    const ev = r0
-      ? `${passingCommands(c.entry).length} passing command${passingCommands(c.entry).length === 1 ? "" : "s"}, ${r0.evidence.length} evidence`
-      : "no record";
+    const ev = r0 ? `${describePassing(c.entry)}, ${r0.evidence.length} evidence` : "no record";
     lines.push(`  ${c.ok ? "ok  " : "FAIL"} ${c.entry.commit.slice(0, 10)}  ${c.entry.title}`);
     lines.push(`       ${c.triage.risk} · ${who} · ${files} · ${ev}`);
   }
@@ -163,14 +185,22 @@ export function renderCheckText(r: CheckResult): string {
   return lines.join("\n");
 }
 
+function describePassing(entry: LogEntry): string {
+  const run = passingCommands(entry).length;
+  const attested = passingCommands(entry, true).length - run;
+  return `${run} passing command${run === 1 ? "" : "s"}${attested ? ` (${attested} more attested)` : ""}`;
+}
+
 export function describeFinding(f: Finding): string {
   switch (f.kind) {
     case "no-record":
       return `${f.commit.slice(0, 10)} "${f.title}" changed ${f.files.join(", ")} with no change record. Land it with graft land, or commit with the Graft hooks installed.`;
+    case "note-missing":
+      return `${f.commit.slice(0, 10)} "${f.title}" changed ${f.files.join(", ")} and its evidence lives only in the git note, which this clone does not have. Fetch it (git fetch origin '+refs/notes/graft:refs/notes/graft', or graft sync) and check again.`;
     case "no-evidence":
       return `${f.commit.slice(0, 10)} "${f.title}" changed ${f.files.join(", ")} with a record but no evidence.`;
     case "no-passing-command":
-      return `${f.commit.slice(0, 10)} "${f.title}" changed ${f.files.join(", ")} with no passing command as evidence (policy requireEvidence: "command").`;
+      return `${f.commit.slice(0, 10)} "${f.title}" changed ${f.files.join(", ")} with no passing command as evidence (policy requireEvidence: "command"; notes and attested runs do not count).`;
     case "rerun-failed":
       return `"${f.command}" was recorded as passing on ${f.commits.map((s) => s.slice(0, 10)).join(", ")} but exits ${f.exitCode} on this checkout.\n${indent(tail(f.output, 20))}`;
     case "rerun-skipped":

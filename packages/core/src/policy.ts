@@ -80,12 +80,21 @@ export function expandTrailers(
   const skipped: { trailer: string; missing: string }[] = [];
   for (const t of trailers) {
     let missing: string | undefined;
-    const expanded = t.replace(/\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g, (_, braced, bare) => {
-      const name = braced ?? bare;
-      const v = env[name];
-      if (v === undefined || v === "") missing ??= name;
-      return v ?? "";
-    });
+    const expanded = t.replace(
+      /\$(?:\{([A-Za-z_][A-Za-z0-9_]*)(?:([#%])([^}]*))?\}|([A-Za-z_][A-Za-z0-9_]*))/g,
+      (_, braced, op, affix, bare) => {
+        const name = braced ?? bare;
+        let v = env[name];
+        if (v === undefined || v === "") {
+          missing ??= name;
+          return "";
+        }
+        // `${NAME#prefix}` and `${NAME%suffix}` strip a literal affix, as in sh.
+        if (op === "#" && affix && v.startsWith(affix)) v = v.slice(affix.length);
+        if (op === "%" && affix && v.endsWith(affix)) v = v.slice(0, -affix.length);
+        return v;
+      },
+    );
     if (missing) skipped.push({ trailer: t, missing });
     else out.push(expanded);
   }
