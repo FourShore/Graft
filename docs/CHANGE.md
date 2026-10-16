@@ -217,7 +217,11 @@ even though its heuristics would file them under mechanical, such as a schema
 or a spec kept in Markdown. `trailers`, optional, is a list of `Key: value`
 lines added to every landed commit after Graft's own trailers, with `$NAME`
 and `${NAME}` expanded from the environment; a line naming an unset variable
-is left out of that commit, never written empty. `captureCommands`, optional,
+is left out of that commit, never written empty. `ref`, optional, is one
+such template for the change's `ref`, used when `graft start` is given none
+(the capture hooks never pass one), so `Graft-Task-Ref` is filled from the
+harness's session variable on every change; an unset variable leaves the
+change without a ref. `captureCommands`, optional,
 is a list of regular expressions (as strings) for commands the capture hooks
 record as evidence on top of the built-in test, build, lint and type-check
 patterns.

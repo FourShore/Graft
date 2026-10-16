@@ -245,6 +245,38 @@ describe("policy trailers", () => {
   });
 });
 
+describe("policy ref", () => {
+  it("fills a change's ref from the policy template unless one is given or a variable is unset", async () => {
+    await mkdir(join(dir, ".graft"), { recursive: true });
+    await writeFile(join(dir, ".graft/policy.json"), JSON.stringify({ version: 1, ref: "https://x/session_${GRAFT_TEST_SESSION#cse_}" }));
+    delete process.env.GRAFT_TEST_SESSION;
+    expect((await graft.start({ task: "no var" })).ref).toBeUndefined();
+    await graft.abandon();
+    process.env.GRAFT_TEST_SESSION = "cse_42";
+    try {
+      expect((await graft.start({ task: "from policy" })).ref).toBe("https://x/session_42");
+      await graft.abandon();
+      expect((await graft.start({ task: "explicit", ref: "https://issues/7" })).ref).toBe("https://issues/7");
+      await graft.abandon();
+      // The hook's start and the later adopting start both get it.
+      await handleClaudeCodeEvent(graft, { hook_event_name: "UserPromptSubmit", prompt: "do the thing" });
+      expect((await graft.status())?.ref).toBe("https://x/session_42");
+      expect((await graft.start({ task: "named" })).ref).toBe("https://x/session_42");
+      // A change opened before the policy had a ref gets it at land.
+      const open = (await graft.status())!;
+      delete open.ref;
+      await writeFile(join(dir, ".git", "graft", "open.json"), JSON.stringify(open));
+      await writeFile(join(dir, "a.txt"), "a\n");
+      await graft.evidenceNote("ok");
+      const { record } = await graft.land({ all: true });
+      expect(record.ref).toBe("https://x/session_42");
+      expect(sh(["log", "-1", "--format=%(trailers:key=Graft-Task-Ref,valueonly)"])).toBe("https://x/session_42");
+    } finally {
+      delete process.env.GRAFT_TEST_SESSION;
+    }
+  });
+});
+
 describe("command catalog and rules", () => {
   const policy = {
     version: 1 as const,

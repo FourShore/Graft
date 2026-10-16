@@ -17,7 +17,7 @@ import {
   trailersFor,
 } from "./record.js";
 import { OpenChangeStore } from "./store.js";
-import { DEFAULT_POLICY, POLICY_PATH, readPolicy, expandTrailers, evaluateRules, type Policy } from "./policy.js";
+import { DEFAULT_POLICY, POLICY_PATH, readPolicy, expandTemplate, expandTrailers, evaluateRules, type Policy } from "./policy.js";
 import { looksLikeSecretFile, redact, secretFilesNamed } from "./redact.js";
 import { writeCiWorkflow, type CiResult } from "./ci.js";
 import { writeAgentsSection, type AgentsResult } from "./agents.js";
@@ -158,6 +158,7 @@ export class Graft {
       open.task = opts.task.trim();
       if (opts.plan?.trim()) open.plan = opts.plan.trim();
       if (opts.ref?.trim()) open.ref = opts.ref.trim();
+      open.ref ??= await this.defaultRef();
       if (opts.author) open.author = defaultAuthor(opts.author);
       await this.store.write(open);
       return open;
@@ -174,7 +175,7 @@ export class Graft {
       id: newChangeId(),
       task: opts.task.trim(),
       plan: opts.plan?.trim() || undefined,
-      ref: opts.ref?.trim() || undefined,
+      ref: opts.ref?.trim() || (await this.defaultRef()),
       author: defaultAuthor(opts.author),
       startedAt: new Date().toISOString(),
       evidence: [],
@@ -182,6 +183,26 @@ export class Graft {
     };
     await this.store.write(record);
     return record;
+  }
+
+  /**
+   * The policy's `ref` template, expanded from the environment, for a change
+   * started without an explicit ref. Undefined when the policy has none or a
+   * variable it names is unset, so no half-filled URL is ever recorded.
+   */
+  private async defaultRef(policy?: Policy): Promise<string | undefined> {
+    let p = policy;
+    if (!p) {
+      // A broken policy file is land's to report; opening a change must still work.
+      try {
+        p = await readPolicy(await this.topLevel());
+      } catch {
+        return undefined;
+      }
+    }
+    if (!p.ref) return undefined;
+    const { value, missing } = expandTemplate(p.ref);
+    return missing || !value.trim() ? undefined : value.trim();
   }
 
   async abandon(): Promise<ChangeRecord | null> {
@@ -380,6 +401,7 @@ export class Graft {
     await this.assertLandable(open, policy, staged, opts);
 
     open.landedAt = new Date().toISOString();
+    open.ref ??= await this.defaultRef(policy);
     const fromPolicy = expandTrailers(policy.trailers ?? []);
     const explicit = opts.trailers ?? [];
     const trailers = [...fromPolicy.trailers.filter((t) => !explicit.includes(t)), ...explicit];
@@ -433,6 +455,7 @@ export class Graft {
       );
     }
     open.landedAt = new Date().toISOString();
+    open.ref ??= await this.defaultRef(policy);
     await this.store.write(open);
     const block = recordBlock(open, expandTrailers(policy.trailers ?? []).trailers).join("\n");
     // Keep git's own comment lines (the editor template) after the record.

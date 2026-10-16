@@ -120,6 +120,16 @@ A trailer whose variable is not set is left out of that commit, and `land`
 says so, rather than written with an empty value. `${NAME#prefix}` and
 `${NAME%suffix}` strip a literal affix, as in `sh`, for the case above where
 the variable carries an id in one spelling and the link needs another.
+`ref` is a template with the same expansion for where a task came from, so
+every change carries a `Graft-Task-Ref` without anyone passing `--ref`:
+
+```json
+{ "version": 1, "ref": "https://claude.ai/code/session_${CLAUDE_CODE_REMOTE_SESSION_ID#cse_}" }
+```
+
+The capture hook's change gets it when the prompt opens one, an explicit
+`graft start --ref` overrides it, and a change is left without a ref rather
+than given a half-filled one when the variable is unset.
 `captureCommands` lists extra regular expressions for commands the capture
 hooks record on top of the built-in test, build, lint and type-check patterns.
 `checkCommands` lists regular expressions for the commands `graft check
