@@ -27,6 +27,20 @@ export interface Policy {
    */
   behaviorFiles?: string[];
   /**
+   * Trailers added to every landed commit, each "Key: value", so the ones you
+   * pass on every land (a session link, a Co-Authored-By) cannot be forgotten.
+   * `$NAME` and `${NAME}` expand from the environment; a trailer that names a
+   * variable which is not set is left out of that commit rather than written
+   * with a hole in it.
+   */
+  trailers?: string[];
+  /**
+   * Extra regular expressions (as strings) for commands the capture hooks
+   * record as evidence, on top of the built-in test, build, lint and
+   * type-check patterns: for example "^\\./scripts/verify".
+   */
+  captureCommands?: string[];
+  /**
    * When `graft check --rerun` re-runs recorded commands, only commands
    * matching one of these regular expressions (as strings) are run. Unset
    * means every recorded passing command. Set it where a PR from a stranger
@@ -51,4 +65,29 @@ export async function readPolicy(topLevel: string): Promise<Policy> {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return DEFAULT_POLICY;
     throw err;
   }
+}
+
+/**
+ * Expand `$NAME` / `${NAME}` in policy trailers from `env`. Returns the
+ * trailers to write and the ones skipped because a variable was unset, with
+ * the variable's name, so the caller can say so.
+ */
+export function expandTrailers(
+  trailers: string[],
+  env: Record<string, string | undefined> = process.env,
+): { trailers: string[]; skipped: { trailer: string; missing: string }[] } {
+  const out: string[] = [];
+  const skipped: { trailer: string; missing: string }[] = [];
+  for (const t of trailers) {
+    let missing: string | undefined;
+    const expanded = t.replace(/\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g, (_, braced, bare) => {
+      const name = braced ?? bare;
+      const v = env[name];
+      if (v === undefined || v === "") missing ??= name;
+      return v ?? "";
+    });
+    if (missing) skipped.push({ trailer: t, missing });
+    else out.push(expanded);
+  }
+  return { trailers: out, skipped };
 }

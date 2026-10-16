@@ -132,8 +132,8 @@ function renderEvidence(ev: Evidence, fromMessage = false): string {
     return `<li><span class="note">note</span> ${esc(ev.text)}${ev.label ? ` <span class="help">[${esc(ev.label)}]</span>` : ""}</li>`;
   }
   const cls = ev.exitCode === 0 ? "pass" : "fail";
-  const word = ev.exitCode === 0 ? "pass" : `exit ${ev.exitCode}`;
-  const secs = `${(ev.durationMs / 1000).toFixed(1)}s`;
+  const word = ev.attested ? (ev.exitCode === 0 ? "attested" : `attested, exit ${ev.exitCode}`) : ev.exitCode === 0 ? "pass" : `exit ${ev.exitCode}`;
+  const secs = ev.attested ? "run by the author, not by Graft" : `${(ev.durationMs / 1000).toFixed(1)}s`;
   const out = ev.output.trim()
     ? `<details><summary class="help">output · ${secs}</summary><pre>${esc(ev.output)}</pre></details>`
     : `<span class="help"> · ${secs}, ${fromMessage ? "output not in this clone" : "no output"}</span>`;

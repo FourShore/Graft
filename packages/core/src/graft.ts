@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { DEFAULT_CONTEXT_BUDGET, DEFAULT_CONTEXT_LIMIT, fitContext, type ContextEntry, type ContextOptions, type ContextResult } from "./context.js";
 import { Git } from "./git.js";
 import {
   type ChangeAuthor,
@@ -16,9 +17,10 @@ import {
   trailersFor,
 } from "./record.js";
 import { OpenChangeStore } from "./store.js";
-import { DEFAULT_POLICY, POLICY_PATH, readPolicy } from "./policy.js";
+import { DEFAULT_POLICY, POLICY_PATH, readPolicy, expandTrailers, type Policy } from "./policy.js";
 import { looksLikeSecretFile, redact } from "./redact.js";
 import { writeAgentsSection, type AgentsResult } from "./agents.js";
+import { installHooks, type HooksResult } from "./hooks.js";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -35,6 +37,8 @@ export interface StartOptions {
   author?: Partial<ChangeAuthor>;
   /** Abandon a change left open (for example by a crashed session) instead of refusing. */
   replace?: boolean;
+  /** Set by the capture hooks: which harness opened the change. */
+  capturedBy?: string;
 }
 
 export interface LandOptions {
@@ -63,6 +67,33 @@ export interface InitResult {
   remote?: string;
   /** What happened to AGENTS.md; absent when `agents: false`. */
   agents?: AgentsResult;
+  /** What happened to the capture hooks; absent when `hooks: false`. */
+  hooks?: HooksResult;
+}
+
+export interface CapturedRun {
+  command: string;
+  exitCode: number;
+  output?: string;
+  durationMs?: number;
+  label?: string;
+  /** Which harness reported it, e.g. "claude-code". */
+  via: string;
+}
+
+export interface PrepareResult {
+  /** True when the record was written into the message. */
+  applied: boolean;
+  reason?: string;
+  id?: string;
+}
+
+export interface FinishResult {
+  /** True when the note was attached to HEAD and the open change closed. */
+  attached: boolean;
+  reason?: string;
+  commit?: string;
+  id?: string;
 }
 
 export interface SyncResult {
@@ -77,6 +108,8 @@ export interface SyncResult {
 export interface LandedChange {
   record: ChangeRecord;
   commit: string;
+  /** Policy trailers left out of this commit because a variable they name is not set. */
+  skippedTrailers: { trailer: string; missing: string }[];
 }
 
 export interface LogEntry {
@@ -112,6 +145,15 @@ export class Graft {
 
   async start(opts: StartOptions): Promise<ChangeRecord> {
     const open = await this.store.read();
+    if (open?.capturedBy && !opts.replace) {
+      // A hook opened this change from the prompt; an explicit start names the task and keeps what was captured.
+      if (!opts.task?.trim()) throw new GraftError("A task is required.");
+      open.task = opts.task.trim();
+      if (opts.plan?.trim()) open.plan = opts.plan.trim();
+      if (opts.author) open.author = defaultAuthor(opts.author);
+      await this.store.write(open);
+      return open;
+    }
     if (open && !opts.replace) {
       throw new GraftError(
         `A change is already open (${open.id}: ${open.task}, opened ${age(open.startedAt)} ago). ` +
@@ -127,6 +169,7 @@ export class Graft {
       author: defaultAuthor(opts.author),
       startedAt: new Date().toISOString(),
       evidence: [],
+      ...(opts.capturedBy ? { capturedBy: opts.capturedBy } : {}),
     };
     await this.store.write(record);
     return record;
@@ -165,6 +208,30 @@ export class Graft {
     return ev;
   }
 
+  /**
+   * Attach a run the author already made through their own tools, so a slow
+   * build or test suite is not run twice. Graft did not run it, so the record
+   * marks it attested: the exit code and output are the author's claim.
+   */
+  async evidenceAttested(command: string, exitCode: number, output = "", label?: string): Promise<Evidence> {
+    const open = await this.requireOpen();
+    if (!command.trim()) throw new GraftError("The command you ran is required, so the record says what was attested.");
+    if (!Number.isInteger(exitCode)) throw new GraftError("Exit code must be an integer.");
+    const ev: Evidence = {
+      kind: "command",
+      at: new Date().toISOString(),
+      command: command.trim(),
+      exitCode,
+      durationMs: 0,
+      output: capOutput(redact(output)),
+      label,
+      attested: true,
+    };
+    open.evidence.push(ev);
+    await this.store.write(open);
+    return ev;
+  }
+
   /** Record evidence that was produced elsewhere (a manual check, a CI link). */
   async evidenceNote(text: string, label?: string): Promise<Evidence> {
     const open = await this.requireOpen();
@@ -175,11 +242,36 @@ export class Graft {
     return ev;
   }
 
-  /** Commit the staged changes with the record in trailers and a git note. */
-  async land(opts: LandOptions = {}): Promise<LandedChange> {
+  /**
+   * Record a command a harness ran and reported through a hook, with the
+   * exit code and output the harness itself saw. It is command evidence
+   * like any other, marked with `via` so a reader knows who ran it.
+   */
+  async evidenceCaptured(run: CapturedRun): Promise<Evidence> {
     const open = await this.requireOpen();
-    if (opts.plan) open.plan = opts.plan.trim();
-    const policy = await readPolicy(await this.git.topLevel());
+    if (!run.command.trim()) throw new GraftError("A command is required.");
+    const ev: Evidence = {
+      kind: "command",
+      at: new Date().toISOString(),
+      command: run.command.trim(),
+      exitCode: run.exitCode,
+      durationMs: run.durationMs ?? 0,
+      output: capOutput(redact(run.output ?? "")),
+      label: run.label,
+      via: run.via,
+    };
+    open.evidence.push(ev);
+    await this.store.write(open);
+    return ev;
+  }
+
+  /** The landing gate: policy on evidence, then on staged files. Shared by land and the commit hook. */
+  private async assertLandable(
+    open: ChangeRecord,
+    policy: Policy,
+    staged: string[],
+    opts: Pick<LandOptions, "allowNoEvidence" | "allowSecrets">,
+  ): Promise<void> {
     if (policy.requireEvidence && !opts.allowNoEvidence) {
       if (open.evidence.length === 0) {
         throw new GraftError(
@@ -194,9 +286,6 @@ export class Graft {
         );
       }
     }
-    if (opts.paths?.length) await this.git.run(["add", "--", ...opts.paths]);
-    if (opts.all) await this.git.run(["add", "-A"]);
-    const staged = await this.git.stagedFiles();
     if (staged.length === 0) {
       throw new GraftError("Nothing staged to commit. Stage files, name paths, or pass --all.");
     }
@@ -207,10 +296,32 @@ export class Graft {
           "Unstage them (git restore --staged <file>) or pass --allow-secrets if they are not.",
       );
     }
+  }
+
+  /** Commit the staged changes with the record in trailers and a git note. */
+  async land(opts: LandOptions = {}): Promise<LandedChange> {
+    const open = await this.requireOpen();
+    if (opts.plan) open.plan = opts.plan.trim();
+    const policy = await readPolicy(await this.git.topLevel());
+    if (opts.paths?.length) await this.git.run(["add", "--", ...opts.paths]);
+    if (opts.all) await this.git.run(["add", "-A"]);
+    const staged = await this.git.stagedFiles();
+    await this.assertLandable(open, policy, staged, opts);
 
     open.landedAt = new Date().toISOString();
-    const message = buildCommitMessage(open, opts.title, opts.trailers);
-    await this.git.run(["commit", "-q", "-F", "-"], { input: message });
+    const fromPolicy = expandTrailers(policy.trailers ?? []);
+    const explicit = opts.trailers ?? [];
+    const trailers = [...fromPolicy.trailers.filter((t) => !explicit.includes(t)), ...explicit];
+    const message = buildCommitMessage(open, opts.title, trailers);
+    // The git hooks graft init installs step aside while Graft itself commits.
+    const previous = process.env.GRAFT_LANDING;
+    process.env.GRAFT_LANDING = "1";
+    try {
+      await this.git.run(["commit", "-q", "-F", "-"], { input: message });
+    } finally {
+      if (previous === undefined) delete process.env.GRAFT_LANDING;
+      else process.env.GRAFT_LANDING = previous;
+    }
     const commit = (await this.git.head())!;
     open.commit = commit;
 
@@ -218,7 +329,71 @@ export class Graft {
       input: JSON.stringify(open, null, 2) + "\n",
     });
     await this.store.clear();
-    return { record: open, commit };
+    return { record: open, commit, skippedTrailers: fromPolicy.skipped };
+  }
+
+  /**
+   * The prepare-commit-msg hook: when a change is open and the message does
+   * not already carry a record, run the landing gate and append the record
+   * (plan, evidence, trailers) to the message file, so a plain `git commit`
+   * lands like `graft land`. Merges, squashes and amends are left alone.
+   */
+  async prepareCommitMessage(messageFile: string, source?: string): Promise<PrepareResult> {
+    if (source === "merge" || source === "squash" || source === "commit") {
+      return { applied: false, reason: `${source} commit` };
+    }
+    const open = await this.store.read();
+    if (!open) return { applied: false, reason: "no change is open" };
+    const current = await readFile(messageFile, "utf8");
+    if (parseTrailers(current)[TRAILER_KEYS.change]) return { applied: false, reason: "message already carries a record" };
+    const policy = await readPolicy(await this.git.topLevel());
+    const staged = await this.git.stagedFiles();
+    try {
+      await this.assertLandable(open, policy, staged, {
+        allowNoEvidence: Boolean(process.env.GRAFT_ALLOW_NO_EVIDENCE),
+        allowSecrets: Boolean(process.env.GRAFT_ALLOW_SECRETS),
+      });
+    } catch (err) {
+      if (!(err instanceof GraftError)) throw err;
+      throw new GraftError(
+        err.message
+          .replace("pass --allow-no-evidence", "set GRAFT_ALLOW_NO_EVIDENCE=1 for this commit")
+          .replace("pass --allow-secrets if they are not", "set GRAFT_ALLOW_SECRETS=1 if they are not"),
+      );
+    }
+    open.landedAt = new Date().toISOString();
+    await this.store.write(open);
+    const block = recordBlock(open, expandTrailers(policy.trailers ?? []).trailers).join("\n");
+    // Keep git's own comment lines (the editor template) after the record.
+    const lines = current.split("\n");
+    const firstComment = lines.findIndex((l) => l.startsWith("#"));
+    const body = (firstComment === -1 ? lines : lines.slice(0, firstComment)).join("\n").replace(/\s+$/, "");
+    const comments = firstComment === -1 ? "" : "\n" + lines.slice(firstComment).join("\n");
+    const head = body ? body + "\n\n" : "\n\n";
+    await writeFile(messageFile, head + block + "\n" + comments);
+    return { applied: true, id: open.id };
+  }
+
+  /**
+   * The post-commit hook: when HEAD carries the open change's id, attach the
+   * full record as the note and close the change.
+   */
+  async finishCommit(): Promise<FinishResult> {
+    const open = await this.store.read();
+    if (!open) return { attached: false, reason: "no change is open" };
+    const commit = await this.git.head();
+    if (!commit) return { attached: false, reason: "no commit" };
+    const message = await this.git.run(["log", "-1", "--format=%B", commit]);
+    if (parseTrailers(message)[TRAILER_KEYS.change] !== open.id) {
+      return { attached: false, reason: "HEAD does not carry the open change" };
+    }
+    open.landedAt ??= new Date().toISOString();
+    open.commit = commit;
+    await this.git.run(["notes", `--ref=${NOTES_REF}`, "add", "-f", "-F", "-", commit], {
+      input: JSON.stringify(open, null, 2) + "\n",
+    });
+    await this.store.clear();
+    return { attached: true, commit, id: open.id };
   }
 
   /**
@@ -226,7 +401,7 @@ export class Graft {
    * fetch the notes ref alongside branches, write a starter policy file, and
    * tell agents how to use Graft in AGENTS.md. Safe to run more than once.
    */
-  async init(opts: { remote?: string; force?: boolean; agents?: boolean } = {}): Promise<InitResult> {
+  async init(opts: { remote?: string; force?: boolean; agents?: boolean; hooks?: boolean } = {}): Promise<InitResult> {
     const topLevel = await this.git.topLevel();
     const configured: string[] = [];
     const want: Array<[string, string]> = [
@@ -264,7 +439,8 @@ export class Graft {
       policyWritten = true;
     }
     const agents = opts.agents === false ? undefined : await writeAgentsSection(topLevel);
-    return { topLevel, configured, policyWritten, remote: remote ?? undefined, agents };
+    const hooks = opts.hooks === false ? undefined : await installHooks(this.git, topLevel);
+    return { topLevel, configured, policyWritten, remote: remote ?? undefined, agents, hooks };
   }
 
   /**
@@ -328,6 +504,39 @@ export class Graft {
       entries.push({ commit, title, authorName, authoredAt, trailers, ...(await this.readRecord(commit, body ?? "", authoredAt)) });
     }
     return entries;
+  }
+
+  /**
+   * The history of the files you are about to touch: commits that changed any
+   * of `paths` (files or directories, relative to the working directory),
+   * newest first, with their records, rendered to fit a prompt. With no paths
+   * it covers the whole repository.
+   */
+  async context(paths: string[], opts: ContextOptions = {}): Promise<ContextResult> {
+    const budget = opts.budget ?? DEFAULT_CONTEXT_BUDGET;
+    if (!(await this.git.head())) return fitContext(paths, [], 0, budget);
+    const raw = await this.git.run([
+      "log",
+      `--max-count=${opts.limit ?? DEFAULT_CONTEXT_LIMIT}`,
+      "--name-only",
+      "--format=%x1e%H%x1f%s%x1f%an%x1f%aI%x1f%B%x1d",
+      "--",
+      ...paths,
+    ]);
+    const matched: ContextEntry[] = [];
+    let unrecorded = 0;
+    for (const chunk of raw.split("\x1e")) {
+      if (!chunk.trim()) continue;
+      const [meta, named = ""] = chunk.split("\x1d");
+      const [commit, title, authorName, authoredAt, body] = meta.split("\x1f");
+      const files = named.split("\n").map((l) => l.trim()).filter(Boolean);
+      const trailers = parseTrailers(body ?? "");
+      const read = await this.readRecord(commit, body ?? "", authoredAt);
+      if (!read.record) unrecorded++;
+      if (!read.record && !opts.all) continue;
+      matched.push({ commit, title, authorName, authoredAt, trailers, files, ...read });
+    }
+    return fitContext(paths, matched, unrecorded, budget);
   }
 
   /** Look up one change by id or commit SHA. */
@@ -419,11 +628,18 @@ export function buildCommitMessage(record: ChangeRecord, title?: string, extraTr
   const subject = (title?.trim() || record.task).split("\n")[0].slice(0, 72);
   const lines = [subject, ""];
   if (record.task !== subject) lines.push(record.task, "");
+  lines.push(...recordBlock(record, extraTrailers));
+  return lines.join("\n") + "\n";
+}
+
+/** The record as message lines: Plan and Evidence blocks, then the trailers. */
+export function recordBlock(record: ChangeRecord, extraTrailers: string[] = []): string[] {
+  const lines: string[] = [];
   if (record.plan) lines.push("Plan:", indent(record.plan), "");
   if (record.evidence.length) lines.push(EVIDENCE_HEADER, ...evidenceLines(record.evidence), "");
   for (const [k, v] of trailersFor(record)) lines.push(`${k}: ${v}`);
   for (const t of extraTrailers) lines.push(checkTrailer(t));
-  return lines.join("\n") + "\n";
+  return lines;
 }
 
 const TRAILER = /^([A-Za-z][A-Za-z0-9-]*): (\S.*)$/;

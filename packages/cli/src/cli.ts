@@ -1,6 +1,7 @@
 #!/usr/bin/env node
+import { readFile } from "node:fs/promises";
 import { Command } from "commander";
-import { Graft, GraftError, shellJoin, type LogEntry } from "@fourshore/graft-core";
+import { Graft, GraftError, handleClaudeCodeEvent, shellJoin, type ClaudeCodeEvent, type LogEntry } from "@fourshore/graft-core";
 import type { ChangeRecord } from "@fourshore/graft-core";
 import { createReviewServer, renderCheckGithub, renderCheckText, runCheck } from "@fourshore/graft-review";
 import type { AddressInfo } from "node:net";
@@ -28,8 +29,9 @@ program
   .option("--remote <name>", "remote to configure (default: origin)")
   .option("--force", "overwrite an existing policy file")
   .option("--no-agents", "leave AGENTS.md alone")
+  .option("--no-hooks", "do not install the Claude Code and git capture hooks")
   .action(async (o) => {
-    const r = await graft().init({ remote: o.remote, force: o.force, agents: o.agents });
+    const r = await graft().init({ remote: o.remote, force: o.force, agents: o.agents, hooks: o.hooks });
     const lines = [
       r.configured.length ? `Set ${r.configured.join(", ")}` : "Git config already set",
       r.policyWritten ? `Wrote .graft/policy.json` : ".graft/policy.json already exists",
@@ -37,6 +39,23 @@ program
     if (r.agents) {
       lines.push(r.agents.written ? "Added a Version control section to AGENTS.md; commit it" : `${r.agents.coveredBy} already covers Graft`);
       if (r.agents.claudeHint) lines.push("Claude Code reads CLAUDE.md, not AGENTS.md: add a line `@AGENTS.md` to CLAUDE.md.");
+    }
+    if (r.hooks) {
+      const h = r.hooks;
+      lines.push(
+        h.claudeCode === "written"
+          ? "Added capture hooks to .claude/settings.json (prompt opens a change, test/build/lint runs become evidence); commit it"
+          : h.claudeCode === "present"
+            ? ".claude/settings.json already has the capture hooks"
+            : ".claude/settings.json is not valid JSON; capture hooks not added",
+      );
+      const gitHooks = Object.entries(h.git);
+      const foreign = gitHooks.filter(([, state]) => state === "foreign").map(([name]) => name);
+      const written = gitHooks.filter(([, state]) => state === "written").map(([name]) => name);
+      if (written.length) lines.push(`Installed git hooks ${written.join(", ")} in ${h.hooksDir}, so a plain git commit carries the record`);
+      else if (!foreign.length) lines.push("Git hooks already installed");
+      if (foreign.length) lines.push(`Left ${foreign.join(" and ")} alone in ${h.hooksDir}: another hook is there. Add \`graft hook <name> "$@"\` to it yourself.`);
+      lines.push("The hooks run `graft`, so it must be on PATH for Claude Code and git.");
     }
     if (!r.remote) lines.push("No remote yet; run `graft init` again after `git remote add`.");
     out(r, lines.join("\n"));
@@ -88,9 +107,12 @@ program
 
 program
   .command("evidence")
-  .description("run a command and record its result, or record a note")
+  .description("run a command and record its result, attach a run you already made, or record a note")
   .option("--label <label>", "what this evidence shows, e.g. 'unit tests'")
   .option("--note <text>", "record a note instead of running a command")
+  .option("--attach", "do not run the command; record it as a run you already made, marked attested")
+  .option("--exit <code>", "with --attach: the exit code of your run (default 0)")
+  .option("--output-file <path>", "with --attach: a file holding your run's output (last 4 KB kept)")
   .argument("[command...]", "command to run (put -- before it)")
   .action(async (command: string[], o) => {
     const g = graft();
@@ -101,6 +123,15 @@ program
     }
     if (!command.length) throw new GraftError("Give a command after --, or use --note.");
     const cmd = shellJoin(command);
+    if (o.attach) {
+      const exitCode = o.exit === undefined ? 0 : Number(o.exit);
+      if (!Number.isInteger(exitCode)) throw new GraftError(`--exit must be an integer, got ${o.exit}.`);
+      const output = o.outputFile ? await readFile(o.outputFile, "utf8") : "";
+      const ev = await g.evidenceAttested(cmd, exitCode, output, o.label);
+      out(ev, `Recorded as attested: ${cmd} -> exit ${exitCode}`);
+      return;
+    }
+    if (o.exit !== undefined || o.outputFile) throw new GraftError("--exit and --output-file go with --attach.");
     const ev = await g.evidenceCommand(cmd, o.label);
     if (ev.kind === "command") {
       process.stdout.write(ev.output);
@@ -121,7 +152,7 @@ program
   .option("--allow-secrets", "land even though a staged file looks like a credential")
   .option("--trailer <trailer>", "extra commit trailer 'Key: value' (repeatable)", (v: string, all: string[]) => [...all, v], [])
   .action(async (paths: string[], o) => {
-    const { record, commit } = await graft().land({
+    const { record, commit, skippedTrailers } = await graft().land({
       title: o.title,
       all: o.all,
       paths,
@@ -130,7 +161,41 @@ program
       allowSecrets: o.allowSecrets,
       trailers: o.trailer,
     });
-    out({ record, commit }, `Landed ${record.id} as ${commit.slice(0, 10)}`);
+    const skipped = skippedTrailers.map((t) => `\nLeft out policy trailer '${t.trailer}': $${t.missing} is not set.`).join("");
+    out({ record, commit, skippedTrailers }, `Landed ${record.id} as ${commit.slice(0, 10)}${skipped}`);
+  });
+
+program
+  .command("hook")
+  .description("entry points for the hooks graft init installs: claude-code (stdin JSON), prepare-commit-msg <file> [source], post-commit")
+  .argument("<kind>", "claude-code | prepare-commit-msg | post-commit")
+  .argument("[args...]", "what git passes the hook")
+  .action(async (kind: string, args: string[]) => {
+    if (kind === "claude-code") {
+      // Never break the agent's session: swallow everything, exit 0.
+      try {
+        const raw = await readStdin();
+        const event = JSON.parse(raw) as ClaudeCodeEvent;
+        const outcome = await handleClaudeCodeEvent(graft(), event);
+        if (json()) console.log(JSON.stringify(outcome));
+      } catch (err) {
+        process.stderr.write(`graft hook: ${err instanceof Error ? err.message : String(err)}\n`);
+      }
+      return;
+    }
+    if (kind === "prepare-commit-msg") {
+      const [file, source] = args;
+      if (!file) throw new GraftError("prepare-commit-msg needs the message file git passes it.");
+      const r = await graft().prepareCommitMessage(file, source);
+      if (r.applied) process.stderr.write(`graft: added change ${r.id} to the commit message\n`);
+      return;
+    }
+    if (kind === "post-commit") {
+      const r = await graft().finishCommit();
+      if (r.attached) console.log(`graft: recorded change ${r.id} on ${r.commit?.slice(0, 10)}`);
+      return;
+    }
+    throw new GraftError(`Unknown hook '${kind}'. Expected claude-code, prepare-commit-msg or post-commit.`);
   });
 
 program
@@ -157,6 +222,18 @@ program
   .action(async (o) => {
     const entries = await graft().log({ limit: Number(o.limit), onlyGraft: !o.all });
     out(entries, entries.map(formatEntry).join("\n\n") || "No changes yet.");
+  });
+
+program
+  .command("context")
+  .description("what you should know before editing these paths: the changes that touched them, trimmed to fit a prompt")
+  .argument("[paths...]", "files or directories (default: the whole repository)")
+  .option("-n, --limit <n>", "number of commits to scan", "50")
+  .option("--budget <chars>", "characters of text to stay within", "8000")
+  .option("--all", "include commits without a change record")
+  .action(async (paths: string[], o) => {
+    const result = await graft().context(paths, { limit: Number(o.limit), budget: Number(o.budget), all: Boolean(o.all) });
+    out(result, result.text);
   });
 
 program
@@ -226,6 +303,16 @@ async function defaultBase(repo: string): Promise<string> {
   throw new GraftError("No base found: pass --base <ref> (the branch this one will merge into).");
 }
 
+function readStdin(): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let data = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (c) => (data += c));
+    process.stdin.on("end", () => resolve(data));
+    process.stdin.on("error", reject);
+  });
+}
+
 function out(data: unknown, text: string, textAlways = false): void {
   if (json()) console.log(JSON.stringify(data, null, 2));
   if (!json() || textAlways) console.log(text);
@@ -254,7 +341,7 @@ function formatRecord(r: ChangeRecord): string {
   for (const ev of r.evidence) {
     lines.push(
       ev.kind === "command"
-        ? `  ${ev.exitCode === 0 ? "pass" : "FAIL"}  ${ev.command}${ev.label ? `  [${ev.label}]` : ""}`
+        ? `  ${ev.attested ? (ev.exitCode === 0 ? "attested" : `ATTESTED FAIL ${ev.exitCode}`) : ev.exitCode === 0 ? "pass" : "FAIL"}  ${ev.command}${ev.label ? `  [${ev.label}]` : ""}`
         : `  note  ${ev.text}${ev.label ? `  [${ev.label}]` : ""}`,
     );
   }

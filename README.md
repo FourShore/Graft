@@ -66,9 +66,31 @@ claude mcp add graft -- graft-mcp --repo /path/to/your/repo
 ```
 
 Tools: `graft_start`, `graft_plan`, `graft_evidence`, `graft_note`,
-`graft_land`, `graft_sync`, `graft_status`, `graft_log`, `graft_show`,
+`graft_land`, `graft_sync`, `graft_status`, `graft_context`, `graft_log`, `graft_show`,
 `graft_abandon`. `graft_land` commits what's staged plus any `paths` you give
 it; `stageAll` is off by default.
+
+## Capture without ritual
+
+`graft init` also installs hooks, so records exist whether or not anyone
+remembers Graft:
+
+- **Claude Code hooks** in `.claude/settings.json`. The prompt opens a change
+  (the prompt is the task, as the agent received it), and every Bash call that
+  looks like a test, build, lint or type-check run is recorded as evidence
+  with the exit code and output the harness itself reported, so it is a pass
+  or a fail, not a claim. Other commands are ignored. Widen the filter with
+  `captureCommands` in the policy. An explicit `graft start` afterwards just
+  names the task and keeps what was captured.
+- **Git hooks** (`prepare-commit-msg` and `post-commit`). A plain
+  `git commit` with a change open gets the Plan and Evidence blocks and the
+  trailers in its message and the full record as a note, exactly like
+  `graft land`, and the same policy gate applies (`GRAFT_ALLOW_NO_EVIDENCE=1`
+  or `GRAFT_ALLOW_SECRETS=1` override it for one commit). Merges, squashes and
+  amends are left alone, and a hook that is already there is not overwritten.
+
+The hooks run `graft`, so it has to be on PATH. `graft init --no-hooks` skips
+them. Claude Code runs project hooks only after you trust the folder.
 
 ## Use it from the shell
 
@@ -84,7 +106,17 @@ graft sync
 `evidence` runs what follows `--` with each argument passed as given, so
 quotes and parentheses survive (`graft evidence -- node -e 'console.log("ok")'`).
 A single argument is run through the shell as written, so pipes and `&&`
-work there (`graft evidence -- "npm test && npm run lint"`).
+work there (`graft evidence -- "npm test && npm run lint"`). A redirect or
+pipe given as its own argument is passed to the program literally
+(`graft evidence -- go version '2>&1'` hands `2>&1` to `go`), so put a
+command that needs shell syntax in one string. On Windows the arguments are
+quoted for `cmd.exe` instead of `sh`.
+
+If you already ran the slow thing through your own tools, attach it instead of
+running it twice: `graft evidence --attach --label "go tests" --exit 0 --output-file
+out.txt -- go test ./...`. Nothing is run; the record carries the command, exit
+code and output as `attested` rather than `pass`, so a reader knows Graft did
+not see it run. Over MCP, pass `exitCode` (and `output`) to `graft_evidence`.
 
 `land` commits what's staged, plus any files you name, or everything with
 `-a`. Add your own trailers with `--trailer "Co-Authored-By: ..."` (repeatable;
@@ -94,10 +126,21 @@ and refuses staged files that look like credentials such as `.env`, `*.pem`,
 of any value held in an environment variable whose name looks secret.
 
 ```
-graft log            # history as changes: task, author, evidence
-graft show <id>      # one change in full, by id or commit
-graft status         # the open change, if any
+graft context <paths>  # before editing: the changes that touched these files, sized for a prompt
+graft log              # history as changes: task, author, evidence
+graft show <id>        # one change in full, by id or commit
+graft status           # the open change, if any
 ```
+
+`context` is the reading side for a cold start. Give it the files or
+directories you are about to edit and it prints the commits that touched them,
+newest first, each with its task, plan, evidence lines and the files it
+changed, then stops at `--budget` characters (default 8000), dropping plans
+before it drops older commits. It reads the note when it is in the clone and
+the commit message when it is not, so it works in a fresh clone. `--all` adds
+commits that have no record as one line each; `--json` returns the entries
+with the same text in a `text` field, which is also what `graft_context`
+returns.
 
 The commit ends up looking like this:
 
@@ -211,6 +254,18 @@ note alone (`--note "checked"`) doesn't pass.
 doesn't write it, add it when the repo has its own credential file names.
 `behaviorFiles` lists globs that `graft review` must treat as behavior even
 though they look mechanical, such as a schema or spec kept in Markdown.
+`trailers` adds trailers to every landed commit, with `$NAME` or `${NAME}`
+filled from the environment, so the lines you would otherwise pass with
+`--trailer` on every land cannot be forgotten:
+
+```json
+{ "version": 1, "requireEvidence": "command", "trailers": ["Claude-Session: $CLAUDE_SESSION_URL"] }
+```
+
+A trailer whose variable is not set is left out of that commit, and `land`
+says so, rather than written with an empty value.
+`captureCommands` lists extra regular expressions for commands the capture
+hooks record on top of the built-in test, build, lint and type-check patterns.
 `checkCommands` lists regular expressions for the commands `graft check
 --rerun` may run again; unset means every recorded passing command.
 [docs/CHANGE.md](docs/CHANGE.md#where-it-lives) covers what survives rebases,

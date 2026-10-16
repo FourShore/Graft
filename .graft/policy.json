@@ -1,4 +1,7 @@
 {
   "version": 1,
-  "requireEvidence": true
+  "requireEvidence": true,
+  "trailers": [
+    "Claude-Session: $CLAUDE_SESSION_URL"
+  ]
 }

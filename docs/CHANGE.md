@@ -60,6 +60,7 @@ change is being made.
 | `startedAt`, `landedAt` | yes / on land | ISO 8601. |
 | `commit` | on land | The SHA the record was first landed on. Informational; the trailer is the durable link. After an amend or rebase the note moves with the commit but this field keeps the original SHA, so readers take the commit from where the note is attached, never from this field. |
 | `evidence[]` | yes (may be empty) | Ordered list of what was done to verify the change. |
+| `capturedBy` | no | The harness whose hook opened the change (`claude-code`, from the prompt) rather than an explicit `graft start`. A later `graft start` adopts such a change, naming the task and keeping its evidence. |
 
 ### Evidence
 
@@ -68,7 +69,13 @@ Two kinds in version 1.
 - `command`: a shell command run from the repository root, with its exit code,
   wall-clock duration, and the last 4 KB of combined stdout and stderr. Exit
   code 0 is "passed". The output is kept so a reader can see *what* passed, not
-  just that something did.
+  just that something did. With `attested: true` the author attached a run
+  they made themselves; Graft did not run it, the duration is 0, and readers
+  say "attested" instead of "pass" so the record is honest about who ran it.
+  It still counts as a command for `requireEvidence: "command"`. With `via`
+  set (for example `"claude-code"`) a harness reported the run through a
+  hook, with its own exit code and output: a pass or fail like any other,
+  marked only so a reader knows who ran it.
 - `note`: free text for verification that did not come from a command: a manual
   check, a link to a CI run, a screenshot description.
 
@@ -192,7 +199,14 @@ of the built-in list (`.env`, `*.pem`, `*.key`, ...). A glob without a slash
 matches a file name anywhere in the tree. `behaviorFiles`, optional, is a
 list of globs (same rules) for files `graft review` must group as behavior
 even though its heuristics would file them under mechanical, such as a schema
-or a spec kept in Markdown. `checkCommands`, optional, is a list of regular
+or a spec kept in Markdown. `trailers`, optional, is a list of `Key: value`
+lines added to every landed commit after Graft's own trailers, with `$NAME`
+and `${NAME}` expanded from the environment; a line naming an unset variable
+is left out of that commit, never written empty. `captureCommands`, optional,
+is a list of regular expressions (as strings) for commands the capture hooks
+record as evidence on top of the built-in test, build, lint and type-check
+patterns.
+`checkCommands`, optional, is a list of regular
 expressions (as strings); when set, `graft check --rerun` re-runs only the
 recorded commands that match one of them. Readers
 reject unknown policy versions. The file is committed, so changing policy is a
@@ -204,6 +218,14 @@ reviewed change like any other.
 `graft show <id|sha>` finds a change by id with `git log --all --grep` on the
 `Graft-Change` trailer, so a change is findable from any branch that contains
 it, note or no note.
+
+`graft context <paths>` is the read an agent makes before editing: `git log
+--name-only -- <paths>` over the newest commits, each record read as above,
+rendered newest first and cut at a character budget. The first thing cut from
+an entry is its plan, then its evidence lines (replaced by the trailer-style
+summary); when an entry still does not fit, it and everything older are dropped
+and the text says how many. Commits without a record are counted in the header
+and shown only on request.
 
 Readers must tolerate a commit that has trailers but no note (show the
 trailers) and must ignore commits with neither.
