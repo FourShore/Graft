@@ -57,7 +57,7 @@ export interface CommandEvidence {
   durationMs: number;
   /** Trimmed tail of combined stdout/stderr, capped at EVIDENCE_OUTPUT_CAP bytes. */
   output: string;
-  /** Optional label, e.g. "unit tests". Defaults to `name` in the message. */
+  /** Optional label, e.g. "unit tests". Kept in the note; the message line carries `name` when there is one. */
   label?: string;
   /** The policy catalog name this run satisfies, when it was run or matched by name. */
   name?: string;
@@ -172,7 +172,8 @@ const MESSAGE_LINE_CAP = 200;
  */
 export function evidenceLines(evidence: Evidence[]): string[] {
   return evidence.map((ev) => {
-    const shown = ev.label ?? (ev.kind === "command" ? ev.name : undefined);
+    // A catalog name is the run's identity, so it is what the message keeps; a free label rides in the note.
+    const shown = ev.kind === "command" && ev.name ? ev.name : ev.label;
     const label = shown ? ` ${bracketSafe(shown)}` : "";
     if (ev.kind === "note") return `  [note${label}] ${clip(oneLine(ev.text))}`;
     const failed = ev.exitCode === 0 ? "" : ` fail ${ev.exitCode}`;

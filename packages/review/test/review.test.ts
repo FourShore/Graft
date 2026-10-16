@@ -423,8 +423,11 @@ describe("check", () => {
     await writeFile(join(dir, ".graft/policy.json"), JSON.stringify(policy("echo new tests")));
     await graft.evidenceNamed("test");
     await graft.land({ all: true });
+    // Without notes (a CI runner), the records come from the messages, where the name is the label.
+    sh(["update-ref", "-d", "refs/notes/graft"]);
 
     const r = await runCheck({ repo: dir, base, rerun: true });
+    expect(r.commits.filter((c) => c.entry.record).every((c) => c.entry.recordSource === "message")).toBe(true);
     expect(r.commits.map((c) => [c.entry.title, c.ok])).toEqual([
       ["retune policy", true],
       ["docs", true],

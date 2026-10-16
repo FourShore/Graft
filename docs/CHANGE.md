@@ -79,9 +79,10 @@ Two kinds in version 1.
   hook, with its own exit code and output: a pass or fail like any other,
   marked only so a reader knows who ran it. With `name` set the run is one
   of the policy's named commands (`graft evidence test`, or a captured
-  command that matched the catalog); the message line uses the name as the
-  label when no label was given, so a record rebuilt from the message still
-  satisfies the rules that ask for that name.
+  command that matched the catalog); the message line carries the name in
+  place of any free label, so a record rebuilt from the message still
+  satisfies the rules that ask for that name and `graft check --rerun` can
+  run the name's current definition without the note.
 - `note`: free text for verification that did not come from a command: a manual
   check, a link to a CI run, a screenshot description.
 

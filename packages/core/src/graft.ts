@@ -231,8 +231,11 @@ export class Graft {
     return (await readPolicy(await this.git.topLevel())).commands ?? {};
   }
 
-  /** Run a command from the policy catalog by name and record it under that name. */
-  async evidenceNamed(name: string, label?: string): Promise<Evidence> {
+  /**
+   * Run a command from the policy catalog by name and record it under that
+   * name, or with `attest` record a run of it the author already made.
+   */
+  async evidenceNamed(name: string, label?: string, attest?: { exitCode: number; output?: string }): Promise<Evidence> {
     const commands = await this.catalog();
     const command = commands[name];
     if (!command) {
@@ -243,6 +246,7 @@ export class Graft {
           : `${POLICY_PATH} names no commands, so "${name}" cannot be run by name. Add a "commands" map, or run it with --.`,
       );
     }
+    if (attest) return this.evidenceAttested(command, attest.exitCode, attest.output ?? "", label, name);
     return this.evidenceCommand(command, label, name);
   }
 
@@ -251,7 +255,7 @@ export class Graft {
    * build or test suite is not run twice. Graft did not run it, so the record
    * marks it attested: the exit code and output are the author's claim.
    */
-  async evidenceAttested(command: string, exitCode: number, output = "", label?: string): Promise<Evidence> {
+  async evidenceAttested(command: string, exitCode: number, output = "", label?: string, name?: string): Promise<Evidence> {
     const open = await this.requireOpen();
     if (!command.trim()) throw new GraftError("The command you ran is required, so the record says what was attested.");
     if (!Number.isInteger(exitCode)) throw new GraftError("Exit code must be an integer.");
@@ -263,6 +267,7 @@ export class Graft {
       durationMs: 0,
       output: await this.keepOutput(command, output),
       label,
+      ...(name ? { name } : {}),
       attested: true,
     };
     open.evidence.push(ev);
