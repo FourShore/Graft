@@ -195,6 +195,41 @@ describe("redaction", () => {
   });
 });
 
+describe("attested evidence", () => {
+  it("records a run the author made, marks it attested, and round-trips through the message", async () => {
+    await graft.start({ task: "attach" });
+    await writeFile(join(dir, "a.txt"), "a\n");
+    const ok = await graft.evidenceAttested("go test ./...", 0, "ok  \tpkg\t0.3s\n", "go tests");
+    expect(ok).toMatchObject({ kind: "command", attested: true, exitCode: 0, durationMs: 0, label: "go tests" });
+    await graft.evidenceAttested("yarn build", 2);
+    await expect(graft.evidenceAttested("  ", 0)).rejects.toThrow(/command/);
+    await expect(graft.evidenceAttested("x", 1.5)).rejects.toThrow(/integer/);
+    const { commit } = await graft.land({ all: true });
+    const body = sh(["log", "-1", "--format=%B"]);
+    expect(body).toContain("Evidence:\n  [attested go tests] go test ./...\n  [attested fail 2] yarn build\n");
+    expect(body).toMatch(/^Graft-Evidence: 2 commands, 1 passed$/m);
+
+    sh(["notes", "--ref=refs/notes/graft", "remove", commit]);
+    const rebuilt = await graft.show(commit);
+    expect(rebuilt?.recordSource).toBe("message");
+    expect(rebuilt?.record?.evidence).toEqual([
+      { kind: "command", at: expect.any(String), command: "go test ./...", exitCode: 0, durationMs: 0, output: "", label: "go tests", attested: true },
+      { kind: "command", at: expect.any(String), command: "yarn build", exitCode: 2, durationMs: 0, output: "", label: undefined, attested: true },
+    ]);
+  });
+
+  it("satisfies a policy that requires a passing command", async () => {
+    await mkdir(join(dir, ".graft"), { recursive: true });
+    await writeFile(join(dir, ".graft/policy.json"), JSON.stringify({ version: 1, requireEvidence: "command" }));
+    await graft.start({ task: "attach under policy" });
+    await writeFile(join(dir, "a.txt"), "a\n");
+    await graft.evidenceAttested("make check", 1);
+    await expect(graft.land({ all: true })).rejects.toThrow(/passing command/);
+    await graft.evidenceAttested("make check", 0);
+    await expect(graft.land({ all: true })).resolves.toBeTruthy();
+  });
+});
+
 describe("context", () => {
   it("returns the recorded changes that touched the paths, newest first, within a budget", async () => {
     await mkdir(join(dir, "src"), { recursive: true });
