@@ -1,6 +1,6 @@
 {
   "name": "@fourshore/graft",
-  "version": "0.0.8",
+  "version": "0.0.9",
   "description": "Agent-native change records on top of git: every change carries its intent, plan, author agent and evidence.",
   "license": "MIT",
   "type": "module",
@@ -37,8 +37,8 @@
     "build": "tsc -b"
   },
   "dependencies": {
-    "@fourshore/graft-core": "0.0.8",
-    "@fourshore/graft-review": "0.0.8",
+    "@fourshore/graft-core": "0.0.9",
+    "@fourshore/graft-review": "0.0.9",
     "@modelcontextprotocol/sdk": "^1.32.1",
     "commander": "^15.0.0",
     "zod": "^3.25.76"

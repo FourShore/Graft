@@ -1,7 +1,7 @@
 {
   "name": "graft-monorepo",
   "private": true,
-  "version": "0.0.8",
+  "version": "0.0.9",
   "type": "module",
   "description": "Agent-native change records on top of git: every change carries its intent, plan, author agent and evidence.",
   "license": "MIT",
