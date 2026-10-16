@@ -367,18 +367,29 @@ describe("check", () => {
     const remote = await mkdtemp(join(tmpdir(), "graft-remote-"));
     execFileSync("git", ["init", "-q", "--bare", remote]);
     sh(["remote", "add", "origin", remote]);
-    sh(["push", "-q", "origin", "main"]);
+    sh(["branch", "release/1"]);
+    sh(["push", "-q", "origin", "main", "release/1"]);
     sh(["checkout", "-q", "-b", "feature"]);
-    sh(["branch", "-D", "main"]);
+    sh(["branch", "-D", "main", "release/1"]);
     await graft.start({ task: "y" });
     await writeFile(join(dir, "src", "a.ts"), "export const a = 7;\n");
+    // Longer than the commit message keeps, so a record read from the message cannot re-run it.
+    const long = `echo ${"x".repeat(220)}`;
+    await graft.evidenceCommand(long);
     await graft.evidenceCommand("true");
-    await graft.land({ all: true });
+    const { commit } = await graft.land({ all: true });
     const r = await runCheck({ repo: dir, base: "main" });
     expect(r.base).toBe("origin/main");
     expect(r.commits).toHaveLength(1);
     expect(renderCheckText(r)).toContain("in origin/main..");
     expect(sh(["rev-parse", "origin/main"])).toBe(base);
+    expect((await runCheck({ repo: dir, base: "release/1" })).base).toBe("origin/release/1");
+
+    sh(["notes", "--ref=refs/notes/graft", "remove", commit]);
+    const rerun = await runCheck({ repo: dir, base: "main", rerun: true });
+    expect(rerun.reruns.map((x) => x.command)).toEqual(["true"]);
+    expect(rerun.findings).toMatchObject([{ kind: "rerun-skipped", command: `${long.slice(0, 199)}\u2026`, reason: expect.stringContaining("cut short") }]);
+    expect(rerun.ok).toBe(true);
     await expect(runCheck({ repo: dir, base: "nope" })).rejects.toThrow(/"nope" is not a commit in this clone/);
   });
 
