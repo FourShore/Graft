@@ -66,7 +66,7 @@ claude mcp add graft -- graft-mcp --repo /path/to/your/repo
 ```
 
 Tools: `graft_start`, `graft_plan`, `graft_evidence`, `graft_note`,
-`graft_land`, `graft_sync`, `graft_status`, `graft_log`, `graft_show`,
+`graft_land`, `graft_sync`, `graft_status`, `graft_context`, `graft_log`, `graft_show`,
 `graft_abandon`. `graft_land` commits what's staged plus any `paths` you give
 it; `stageAll` is off by default.
 
@@ -106,7 +106,17 @@ graft sync
 `evidence` runs what follows `--` with each argument passed as given, so
 quotes and parentheses survive (`graft evidence -- node -e 'console.log("ok")'`).
 A single argument is run through the shell as written, so pipes and `&&`
-work there (`graft evidence -- "npm test && npm run lint"`).
+work there (`graft evidence -- "npm test && npm run lint"`). A redirect or
+pipe given as its own argument is passed to the program literally
+(`graft evidence -- go version '2>&1'` hands `2>&1` to `go`), so put a
+command that needs shell syntax in one string. On Windows the arguments are
+quoted for `cmd.exe` instead of `sh`.
+
+If you already ran the slow thing through your own tools, attach it instead of
+running it twice: `graft evidence --attach --label "go tests" --exit 0 --output-file
+out.txt -- go test ./...`. Nothing is run; the record carries the command, exit
+code and output as `attested` rather than `pass`, so a reader knows Graft did
+not see it run. Over MCP, pass `exitCode` (and `output`) to `graft_evidence`.
 
 `land` commits what's staged, plus any files you name, or everything with
 `-a`. Add your own trailers with `--trailer "Co-Authored-By: ..."` (repeatable;
@@ -116,10 +126,21 @@ and refuses staged files that look like credentials such as `.env`, `*.pem`,
 of any value held in an environment variable whose name looks secret.
 
 ```
-graft log            # history as changes: task, author, evidence
-graft show <id>      # one change in full, by id or commit
-graft status         # the open change, if any
+graft context <paths>  # before editing: the changes that touched these files, sized for a prompt
+graft log              # history as changes: task, author, evidence
+graft show <id>        # one change in full, by id or commit
+graft status           # the open change, if any
 ```
+
+`context` is the reading side for a cold start. Give it the files or
+directories you are about to edit and it prints the commits that touched them,
+newest first, each with its task, plan, evidence lines and the files it
+changed, then stops at `--budget` characters (default 8000), dropping plans
+before it drops older commits. It reads the note when it is in the clone and
+the commit message when it is not, so it works in a fresh clone. `--all` adds
+commits that have no record as one line each; `--json` returns the entries
+with the same text in a `text` field, which is also what `graft_context`
+returns.
 
 The commit ends up looking like this:
 

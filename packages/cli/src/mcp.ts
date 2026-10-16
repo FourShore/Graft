@@ -63,13 +63,16 @@ server.registerTool(
   "graft_evidence",
   {
     description:
-      "Run a verification command (tests, lint, build) and attach its exit code and output to the open change as evidence. Returns the result so you can read it.",
+      "Run a verification command (tests, lint, build) and attach its exit code and output to the open change as evidence. Returns the result so you can read it. To attach a run you already made instead of running it again, pass its exitCode (and output); it is then recorded as attested rather than pass.",
     inputSchema: {
-      command: z.string().describe("Shell command, run from the repo root"),
+      command: z.string().describe("Shell command, run from the repo root (or, with exitCode, the command you ran)"),
       label: z.string().optional().describe("What this shows, e.g. 'unit tests'"),
+      exitCode: z.number().int().optional().describe("Give this to attach a run you already made; the command is not run"),
+      output: z.string().optional().describe("With exitCode: the output of your run (last 4 KB kept)"),
     },
   },
-  async ({ command, label }) => guarded(() => graft.evidenceCommand(command, label)),
+  async ({ command, label, exitCode, output }) =>
+    guarded(() => (exitCode === undefined ? graft.evidenceCommand(command, label) : graft.evidenceAttested(command, exitCode, output, label))),
 );
 
 server.registerTool(
@@ -125,6 +128,21 @@ server.registerTool(
   "graft_show",
   { description: "Show one change by change id or commit SHA.", inputSchema: { ref: z.string() } },
   async ({ ref }) => guarded(() => graft.show(ref)),
+);
+
+server.registerTool(
+  "graft_context",
+  {
+    description:
+      "Read before editing: the changes that touched the given files or directories, newest first, with task, plan and evidence, trimmed to fit a prompt. Use the `text` field as-is.",
+    inputSchema: {
+      paths: z.array(z.string()).describe("Files or directories, relative to the repo root; empty for the whole repository"),
+      limit: z.number().int().positive().optional().default(50).describe("Commits to scan"),
+      budget: z.number().int().positive().optional().default(8000).describe("Characters of text to stay within"),
+      includeUnrecorded: z.boolean().optional().default(false).describe("Include commits that have no change record"),
+    },
+  },
+  async ({ paths, limit, budget, includeUnrecorded }) => guarded(() => graft.context(paths, { limit, budget, all: includeUnrecorded })),
 );
 
 server.registerTool(
