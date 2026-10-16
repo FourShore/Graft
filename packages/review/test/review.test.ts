@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Graft } from "@fourshore/graft-core";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { parseDiff } from "../src/diff.js";
 import { Review, createReviewServer } from "../src/index.js";
 import { renderCheckGithub, renderCheckText, runCheck } from "../src/check.js";
@@ -269,6 +269,18 @@ describe("Review over a real repo", () => {
 });
 
 describe("check", () => {
+  // An outer `graft check --rerun` (CI re-running this suite) hands down the
+  // nesting marker; these tests set it themselves, so clear it and put it back.
+  let inheritedMarker: string | undefined;
+  beforeEach(() => {
+    inheritedMarker = process.env.GRAFT_CHECK_RERUN;
+    delete process.env.GRAFT_CHECK_RERUN;
+  });
+  afterEach(() => {
+    if (inheritedMarker === undefined) delete process.env.GRAFT_CHECK_RERUN;
+    else process.env.GRAFT_CHECK_RERUN = inheritedMarker;
+  });
+
   async function seed() {
     await mkdir(join(dir, "src"), { recursive: true });
     await writeFile(join(dir, "src", "a.ts"), "export const a = 1;\n");
