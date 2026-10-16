@@ -208,6 +208,16 @@ note alone (`--note "checked"`) doesn't pass.
 doesn't write it, add it when the repo has its own credential file names.
 `behaviorFiles` lists globs that `graft review` must treat as behavior even
 though they look mechanical, such as a schema or spec kept in Markdown.
+`trailers` adds trailers to every landed commit, with `$NAME` or `${NAME}`
+filled from the environment, so the lines you would otherwise pass with
+`--trailer` on every land cannot be forgotten:
+
+```json
+{ "version": 1, "requireEvidence": "command", "trailers": ["Claude-Session: $CLAUDE_SESSION_URL"] }
+```
+
+A trailer whose variable is not set is left out of that commit, and `land`
+says so, rather than written with an empty value.
 [docs/CHANGE.md](docs/CHANGE.md#where-it-lives) covers what survives rebases,
 amends, and squashes.
 

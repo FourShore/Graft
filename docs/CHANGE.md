@@ -195,7 +195,10 @@ of the built-in list (`.env`, `*.pem`, `*.key`, ...). A glob without a slash
 matches a file name anywhere in the tree. `behaviorFiles`, optional, is a
 list of globs (same rules) for files `graft review` must group as behavior
 even though its heuristics would file them under mechanical, such as a schema
-or a spec kept in Markdown. Readers
+or a spec kept in Markdown. `trailers`, optional, is a list of `Key: value`
+lines added to every landed commit after Graft's own trailers, with `$NAME`
+and `${NAME}` expanded from the environment; a line naming an unset variable
+is left out of that commit, never written empty. Readers
 reject unknown policy versions. The file is committed, so changing policy is a
 reviewed change like any other.
 

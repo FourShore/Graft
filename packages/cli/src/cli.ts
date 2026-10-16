@@ -133,7 +133,7 @@ program
   .option("--allow-secrets", "land even though a staged file looks like a credential")
   .option("--trailer <trailer>", "extra commit trailer 'Key: value' (repeatable)", (v: string, all: string[]) => [...all, v], [])
   .action(async (paths: string[], o) => {
-    const { record, commit } = await graft().land({
+    const { record, commit, skippedTrailers } = await graft().land({
       title: o.title,
       all: o.all,
       paths,
@@ -142,7 +142,8 @@ program
       allowSecrets: o.allowSecrets,
       trailers: o.trailer,
     });
-    out({ record, commit }, `Landed ${record.id} as ${commit.slice(0, 10)}`);
+    const skipped = skippedTrailers.map((t) => `\nLeft out policy trailer '${t.trailer}': $${t.missing} is not set.`).join("");
+    out({ record, commit, skippedTrailers }, `Landed ${record.id} as ${commit.slice(0, 10)}${skipped}`);
   });
 
 program

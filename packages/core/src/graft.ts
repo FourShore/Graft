@@ -17,7 +17,7 @@ import {
   trailersFor,
 } from "./record.js";
 import { OpenChangeStore } from "./store.js";
-import { DEFAULT_POLICY, POLICY_PATH, readPolicy } from "./policy.js";
+import { DEFAULT_POLICY, POLICY_PATH, readPolicy, expandTrailers } from "./policy.js";
 import { looksLikeSecretFile, redact } from "./redact.js";
 import { writeAgentsSection, type AgentsResult } from "./agents.js";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -78,6 +78,8 @@ export interface SyncResult {
 export interface LandedChange {
   record: ChangeRecord;
   commit: string;
+  /** Policy trailers left out of this commit because a variable they name is not set. */
+  skippedTrailers: { trailer: string; missing: string }[];
 }
 
 export interface LogEntry {
@@ -234,7 +236,10 @@ export class Graft {
     }
 
     open.landedAt = new Date().toISOString();
-    const message = buildCommitMessage(open, opts.title, opts.trailers);
+    const fromPolicy = expandTrailers(policy.trailers ?? []);
+    const explicit = opts.trailers ?? [];
+    const trailers = [...fromPolicy.trailers.filter((t) => !explicit.includes(t)), ...explicit];
+    const message = buildCommitMessage(open, opts.title, trailers);
     await this.git.run(["commit", "-q", "-F", "-"], { input: message });
     const commit = (await this.git.head())!;
     open.commit = commit;
@@ -243,7 +248,7 @@ export class Graft {
       input: JSON.stringify(open, null, 2) + "\n",
     });
     await this.store.clear();
-    return { record: open, commit };
+    return { record: open, commit, skippedTrailers: fromPolicy.skipped };
   }
 
   /**
