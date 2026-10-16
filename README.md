@@ -84,7 +84,11 @@ graft sync
 `evidence` runs what follows `--` with each argument passed as given, so
 quotes and parentheses survive (`graft evidence -- node -e 'console.log("ok")'`).
 A single argument is run through the shell as written, so pipes and `&&`
-work there (`graft evidence -- "npm test && npm run lint"`).
+work there (`graft evidence -- "npm test && npm run lint"`). A redirect or
+pipe given as its own argument is passed to the program literally
+(`graft evidence -- go version '2>&1'` hands `2>&1` to `go`), so put a
+command that needs shell syntax in one string. On Windows the arguments are
+quoted for `cmd.exe` instead of `sh`.
 
 `land` commits what's staged, plus any files you name, or everything with
 `-a`. Add your own trailers with `--trailer "Co-Authored-By: ..."` (repeatable;

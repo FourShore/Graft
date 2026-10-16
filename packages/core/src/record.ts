@@ -235,14 +235,35 @@ function clip(s: string): string {
 }
 
 const SAFE_ARG = /^[A-Za-z0-9_@%+=:,./-]+$/;
+const WIN_SAFE_ARG = /^[A-Za-z0-9_@+=:,./\\-]+$/;
+const WIN_META = /[()%!^"<>&|]/g;
 
 /**
- * Turn an argv into one POSIX shell command string. Every element is quoted
- * unless it is plainly safe, so `node -e 'console.log("a b")'` survives the
- * trip through /bin/sh. A single element is returned as written, so
+ * Turn an argv into one shell command string for the platform's shell.
+ * Every element is quoted unless it is plainly safe, so
+ * `node -e 'console.log("a b")'` survives the trip through /bin/sh, or
+ * through cmd.exe on Windows, where the quoting follows the rules the C
+ * runtime uses to split a command line and cmd's own metacharacters are
+ * escaped with `^`. A single element is returned as written, so
  * `graft evidence -- "npm test && npm run lint"` still runs through the shell.
+ * A redirect or pipe given as its own element is therefore a literal argument.
  */
-export function shellJoin(argv: string[]): string {
+export function shellJoin(argv: string[], platform: NodeJS.Platform = process.platform): string {
   if (argv.length === 1) return argv[0];
-  return argv.map((a) => (SAFE_ARG.test(a) ? a : `'${a.replace(/'/g, `'\\''`)}'`)).join(" ");
+  const quote = platform === "win32" ? winQuote : posixQuote;
+  return argv.map(quote).join(" ");
+}
+
+function posixQuote(a: string): string {
+  return SAFE_ARG.test(a) ? a : `'${a.replace(/'/g, `'\\''`)}'`;
+}
+
+function winQuote(a: string): string {
+  if (WIN_SAFE_ARG.test(a)) return a;
+  // Backslashes only escape when they precede a quote, so double those runs
+  // and the trailing run, then escape quotes, then wrap in double quotes.
+  const inner = a.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\*)$/, "$1$1");
+  // cmd.exe reads the line before the program does; `^` makes it pass the
+  // metacharacters, including the quotes, through untouched.
+  return `"${inner}"`.replace(WIN_META, "^$&");
 }
