@@ -1,7 +1,11 @@
 import { spawn } from "node:child_process";
 import { DEFAULT_CONTEXT_BUDGET, DEFAULT_CONTEXT_LIMIT, fitContext, type ContextEntry, type ContextOptions, type ContextResult } from "./context.js";
 import { Git } from "./git.js";
+import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
+import { basename } from "node:path";
 import {
+  type Artifact,
   type Attempt,
   type ChangeAuthor,
   type ChangeRecord,
@@ -13,6 +17,7 @@ import {
   TRIED_HEADER,
   attemptLines,
   isChangeId,
+  isSha256,
   newChangeId,
   parseTrailers,
   parseMessageRecord,
@@ -133,6 +138,11 @@ export interface SyncResult {
   pushed: boolean;
   /** Why the push was refused, when it was. Fetch and merge still happened. */
   pushError?: string;
+}
+
+export interface ExportEntry extends LogEntry {
+  /** The unified diff the commit introduced; omitted when `diff: false`. */
+  diff?: string;
 }
 
 export interface LandedChange {
@@ -377,6 +387,26 @@ export class Graft {
     open.evidence.push(ev);
     await this.store.write(open);
     return ev;
+  }
+
+  /**
+   * Record a file this change produced, by content hash, so a build found in
+   * the field (`nova.exe` on an office machine) resolves to the change that
+   * made it. Give a path to hash, or the hash and a name when the file is
+   * elsewhere.
+   */
+  async recordArtifact(opts: { path?: string; sha256?: string; name?: string }): Promise<Artifact> {
+    const open = await this.requireOpen();
+    let sha256 = opts.sha256?.replace(/^sha256:/i, "").toLowerCase();
+    if (opts.path) sha256 = await sha256File(opts.path);
+    if (!sha256) throw new GraftError("Give a file to hash, or --sha256 and --name for a file that is not here.");
+    if (!/^[0-9a-f]{64}$/.test(sha256)) throw new GraftError(`"${opts.sha256}" is not a SHA-256 hex digest.`);
+    const name = opts.name?.trim() || (opts.path ? basename(opts.path) : "");
+    if (!name) throw new GraftError("An artifact needs a name (--name) when it is given by hash.");
+    const artifact: Artifact = { name, sha256 };
+    open.artifacts = [...(open.artifacts ?? []).filter((a) => a.sha256 !== sha256), artifact];
+    await this.store.write(open);
+    return artifact;
   }
 
   /** Record evidence that was produced elsewhere (a manual check, a CI link). */
@@ -768,7 +798,7 @@ export class Graft {
     const limit = opts.limit ?? 20;
     const raw = await this.git.run([
       "log",
-      `--max-count=${limit}`,
+      ...(Number.isFinite(limit) ? [`--max-count=${limit}`] : []),
       ...(opts.noMerges ? ["--no-merges"] : []),
       "--format=%H%x1f%s%x1f%an%x1f%aI%x1f%B%x1e",
       ...(opts.range ? [opts.range] : []),
@@ -817,10 +847,29 @@ export class Graft {
     return fitContext(paths, matched, unrecorded, budget);
   }
 
-  /** Look up one change by id or commit SHA. */
+  /**
+   * Every recorded change with its diff, newest first, as rows a model or a
+   * script can consume: the (task, diff, evidence) triples a repository has
+   * accumulated. `all` adds commits without a record; `limit` bounds them.
+   */
+  async export(opts: { limit?: number; all?: boolean; diff?: boolean } = {}): Promise<ExportEntry[]> {
+    const entries = await this.log({ limit: opts.limit ?? Infinity, onlyGraft: !opts.all });
+    if (opts.diff === false) return entries;
+    const out: ExportEntry[] = [];
+    for (const e of entries) out.push({ ...e, diff: await this.diff(e.commit) });
+    return out;
+  }
+
+  /** Look up one change by id, commit SHA, or the SHA-256 of an artifact it recorded. */
   async show(ref: string): Promise<LogEntry | null> {
     if (isChangeId(ref)) {
       const raw = await this.git.run(["log", "--all", `--grep=^${TRAILER_KEYS.change}: ${ref}$`, "--format=%H"]);
+      const commit = raw.split("\n")[0];
+      if (!commit) return null;
+      ref = commit;
+    } else if (isSha256(ref)) {
+      const hex = ref.replace(/^sha256:/i, "").toLowerCase();
+      const raw = await this.git.run(["log", "--all", `--grep=^${TRAILER_KEYS.artifact}: sha256:${hex} `, "--format=%H"]);
       const commit = raw.split("\n")[0];
       if (!commit) return null;
       ref = commit;
@@ -955,6 +1004,16 @@ function capOutput(s: string): string {
   if (Buffer.byteLength(s) <= EVIDENCE_OUTPUT_CAP) return s;
   const tail = Buffer.from(s).subarray(-EVIDENCE_OUTPUT_CAP).toString("utf8");
   return "[... truncated ...]\n" + tail;
+}
+
+function sha256File(path: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const hash = createHash("sha256");
+    createReadStream(path)
+      .on("error", (err) => reject(new GraftError(`Cannot read ${path}: ${err.message}`)))
+      .on("data", (chunk) => hash.update(chunk))
+      .on("end", () => resolve(hash.digest("hex")));
+  });
 }
 
 /** Run a shell command from `cwd`, capturing its exit code and combined output. Records nothing. */

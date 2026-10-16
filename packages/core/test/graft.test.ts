@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { beforeEach, describe, expect, it } from "vitest";
 import { Graft, GraftError } from "../src/graft.js";
-import { isChangeId, newChangeId, parseTrailers, shellJoin } from "../src/record.js";
+import { isChangeId, newChangeId, parseArtifactTrailers, parseTrailers, shellJoin } from "../src/record.js";
 import { evaluateRules, expandTrailers, matchCatalog, readPolicy } from "../src/policy.js";
 import { classifyCommand, relativizeCommand } from "../src/capture.js";
 import { globToRegExp, secretFilesNamed } from "../src/redact.js";
@@ -472,6 +472,57 @@ describe("attempts and reverts", () => {
     const id = newChangeId();
     const r = await graft.start({ task: "same change, other repo", id });
     expect(r.id).toBe(id);
+  });
+});
+
+describe("artifacts and export", () => {
+  it("records a file's sha256, writes one trailer per artifact, and finds the change by hash", async () => {
+    await graft.start({ task: "build the binary" });
+    await writeFile(join(dir, "nova.exe"), "MZ fake binary\n");
+    await writeFile(join(dir, "src.txt"), "s\n");
+    const a = await graft.recordArtifact({ path: join(dir, "nova.exe") });
+    expect(a).toEqual({ name: "nova.exe", sha256: expect.stringMatching(/^[0-9a-f]{64}$/) });
+    expect(a.sha256).toBe(sh(["hash-object", "--stdin"]).length ? execFileSync("sha256sum", [join(dir, "nova.exe")], { encoding: "utf8" }).split(" ")[0] : a.sha256);
+    await graft.recordArtifact({ sha256: "SHA256:" + "a".repeat(64), name: "nova.dmg" });
+    await graft.recordArtifact({ path: join(dir, "nova.exe"), name: "nova-1.4.exe" }); // same hash: replaces the entry
+    await expect(graft.recordArtifact({ sha256: "zz" })).rejects.toThrow(/not a SHA-256/);
+    await expect(graft.recordArtifact({ sha256: "b".repeat(64) })).rejects.toThrow(/needs a name/);
+    await expect(graft.recordArtifact({ path: join(dir, "missing.bin") })).rejects.toThrow(/Cannot read/);
+    expect((await graft.status())!.artifacts!.map((x) => x.name)).toEqual(["nova.dmg", "nova-1.4.exe"]);
+    await graft.evidenceNote("ran it");
+    const { commit } = await graft.land({ paths: ["src.txt"] });
+    const body = sh(["log", "-1", "--format=%B", commit]);
+    expect(parseArtifactTrailers(body)).toEqual([
+      { sha256: "a".repeat(64), name: "nova.dmg" },
+      { sha256: a.sha256, name: "nova-1.4.exe" },
+    ]);
+    expect((await graft.show(a.sha256))?.commit).toBe(commit);
+    expect((await graft.show("sha256:" + "a".repeat(64)))?.commit).toBe(commit);
+    expect(await graft.show("c".repeat(64))).toBeNull();
+    sh(["notes", "--ref=refs/notes/graft", "remove", commit]);
+    expect((await graft.show(commit))!.record!.artifacts).toHaveLength(2);
+    expect((await graft.context(["src.txt"])).text).toContain(`artifacts: nova.dmg sha256:${"a".repeat(64)}, nova-1.4.exe sha256:${a.sha256}`);
+  });
+
+  it("exports every recorded change with its diff, newest first", async () => {
+    await writeFile(join(dir, "plain.txt"), "p\n");
+    sh(["add", "-A"]);
+    sh(["commit", "-q", "-m", "plain"]);
+    for (const n of [1, 2, 3]) {
+      await graft.start({ task: `change ${n}` });
+      await writeFile(join(dir, "a.txt"), `${n}\n`);
+      await graft.evidenceCommand("true", "smoke");
+      await graft.land({ all: true });
+    }
+    const rows = await graft.export();
+    expect(rows.map((r) => r.record?.task)).toEqual(["change 3", "change 2", "change 1"]);
+    expect(rows[0].diff).toContain("+3");
+    expect(rows[0].recordSource).toBe("note");
+    expect((await graft.export({ limit: 2, diff: false })).map((r) => [r.record?.task, r.diff])).toEqual([["change 3", undefined], ["change 2", undefined]]);
+    const all = await graft.export({ all: true, diff: false });
+    expect(all).toHaveLength(4);
+    expect(all[3].record).toBeNull();
+    expect((await graft.log({ limit: Infinity })).length).toBe(4);
   });
 });
 

@@ -43,6 +43,19 @@ export interface ChangeRecord {
   attempts?: Attempt[];
   /** The change id or commit this change undoes, when it was opened by `graft revert`. Written as `Graft-Reverts`. */
   reverts?: string;
+  /**
+   * Files this change produced, by content hash, so a binary found in the
+   * field resolves to its task, plan and evidence. One `Graft-Artifact`
+   * trailer each.
+   */
+  artifacts?: Artifact[];
+}
+
+export interface Artifact {
+  /** A file name, as a reader would see it: `nova.exe`, `app-1.4.2.tar.gz`. */
+  name: string;
+  /** Lower-case hex SHA-256 of the file's content. */
+  sha256: string;
 }
 
 /** A change that was abandoned rather than landed. */
@@ -156,6 +169,7 @@ export const TRAILER_KEYS = {
   task: "Graft-Task",
   ref: "Graft-Task-Ref",
   reverts: "Graft-Reverts",
+  artifact: "Graft-Artifact",
   author: "Graft-Author",
   evidence: "Graft-Evidence",
 } as const;
@@ -167,6 +181,7 @@ export function trailersFor(record: ChangeRecord): Array<[string, string]> {
   ];
   if (record.ref) t.push([TRAILER_KEYS.ref, oneLine(record.ref)]);
   if (record.reverts) t.push([TRAILER_KEYS.reverts, record.reverts]);
+  for (const a of record.artifacts ?? []) t.push([TRAILER_KEYS.artifact, `sha256:${a.sha256} ${oneLine(a.name)}`]);
   t.push([TRAILER_KEYS.author, `${record.author.kind}:${record.author.name}`]);
   t.push([TRAILER_KEYS.evidence, evidenceSummary(record.evidence)]);
   return t;
@@ -179,6 +194,22 @@ export function parseTrailers(message: string): Record<string, string> {
     if (m) out[m[1]] = m[2].trim();
   }
   return out;
+}
+
+const ARTIFACT_TRAILER = /^Graft-Artifact:\s*sha256:([0-9a-f]{64})\s+(.+?)\s*$/;
+
+/** Every `Graft-Artifact` trailer in a message; `parseTrailers` keeps one value per key, and a change may produce several files. */
+export function parseArtifactTrailers(message: string): Artifact[] {
+  const out: Artifact[] = [];
+  for (const line of message.split("\n")) {
+    const m = ARTIFACT_TRAILER.exec(line);
+    if (m) out.push({ sha256: m[1], name: m[2] });
+  }
+  return out;
+}
+
+export function isSha256(s: string): boolean {
+  return /^(sha256:)?[0-9a-f]{64}$/i.test(s);
 }
 
 export function oneLine(s: string): string {
@@ -299,6 +330,7 @@ export function parseMessageRecord(message: string, authoredAt: string): ChangeR
     if (!m) continue;
     attempts.push({ id: m[1], task: m[2], summary: m[2], evidenceSummary: m[3], startedAt: authoredAt, abandonedAt: authoredAt, evidence: [] });
   }
+  const artifacts = parseArtifactTrailers(message);
   const [kind, ...name] = (trailers[TRAILER_KEYS.author] ?? "human:unknown").split(":");
   return {
     version: 1,
@@ -315,6 +347,7 @@ export function parseMessageRecord(message: string, authoredAt: string): ChangeR
     landedAt: authoredAt,
     evidence,
     ...(attempts.length ? { attempts } : {}),
+    ...(artifacts.length ? { artifacts } : {}),
   };
 }
 

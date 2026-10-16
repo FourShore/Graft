@@ -1,5 +1,5 @@
 export { Graft, GraftError, buildCommitMessage, recordBlock, runShell } from "./graft.js";
-export type { AbandonOptions, CapturedRun, FinishResult, InitResult, LandOptions, LandedChange, LogEntry, PrepareResult, RevertResult, StartOptions, SyncResult } from "./graft.js";
+export type { AbandonOptions, CapturedRun, ExportEntry, FinishResult, InitResult, LandOptions, LandedChange, LogEntry, PrepareResult, RevertResult, StartOptions, SyncResult } from "./graft.js";
 export * from "./policy.js";
 export * from "./record.js";
 export * from "./redact.js";

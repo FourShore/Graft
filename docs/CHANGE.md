@@ -63,6 +63,7 @@ change is being made.
 | `capturedBy` | no | The harness whose hook opened the change (`claude-code`, from the prompt) rather than an explicit `graft start`. A later `graft start` adopts such a change, naming the task and keeping its evidence. |
 | `attempts[]` | no | Changes abandoned in this worktree since the last land, each with its `id`, `task`, `plan`, `reason`, `startedAt`, `abandonedAt` and `evidence`: the plans that did not work and why. Written as the `Tried:` block. |
 | `reverts` | no | The change id or commit this change undoes, when it was opened by `graft revert`. Written as the `Graft-Reverts` trailer. |
+| `artifacts[]` | no | Files the change produced, each `{ "name", "sha256" }` (lower-case hex), recorded with `graft artifact`. One `Graft-Artifact` trailer each, so a build found in the field resolves to its change with `graft show <sha256>`. |
 
 ### Evidence
 
@@ -159,6 +160,7 @@ Graft-Evidence: 1 command, 1 passed; 1 note
 | `Graft-Task` | The task, collapsed to one line. |
 | `Graft-Task-Ref` | Present when the change has a `ref`: the URL or id of what asked for it. |
 | `Graft-Reverts` | Present when the change was opened by `graft revert`: the change id or commit it undoes. |
+| `Graft-Artifact` | One per recorded artifact: `sha256:<64 hex> <name>`. The only trailer that may repeat; readers collect every line. |
 | `Graft-Author` | `<kind>:<name>`. |
 | `Graft-Evidence` | Human-readable summary of the evidence list. |
 
@@ -276,7 +278,14 @@ reviewed change like any other.
 `graft log` lists commits with their trailers, loading the note when present.
 `graft show <id|sha>` finds a change by id with `git log --all --grep` on the
 `Graft-Change` trailer, so a change is findable from any branch that contains
-it, note or no note.
+it, note or no note. Given a SHA-256 (64 hex characters, with or without a
+`sha256:` prefix) it searches the `Graft-Artifact` trailers the same way.
+
+`graft export` writes every recorded change as one JSON object per line
+(`commit`, `title`, `authoredAt`, `record`, `recordSource`, `diff`), newest
+first: the (task, diff, evidence) rows a repository has accumulated, for a
+script or a model to consume. `--all` adds commits without a record; `--no-diff`
+leaves the diff out.
 
 `graft context <paths>` is the read an agent makes before editing: `git log
 --name-only -- <paths>` over the newest commits, each record read as above,

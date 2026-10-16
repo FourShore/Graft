@@ -319,8 +319,30 @@ program
   });
 
 program
+  .command("artifact")
+  .description("record a file this change produced, by SHA-256, so a build found in the field resolves to its change (graft show <sha256>)")
+  .argument("[path]", "the file to hash")
+  .option("--sha256 <hex>", "the hash, for a file that is not here (with --name)")
+  .option("--name <name>", "the file name to record (default: the path's base name)")
+  .action(async (path: string | undefined, o) => {
+    const a = await graft().recordArtifact({ path, sha256: o.sha256, name: o.name });
+    out(a, `Recorded artifact ${a.name} sha256:${a.sha256}`);
+  });
+
+program
+  .command("export")
+  .description("every recorded change with its diff, newest first, as JSON lines: the (task, diff, evidence) rows this repository has accumulated")
+  .option("-n, --limit <n>", "most commits to export (default: all)")
+  .option("--all", "include commits without a change record")
+  .option("--no-diff", "leave the diff out")
+  .action(async (o) => {
+    const rows = await graft().export({ limit: o.limit === undefined ? Infinity : Number(o.limit), all: Boolean(o.all), diff: o.diff });
+    for (const row of rows) process.stdout.write(JSON.stringify(row) + "\n");
+  });
+
+program
   .command("show")
-  .description("show one change by id or commit")
+  .description("show one change by id, commit, or the SHA-256 of an artifact it recorded")
   .argument("<ref>")
   .action(async (ref: string) => {
     const entry = await graft().show(ref);
@@ -374,6 +396,7 @@ function formatRecord(r: ChangeRecord): string {
     `task:   ${r.task}`,
     ...(r.ref ? [`ref:    ${r.ref}`] : []),
     ...(r.reverts ? [`reverts: ${r.reverts}`] : []),
+    ...(r.artifacts ?? []).map((a) => `artifact: ${a.name} sha256:${a.sha256}`),
     `author: ${r.author.kind}:${r.author.name}`,
   ];
   if (r.plan) lines.push(`plan:   ${r.plan.split("\n").join("\n        ")}`);

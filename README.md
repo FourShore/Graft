@@ -325,6 +325,22 @@ whose task names what is being undone and whose plan is the reason, with a
 like any other change; `graft context` then shows the revert next to the
 change it undid.
 
+## Following a change out of the repo
+
+```
+graft artifact dist/nova.exe            # records its SHA-256 on the open change
+graft show 3b1f…e9                      # later: the change that produced that file
+graft export > changes.jsonl            # every recorded change with its diff, one per line
+```
+
+`artifact` records a file the change produced, by content hash, as a
+`Graft-Artifact` trailer; `--sha256 <hex> --name <file>` records one that is
+not on this machine. A binary found on an office machine then resolves to the
+task, the plan and the evidence that shipped it. `export` writes the (task,
+diff, evidence) rows a repository has accumulated as JSON lines, newest first,
+for a script or a model; `--all` adds commits without a record and `--no-diff`
+leaves the diff out.
+
 ## Point your agent at it
 
 The `AGENTS.md` section that `graft init` writes tells an agent to open a
