@@ -5,6 +5,7 @@ import { execFileSync } from "node:child_process";
 import { beforeEach, describe, expect, it } from "vitest";
 import { Graft, GraftError } from "../src/graft.js";
 import { isChangeId, newChangeId, parseTrailers, shellJoin } from "../src/record.js";
+import { expandTrailers } from "../src/policy.js";
 
 let dir: string;
 let graft: Graft;
@@ -178,6 +179,42 @@ describe("redaction", () => {
       delete process.env.GRAFT_TEST_COLOR;
       delete process.env.GRAFT_TEST_SEND_GRID_KEY;
       delete process.env.GRAFT_TEST_AUTH_SERVER_URI;
+    }
+  });
+});
+
+describe("policy trailers", () => {
+  it("expands variables and skips trailers whose variable is unset", () => {
+    const env = { SESSION: "https://s/1", EMPTY: "" };
+    const r = expandTrailers(["Session: $SESSION", "Reviewed-By: ${EMPTY}", "Pair: $NOPE and $SESSION", "Plain: yes"], env);
+    expect(r.trailers).toEqual(["Session: https://s/1", "Plain: yes"]);
+    expect(r.skipped).toEqual([
+      { trailer: "Reviewed-By: ${EMPTY}", missing: "EMPTY" },
+      { trailer: "Pair: $NOPE and $SESSION", missing: "NOPE" },
+    ]);
+  });
+
+  it("writes policy trailers on land, after Graft's own and without duplicating explicit ones", async () => {
+    await mkdir(join(dir, ".graft"), { recursive: true });
+    await writeFile(
+      join(dir, ".graft/policy.json"),
+      JSON.stringify({ version: 1, trailers: ["Session: $GRAFT_TEST_SESSION", "Co-Authored-By: Bot <bot@example.com>", "Gone: $GRAFT_TEST_UNSET"] }),
+    );
+    process.env.GRAFT_TEST_SESSION = "https://s/42";
+    delete process.env.GRAFT_TEST_UNSET;
+    try {
+      await graft.start({ task: "trailers" });
+      await writeFile(join(dir, "a.txt"), "a\n");
+      await graft.evidenceNote("ok");
+      const landed = await graft.land({ all: true, trailers: ["Co-Authored-By: Bot <bot@example.com>", "Extra: 1"] });
+      expect(landed.skippedTrailers).toEqual([{ trailer: "Gone: $GRAFT_TEST_UNSET", missing: "GRAFT_TEST_UNSET" }]);
+      const body = sh(["log", "-1", "--format=%B"]);
+      const tail = body.trim().split("\n").slice(-4);
+      expect(tail[0]).toMatch(/^Graft-/);
+      expect(tail.slice(1)).toEqual(["Session: https://s/42", "Co-Authored-By: Bot <bot@example.com>", "Extra: 1"]);
+      expect(body).not.toContain("Gone:");
+    } finally {
+      delete process.env.GRAFT_TEST_SESSION;
     }
   });
 });
