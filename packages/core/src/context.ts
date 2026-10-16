@@ -1,5 +1,5 @@
 import type { LogEntry } from "./graft.js";
-import { evidenceLines, evidenceSummary } from "./record.js";
+import { attemptLines, evidenceLines, evidenceSummary } from "./record.js";
 
 /** One commit that touched the requested paths. */
 export interface ContextEntry extends LogEntry {
@@ -93,7 +93,9 @@ export function renderContextEntry(e: ContextEntry, full: boolean): string {
   const r = e.record;
   const lines = [head, `  task: ${indentRest(r.task, 8)}`];
   if (r.ref) lines.push(`  ref: ${r.ref}`);
+  if (r.reverts) lines.push(`  reverts: ${r.reverts}`);
   if (full && r.plan) lines.push(`  plan: ${indentRest(r.plan, 8)}`);
+  if (full && r.attempts?.length) lines.push(`  tried: ${attemptLines(r.attempts).map((l) => l.trim()).join("\n         ")}`);
   if (full && r.evidence.length) {
     lines.push(`  evidence: ${evidenceLines(r.evidence).map((l) => l.trim()).join("\n            ")}`);
   } else {

@@ -35,6 +35,31 @@ export interface ChangeRecord {
    * task and keeping the evidence, instead of refusing.
    */
   capturedBy?: string;
+  /**
+   * Changes abandoned in this worktree since the last land, folded into the
+   * change that did land: the plans that did not work and why, kept so the
+   * next reader does not rediscover them. Written as the `Tried:` block.
+   */
+  attempts?: Attempt[];
+  /** The change id or commit this change undoes, when it was opened by `graft revert`. Written as `Graft-Reverts`. */
+  reverts?: string;
+}
+
+/** A change that was abandoned rather than landed. */
+export interface Attempt {
+  id: string;
+  task: string;
+  plan?: string;
+  /** Why it was abandoned, from `graft abandon --reason`. */
+  reason?: string;
+  ref?: string;
+  startedAt: string;
+  abandonedAt: string;
+  evidence: Evidence[];
+  /** The one line a commit message keeps per attempt; set on a record rebuilt from the message, where nothing else survives. */
+  summary?: string;
+  /** The evidence summary from that line, since the rebuilt attempt has no evidence entries. */
+  evidenceSummary?: string;
 }
 
 export interface ChangeAuthor {
@@ -130,6 +155,7 @@ export const TRAILER_KEYS = {
   change: "Graft-Change",
   task: "Graft-Task",
   ref: "Graft-Task-Ref",
+  reverts: "Graft-Reverts",
   author: "Graft-Author",
   evidence: "Graft-Evidence",
 } as const;
@@ -140,6 +166,7 @@ export function trailersFor(record: ChangeRecord): Array<[string, string]> {
     [TRAILER_KEYS.task, oneLine(record.task)],
   ];
   if (record.ref) t.push([TRAILER_KEYS.ref, oneLine(record.ref)]);
+  if (record.reverts) t.push([TRAILER_KEYS.reverts, record.reverts]);
   t.push([TRAILER_KEYS.author, `${record.author.kind}:${record.author.name}`]);
   t.push([TRAILER_KEYS.evidence, evidenceSummary(record.evidence)]);
   return t;
@@ -163,6 +190,8 @@ export const NOTES_REF = "refs/notes/graft";
 
 /** Header of the evidence section written into the commit message body. */
 export const EVIDENCE_HEADER = "Evidence:";
+/** Header of the abandoned-attempts section written into the commit message body. */
+export const TRIED_HEADER = "Tried:";
 const MESSAGE_LINE_CAP = 200;
 
 /**
@@ -191,6 +220,25 @@ export function evidenceLines(evidence: Evidence[]): string[] {
     return `  [${status}${label}] ${clip(oneLine(ev.command))} (${(ev.durationMs / 1000).toFixed(1)}s)`;
   });
 }
+
+/**
+ * Abandoned attempts as commit-message lines, one per attempt: the id, then
+ * the task with the reason it was abandoned (or its plan when no reason was
+ * given), then the evidence summary in parentheses.
+ *
+ *   [m4z1gs7jgdyp3pj2za9c] Add rate limiting: tried a global bucket; 429s were not deterministic (2 commands, 1 passed)
+ */
+export function attemptLines(attempts: Attempt[]): string[] {
+  return attempts.map((a) => `  [${a.id}] ${clip(oneLine(attemptText(a)))} (${a.evidence.length ? evidenceSummary(a.evidence) : a.evidenceSummary ?? "none"})`);
+}
+
+function attemptText(a: Attempt): string {
+  if (a.summary) return a.summary;
+  const why = a.reason ?? a.plan;
+  return why ? `${a.task}: ${why}` : a.task;
+}
+
+const ATTEMPT_LINE = /^\s*\[([0-9a-hjkmnp-tv-z]{20})\] (.*) \(([^()]*)\)$/;
 
 /** A label on one line with no brackets, so the bracket that holds it still closes where it should. */
 function bracketSafe(label: string): string {
@@ -245,12 +293,19 @@ export function parseMessageRecord(message: string, authoredAt: string): ChangeR
       ...(status === "stale" ? { stale: true as const } : {}),
     });
   }
+  const attempts: Attempt[] = [];
+  for (const line of readBlock(lines, TRIED_HEADER)?.split("\n") ?? []) {
+    const m = ATTEMPT_LINE.exec(line);
+    if (!m) continue;
+    attempts.push({ id: m[1], task: m[2], summary: m[2], evidenceSummary: m[3], startedAt: authoredAt, abandonedAt: authoredAt, evidence: [] });
+  }
   const [kind, ...name] = (trailers[TRAILER_KEYS.author] ?? "human:unknown").split(":");
   return {
     version: 1,
     id,
     task: trailers[TRAILER_KEYS.task] ?? lines[0],
     ref: trailers[TRAILER_KEYS.ref] || undefined,
+    reverts: trailers[TRAILER_KEYS.reverts] || undefined,
     plan: plan || undefined,
     author: {
       kind: kind === "agent" ? "agent" : "human",
@@ -259,6 +314,7 @@ export function parseMessageRecord(message: string, authoredAt: string): ChangeR
     startedAt: authoredAt,
     landedAt: authoredAt,
     evidence,
+    ...(attempts.length ? { attempts } : {}),
   };
 }
 

@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { DEFAULT_CONTEXT_BUDGET, DEFAULT_CONTEXT_LIMIT, fitContext, type ContextEntry, type ContextOptions, type ContextResult } from "./context.js";
 import { Git } from "./git.js";
 import {
+  type Attempt,
   type ChangeAuthor,
   type ChangeRecord,
   type CommandEvidence,
@@ -9,6 +10,8 @@ import {
   EVIDENCE_OUTPUT_CAP,
   NOTES_REF,
   TRAILER_KEYS,
+  TRIED_HEADER,
+  attemptLines,
   isChangeId,
   newChangeId,
   parseTrailers,
@@ -43,6 +46,25 @@ export interface StartOptions {
   replace?: boolean;
   /** Set by the capture hooks: which harness opened the change. */
   capturedBy?: string;
+  /** Reuse an existing change id, so one change lands in several repositories. */
+  id?: string;
+  /** What this change undoes; set by `revert`. */
+  reverts?: string;
+}
+
+export interface AbandonOptions {
+  /** Why the change is being abandoned; kept with the attempt. */
+  reason?: string;
+  /** Keep nothing: the attempt is not folded into the next land. */
+  discard?: boolean;
+}
+
+export interface RevertResult {
+  /** The change opened for the revert; record evidence and land it. */
+  record: ChangeRecord;
+  /** The commit being undone. */
+  commit: string;
+  title: string;
 }
 
 export interface LandOptions {
@@ -171,12 +193,16 @@ export class Graft {
       );
     }
     if (!opts.task?.trim()) throw new GraftError("A task is required.");
+    if (opts.id !== undefined && !isChangeId(opts.id)) throw new GraftError(`"${opts.id}" is not a change id (20 characters of Crockford base32).`);
+    // A replaced change is an abandoned one: keep what it tried.
+    if (open) await this.abandon({ reason: "replaced by a new start" });
     const record: ChangeRecord = {
       version: 1,
-      id: newChangeId(),
+      id: opts.id ?? newChangeId(),
       task: opts.task.trim(),
       plan: opts.plan?.trim() || undefined,
       ref: opts.ref?.trim() || (await this.defaultRef()),
+      ...(opts.reverts ? { reverts: opts.reverts } : {}),
       author: defaultAuthor(opts.author),
       startedAt: new Date().toISOString(),
       evidence: [],
@@ -206,10 +232,61 @@ export class Graft {
     return missing || !value.trim() ? undefined : value.trim();
   }
 
-  async abandon(): Promise<ChangeRecord | null> {
+  /**
+   * Close the open change without landing it. What it tried is kept, as an
+   * attempt the next change to land in this worktree carries in its `Tried:`
+   * block, unless `discard` is set or there is nothing to keep: a change with
+   * no plan, no reason and no evidence tried nothing worth recording.
+   */
+  async abandon(opts: AbandonOptions = {}): Promise<ChangeRecord | null> {
     const open = await this.store.read();
+    if (!open) return null;
+    const reason = opts.reason?.trim() || undefined;
+    const worthKeeping = Boolean(open.plan || reason || open.evidence.length);
+    if (!opts.discard && worthKeeping) {
+      const attempt: Attempt = {
+        id: open.id,
+        task: open.task,
+        ...(open.plan ? { plan: open.plan } : {}),
+        ...(reason ? { reason } : {}),
+        ...(open.ref ? { ref: open.ref } : {}),
+        startedAt: open.startedAt,
+        abandonedAt: new Date().toISOString(),
+        evidence: open.evidence,
+      };
+      await this.store.addAttempt(attempt);
+    }
     await this.store.clear();
     return open;
+  }
+
+  /** The abandoned attempts waiting to be folded into the next land. */
+  async attempts(): Promise<Attempt[]> {
+    return this.store.readAttempts();
+  }
+
+  /**
+   * Open a change that undoes a landed one: `git revert --no-commit` on its
+   * commit, and a record whose task names what is being undone and whose
+   * plan is the reason, so the revert is as explained as the change was.
+   * Evidence and the land are the author's, as for any change.
+   */
+  async revert(ref: string, opts: { reason?: string; author?: Partial<ChangeAuthor> } = {}): Promise<RevertResult> {
+    const target = await this.show(ref);
+    if (!target) throw new GraftError(`No change or commit found for ${ref}.`);
+    const open = await this.store.read();
+    if (open && !open.capturedBy) {
+      throw new GraftError(`A change is already open (${open.id}: ${open.task}). Land or abandon it before reverting.`);
+    }
+    const what = target.record?.id ?? target.commit;
+    try {
+      await this.git.run(["revert", "--no-commit", "--no-edit", target.commit]);
+    } catch (err) {
+      throw new GraftError(`git revert ${target.commit.slice(0, 10)} did not apply cleanly: ${(err as Error).message}. Resolve it, or run git revert --abort.`);
+    }
+    const task = `Revert "${target.title}" (${what})`;
+    const record = await this.start({ task, plan: opts.reason, reverts: what, author: opts.author });
+    return { record, commit: target.commit, title: target.title };
   }
 
   async setPlan(plan: string): Promise<ChangeRecord> {
@@ -496,6 +573,7 @@ export class Graft {
 
     open.landedAt = new Date().toISOString();
     open.ref ??= await this.defaultRef(policy);
+    await this.foldAttempts(open);
     const fromPolicy = expandTrailers(policy.trailers ?? []);
     const explicit = opts.trailers ?? [];
     const trailers = [...fromPolicy.trailers.filter((t) => !explicit.includes(t)), ...explicit];
@@ -516,7 +594,16 @@ export class Graft {
       input: JSON.stringify(open, null, 2) + "\n",
     });
     await this.store.clear();
+    await this.store.clearAttempts();
     return { record: open, commit, skippedTrailers: fromPolicy.skipped };
+  }
+
+  /** Attach the worktree's abandoned attempts to a change about to land. */
+  private async foldAttempts(open: ChangeRecord): Promise<void> {
+    const waiting = await this.store.readAttempts();
+    if (!waiting.length) return;
+    const have = new Set((open.attempts ?? []).map((a) => a.id));
+    open.attempts = [...(open.attempts ?? []), ...waiting.filter((a) => !have.has(a.id))];
   }
 
   /**
@@ -550,7 +637,9 @@ export class Graft {
     }
     open.landedAt = new Date().toISOString();
     open.ref ??= await this.defaultRef(policy);
+    await this.foldAttempts(open);
     await this.store.write(open);
+    await this.store.clearAttempts();
     const block = recordBlock(open, expandTrailers(policy.trailers ?? []).trailers).join("\n");
     // Keep git's own comment lines (the editor template) after the record.
     const lines = current.split("\n");
@@ -825,6 +914,7 @@ export function buildCommitMessage(record: ChangeRecord, title?: string, extraTr
 export function recordBlock(record: ChangeRecord, extraTrailers: string[] = []): string[] {
   const lines: string[] = [];
   if (record.plan) lines.push("Plan:", indent(record.plan), "");
+  if (record.attempts?.length) lines.push(TRIED_HEADER, ...attemptLines(record.attempts), "");
   if (record.evidence.length) lines.push(EVIDENCE_HEADER, ...evidenceLines(record.evidence), "");
   for (const [k, v] of trailersFor(record)) lines.push(`${k}: ${v}`);
   for (const t of extraTrailers) lines.push(checkTrailer(t));

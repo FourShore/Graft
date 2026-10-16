@@ -382,6 +382,99 @@ describe("command catalog and rules", () => {
   });
 });
 
+describe("attempts and reverts", () => {
+  it("keeps an abandoned attempt and folds it into the next land as a Tried: block", async () => {
+    await graft.start({ task: "add rate limiting", plan: "a global bucket" });
+    await writeFile(join(dir, "a.txt"), "a\n");
+    await graft.evidenceCommand("false", "unit tests");
+    await graft.abandon({ reason: "429s were not deterministic" });
+    expect(await graft.status()).toBeNull();
+    expect((await graft.attempts()).map((a) => [a.task, a.reason, a.evidence.length])).toEqual([["add rate limiting", "429s were not deterministic", 1]]);
+    // Nothing tried, nothing kept; --discard keeps nothing either.
+    await graft.start({ task: "idle" });
+    await graft.abandon();
+    await graft.start({ task: "secret", plan: "p" });
+    await graft.abandon({ discard: true });
+    // A replaced change is an abandoned one.
+    await graft.start({ task: "left open", plan: "half done" });
+    await graft.start({ task: "add rate limiting, per key", plan: "token bucket per key", replace: true });
+    expect((await graft.attempts()).map((a) => a.reason ?? a.task)).toEqual(["429s were not deterministic", "replaced by a new start"]);
+
+    await graft.evidenceCommand("true", "unit tests");
+    const { record, commit } = await graft.land({ all: true });
+    expect(record.attempts?.map((a) => a.id)).toHaveLength(2);
+    expect(await graft.attempts()).toEqual([]);
+    const body = sh(["log", "-1", "--format=%B", commit]);
+    expect(body).toMatch(/Plan:\n  token bucket per key\n\nTried:\n  \[[0-9a-z]{20}\] add rate limiting: 429s were not deterministic \(1 command, 0 passed\)\n  \[[0-9a-z]{20}\] left open: replaced by a new start \(none\)\n\nEvidence:\n/);
+    const note = JSON.parse(sh(["notes", "--ref=refs/notes/graft", "show", commit]));
+    expect(note.attempts[0]).toMatchObject({ task: "add rate limiting", plan: "a global bucket", reason: "429s were not deterministic", evidence: [{ command: "false", exitCode: 1 }] });
+
+    sh(["notes", "--ref=refs/notes/graft", "remove", commit]);
+    const rebuilt = (await graft.show(commit))!.record!;
+    expect(rebuilt.attempts?.map((a) => a.summary)).toEqual(["add rate limiting: 429s were not deterministic", "left open: replaced by a new start"]);
+    const ctx = await graft.context(["a.txt"]);
+    expect(ctx.text).toContain("tried: [" + rebuilt.attempts![0].id + "] add rate limiting: 429s were not deterministic (1 command, 0 passed)");
+  });
+
+  it("carries attempts through a plain git commit via the hooks", async () => {
+    await writeFile(join(dir, "a.txt"), "a\n");
+    sh(["add", "-A"]);
+    sh(["commit", "-q", "-m", "base"]);
+    await graft.start({ task: "first try", plan: "nope" });
+    await graft.abandon({ reason: "wrong file" });
+    await graft.start({ task: "second try" });
+    await writeFile(join(dir, "a.txt"), "b\n");
+    sh(["add", "a.txt"]);
+    await graft.evidenceNote("looked");
+    const msgFile = join(dir, ".git", "MSG");
+    await writeFile(msgFile, "Title\n");
+    await graft.prepareCommitMessage(msgFile);
+    expect(await readFile(msgFile, "utf8")).toContain("Tried:\n  [");
+    expect(await graft.attempts()).toEqual([]);
+    sh(["commit", "-q", "-F", msgFile, "--cleanup=strip"]);
+    const fin = await graft.finishCommit();
+    const note = JSON.parse(sh(["notes", "--ref=refs/notes/graft", "show", fin.commit!]));
+    expect(note.attempts).toHaveLength(1);
+    expect(note.attempts[0].reason).toBe("wrong file");
+  });
+
+  it("revert opens a change that undoes a landed one and records what it reverts", async () => {
+    await graft.start({ task: "add greeting" });
+    await writeFile(join(dir, "hello.txt"), "hi\n");
+    await graft.evidenceNote("ok");
+    const landed = await graft.land({ all: true });
+    await expect(graft.revert("nope")).rejects.toThrow(/No change or commit found/);
+    const r = await graft.revert(landed.record.id, { reason: "greets in the wrong language" });
+    expect(r.commit).toBe(landed.commit);
+    expect(r.record).toMatchObject({ task: `Revert "add greeting" (${landed.record.id})`, plan: "greets in the wrong language", reverts: landed.record.id });
+    expect(existsSync(join(dir, "hello.txt"))).toBe(false);
+    await expect(graft.revert(landed.commit)).rejects.toThrow(/already open/);
+    await graft.evidenceNote("file gone");
+    const { commit } = await graft.land();
+    const body = sh(["log", "-1", "--format=%B", commit]);
+    expect(body).toMatch(/^Graft-Reverts: /m);
+    expect(body).toContain(`Graft-Reverts: ${landed.record.id}`);
+    sh(["notes", "--ref=refs/notes/graft", "remove", commit]);
+    expect((await graft.show(commit))!.record!.reverts).toBe(landed.record.id);
+    expect((await graft.context(["hello.txt"])).text).toContain(`reverts: ${landed.record.id}`);
+    // By commit SHA when the target has no record.
+    await writeFile(join(dir, "plain.txt"), "p\n");
+    sh(["add", "-A"]);
+    sh(["commit", "-q", "-m", "plain"]);
+    const plain = sh(["rev-parse", "HEAD"]);
+    const r2 = await graft.revert(plain);
+    expect(r2.record.reverts).toBe(plain);
+    expect(r2.record.task).toBe(`Revert "plain" (${plain})`);
+  });
+
+  it("start --id reuses a change id across repositories", async () => {
+    await expect(graft.start({ task: "x", id: "not-an-id" })).rejects.toThrow(/not a change id/);
+    const id = newChangeId();
+    const r = await graft.start({ task: "same change, other repo", id });
+    expect(r.id).toBe(id);
+  });
+});
+
 describe("stale evidence", () => {
   const policy = { version: 1, commands: { test: "true", lint: "true" }, rules: [{ paths: ["src/**"], require: ["test"] }] };
   const tree = (ev: unknown) => (ev as { tree?: string }).tree;

@@ -299,7 +299,31 @@ works from it. The command output is kept in a git note on `refs/notes/graft`,
 a cache that travels only with `graft sync` (see below).
 
 A crashed session can leave a change open in `.git`. `graft start --replace`
-drops it and opens the new one; `graft status` shows what is there.
+abandons it and opens the new one; `graft status` shows what is there.
+
+## Keeping what did not work
+
+Git keeps nothing of a change that was never committed, so every agent
+rediscovers the dead ends. Graft keeps them:
+
+```
+graft abandon --reason "a global bucket made 429s nondeterministic"
+graft revert <id> --reason "greets in the wrong language"
+```
+
+`abandon` closes the open change and keeps what it tried: the task, plan,
+reason and evidence. The next change that lands in that worktree carries it
+in a `Tried:` block in the commit message (and in full in the note), so the
+record of the change that worked names the attempts that did not. A change
+with nothing tried (no plan, reason or evidence) leaves nothing behind;
+`--discard` keeps nothing on purpose. `graft start --replace` keeps the
+change it replaces the same way.
+
+`revert` runs `git revert --no-commit` on a landed change and opens a change
+whose task names what is being undone and whose plan is the reason, with a
+`Graft-Reverts` trailer pointing at the original. Record evidence and land it
+like any other change; `graft context` then shows the revert next to the
+change it undid.
 
 ## Point your agent at it
 
