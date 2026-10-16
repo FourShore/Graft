@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { DEFAULT_CONTEXT_BUDGET, DEFAULT_CONTEXT_LIMIT, fitContext, type ContextEntry, type ContextOptions, type ContextResult } from "./context.js";
 import { Git } from "./git.js";
 import {
   type ChangeAuthor,
@@ -161,6 +162,30 @@ export class Graft {
       durationMs: Date.now() - started,
       output: capOutput(redact(output)),
       label,
+    };
+    open.evidence.push(ev);
+    await this.store.write(open);
+    return ev;
+  }
+
+  /**
+   * Attach a run the author already made through their own tools, so a slow
+   * build or test suite is not run twice. Graft did not run it, so the record
+   * marks it attested: the exit code and output are the author's claim.
+   */
+  async evidenceAttested(command: string, exitCode: number, output = "", label?: string): Promise<Evidence> {
+    const open = await this.requireOpen();
+    if (!command.trim()) throw new GraftError("The command you ran is required, so the record says what was attested.");
+    if (!Number.isInteger(exitCode)) throw new GraftError("Exit code must be an integer.");
+    const ev: Evidence = {
+      kind: "command",
+      at: new Date().toISOString(),
+      command: command.trim(),
+      exitCode,
+      durationMs: 0,
+      output: capOutput(redact(output)),
+      label,
+      attested: true,
     };
     open.evidence.push(ev);
     await this.store.write(open);
@@ -331,6 +356,39 @@ export class Graft {
       entries.push({ commit, title, authorName, authoredAt, trailers, ...(await this.readRecord(commit, body ?? "", authoredAt)) });
     }
     return entries;
+  }
+
+  /**
+   * The history of the files you are about to touch: commits that changed any
+   * of `paths` (files or directories, relative to the working directory),
+   * newest first, with their records, rendered to fit a prompt. With no paths
+   * it covers the whole repository.
+   */
+  async context(paths: string[], opts: ContextOptions = {}): Promise<ContextResult> {
+    const budget = opts.budget ?? DEFAULT_CONTEXT_BUDGET;
+    if (!(await this.git.head())) return fitContext(paths, [], 0, budget);
+    const raw = await this.git.run([
+      "log",
+      `--max-count=${opts.limit ?? DEFAULT_CONTEXT_LIMIT}`,
+      "--name-only",
+      "--format=%x1e%H%x1f%s%x1f%an%x1f%aI%x1f%B%x1d",
+      "--",
+      ...paths,
+    ]);
+    const matched: ContextEntry[] = [];
+    let unrecorded = 0;
+    for (const chunk of raw.split("\x1e")) {
+      if (!chunk.trim()) continue;
+      const [meta, named = ""] = chunk.split("\x1d");
+      const [commit, title, authorName, authoredAt, body] = meta.split("\x1f");
+      const files = named.split("\n").map((l) => l.trim()).filter(Boolean);
+      const trailers = parseTrailers(body ?? "");
+      const read = await this.readRecord(commit, body ?? "", authoredAt);
+      if (!read.record) unrecorded++;
+      if (!read.record && !opts.all) continue;
+      matched.push({ commit, title, authorName, authoredAt, trailers, files, ...read });
+    }
+    return fitContext(paths, matched, unrecorded, budget);
   }
 
   /** Look up one change by id or commit SHA. */

@@ -68,7 +68,10 @@ Two kinds in version 1.
 - `command`: a shell command run from the repository root, with its exit code,
   wall-clock duration, and the last 4 KB of combined stdout and stderr. Exit
   code 0 is "passed". The output is kept so a reader can see *what* passed, not
-  just that something did.
+  just that something did. With `attested: true` the author attached a run
+  they made themselves; Graft did not run it, the duration is 0, and readers
+  say "attested" instead of "pass" so the record is honest about who ran it.
+  It still counts as a command for `requireEvidence: "command"`.
 - `note`: free text for verification that did not come from a command: a manual
   check, a link to a CI run, a screenshot description.
 
@@ -205,6 +208,14 @@ reviewed change like any other.
 `graft show <id|sha>` finds a change by id with `git log --all --grep` on the
 `Graft-Change` trailer, so a change is findable from any branch that contains
 it, note or no note.
+
+`graft context <paths>` is the read an agent makes before editing: `git log
+--name-only -- <paths>` over the newest commits, each record read as above,
+rendered newest first and cut at a character budget. The first thing cut from
+an entry is its plan, then its evidence lines (replaced by the trailer-style
+summary); when an entry still does not fit, it and everything older are dropped
+and the text says how many. Commits without a record are counted in the header
+and shown only on request.
 
 Readers must tolerate a commit that has trailers but no note (show the
 trailers) and must ignore commits with neither.
