@@ -192,7 +192,9 @@ of the built-in list (`.env`, `*.pem`, `*.key`, ...). A glob without a slash
 matches a file name anywhere in the tree. `behaviorFiles`, optional, is a
 list of globs (same rules) for files `graft review` must group as behavior
 even though its heuristics would file them under mechanical, such as a schema
-or a spec kept in Markdown. Readers
+or a spec kept in Markdown. `checkCommands`, optional, is a list of regular
+expressions (as strings); when set, `graft check --rerun` re-runs only the
+recorded commands that match one of them. Readers
 reject unknown policy versions. The file is committed, so changing policy is a
 reviewed change like any other.
 
@@ -222,6 +224,8 @@ These are deliberate omissions, not oversights. Each is a candidate for version
   credentials (`.env`, `*.pem`, ...) unless told otherwise. Pattern-based
   scanning of the diff itself is for a server.
 - **Signing.** Nothing stops a record from lying about its author or evidence.
-  A server that runs the evidence commands itself is the real fix.
+  `graft check --rerun` in CI re-runs the recorded commands on the merge
+  commit, which turns the evidence claim into a fact at the point a human
+  merges; a server that runs them itself would also cover the author.
 - **Multiple open changes per worktree.** One at a time keeps the model simple
   and matches how agents actually work.

@@ -2,9 +2,10 @@
 import { Command } from "commander";
 import { Graft, GraftError, shellJoin, type LogEntry } from "@fourshore/graft-core";
 import type { ChangeRecord } from "@fourshore/graft-core";
-import { createReviewServer } from "@fourshore/graft-review";
+import { createReviewServer, renderCheckGithub, renderCheckText, runCheck } from "@fourshore/graft-review";
 import type { AddressInfo } from "node:net";
 import { createRequire } from "node:module";
+import { appendFile } from "node:fs/promises";
 
 const { version } = createRequire(import.meta.url)("../package.json") as { version: string };
 
@@ -181,6 +182,28 @@ program
   });
 
 program
+  .command("check")
+  .description("verify a branch's records like a reviewer at merge time: every behavior change needs evidence that meets the policy; --rerun runs the recorded commands again here")
+  .option("--base <ref>", "commits in <ref>..HEAD are checked (default: origin/main, or the upstream of HEAD)")
+  .option("--rerun", "re-run every recorded passing command once on this checkout and fail if any fails")
+  .option("--format <fmt>", "text | github (annotations and a step summary)", "text")
+  .option("-n, --limit <n>", "most commits to examine", "200")
+  .action(async (o) => {
+    const repo = program.opts<{ C: string }>().C;
+    const base = o.base ?? (await defaultBase(repo));
+    const r = await runCheck({ repo, base, rerun: Boolean(o.rerun), limit: Number(o.limit) });
+    if (o.format === "github") {
+      const gh = renderCheckGithub(r);
+      for (const a of gh.annotations) console.log(a);
+      if (process.env.GITHUB_STEP_SUMMARY) await appendFile(process.env.GITHUB_STEP_SUMMARY, gh.summary);
+      console.log(renderCheckText(r));
+    } else {
+      out(r, renderCheckText(r));
+    }
+    if (!r.ok) process.exitCode = 1;
+  });
+
+program
   .command("show")
   .description("show one change by id or commit")
   .argument("<ref>")
@@ -189,6 +212,19 @@ program
     if (!entry) throw new GraftError(`No change found for ${ref}.`);
     out(entry, entry.record && entry.recordSource === "note" ? formatRecord(entry.record) : formatEntry(entry));
   });
+
+async function defaultBase(repo: string): Promise<string> {
+  const g = new Graft(repo);
+  for (const candidate of ["origin/main", "origin/master", "@{upstream}"]) {
+    try {
+      await g.git.run(["rev-parse", "--verify", "-q", `${candidate}^{commit}`]);
+      return candidate;
+    } catch {
+      // try the next one
+    }
+  }
+  throw new GraftError("No base found: pass --base <ref> (the branch this one will merge into).");
+}
 
 function out(data: unknown, text: string, textAlways = false): void {
   if (json()) console.log(JSON.stringify(data, null, 2));

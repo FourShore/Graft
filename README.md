@@ -161,6 +161,29 @@ first, then the diff grouped into behavior, tests, and mechanical files.
 The badges come from file paths and recorded evidence. They say where to look
 first, not what to approve.
 
+## Verify at the pull request
+
+A `[pass]` in a record is the author's word. `graft check` makes it a fact
+where a human merges:
+
+```
+graft check --base origin/main            # every behavior change needs evidence that meets the policy
+graft check --base origin/main --rerun    # and every recorded passing command is run again, here
+```
+
+It walks `base..HEAD`, groups each commit's files the way `graft review`
+does, and fails when a commit that changed behavior has no record, no
+evidence, or (under `requireEvidence: "command"`) no passing command.
+Commits that only touch tests, docs or lockfiles need nothing. With
+`--rerun` each distinct recorded passing command runs once on the current
+checkout and a non-zero exit fails the check, with the output. `--format
+github` adds annotations and a step summary. The workflow in
+[.github/workflows/graft-check.yml](.github/workflows/graft-check.yml) runs
+it on every pull request; copy it into any repo that uses Graft. It re-runs
+commands only for branches of the same repository, since a fork's commit
+messages are text a stranger wrote, and `checkCommands` in the policy can
+restrict what is re-run further.
+
 ## Use it from code
 
 ```ts
@@ -187,6 +210,8 @@ note alone (`--note "checked"`) doesn't pass.
 doesn't write it, add it when the repo has its own credential file names.
 `behaviorFiles` lists globs that `graft review` must treat as behavior even
 though they look mechanical, such as a schema or spec kept in Markdown.
+`checkCommands` lists regular expressions for the commands `graft check
+--rerun` may run again; unset means every recorded passing command.
 [docs/CHANGE.md](docs/CHANGE.md#where-it-lives) covers what survives rebases,
 amends, and squashes.
 

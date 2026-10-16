@@ -8,6 +8,8 @@ export { parseDiff } from "./diff.js";
 export type { DiffFile, DiffHunk, DiffLine } from "./diff.js";
 export { groupFile, judgeEvidence, triage, RISK_ORDER } from "./triage.js";
 export type { EvidenceVerdict, FileGroup, Risk, Triage } from "./triage.js";
+export { runCheck, renderCheckText, renderCheckGithub, describeFinding } from "./check.js";
+export type { CheckOptions, CheckResult, CheckedCommit, Finding, Rerun } from "./check.js";
 
 export interface ReviewOptions {
   /** Repository to review. Defaults to the current directory. */
