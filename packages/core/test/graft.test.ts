@@ -52,9 +52,22 @@ describe("shellJoin", () => {
     expect(shellJoin(["node", "-e", 'console.log("a b")'])).toBe(`node -e 'console.log("a b")'`);
     expect(shellJoin(["echo", "it's"])).toBe(`echo 'it'\\''s'`);
     expect(shellJoin(["npm test && npm run lint"])).toBe("npm test && npm run lint");
+    expect(shellJoin(["go", "version", "2>&1"])).toBe("go version '2>&1'");
     await graft.start({ task: "q" });
     const ev = await graft.evidenceCommand(shellJoin(["node", "-e", 'console.log("a b", (1+1))']));
     expect(ev.kind === "command" && [ev.exitCode, ev.output.trim()]).toEqual([0, "a b 2"]);
+  });
+});
+
+describe("shellJoin on Windows", () => {
+  it("quotes for cmd.exe and the C runtime instead of POSIX sh", () => {
+    expect(shellJoin(["npm", "test"], "win32")).toBe("npm test");
+    expect(shellJoin(["type", "C:\\logs\\out.txt"], "win32")).toBe("type C:\\logs\\out.txt");
+    expect(shellJoin(["node", "-e", 'console.log("a b")'], "win32")).toBe('node -e ^"console.log^(\\^"a b\\^"^)^"');
+    expect(shellJoin(["echo", "100%", "x&y"], "win32")).toBe('echo ^"100^%^" ^"x^&y^"');
+    expect(shellJoin(["go", "version", "2>&1"], "win32")).toBe('go version ^"2^>^&1^"');
+    expect(shellJoin(["dir", "C:\\a b\\"], "win32")).toBe('dir ^"C:\\a b\\\\^"');
+    expect(shellJoin(["npm test && npm run lint"], "win32")).toBe("npm test && npm run lint");
   });
 });
 
