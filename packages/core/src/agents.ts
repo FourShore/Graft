@@ -21,6 +21,8 @@ knows why the code is the way it is.
   use \`graft start --replace\`.
 - Record each check as you run it: \`graft evidence --label "unit tests" -- npm test\`,
   or \`graft evidence --note "<what you checked by hand>"\` for anything manual.
+  When \`.graft/policy.json\` names commands, run them by name (\`graft evidence test\`);
+  \`graft status\` lists the names, and they are what the landing gate checks.
 - Commit with \`graft land <paths> -m "<title>"\`, not \`git commit\`. It refuses to
   land without evidence.
 - After \`git push\`, run \`graft sync\` so the full records reach the remote.

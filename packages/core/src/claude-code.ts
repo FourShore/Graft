@@ -1,6 +1,6 @@
 import type { Graft } from "./graft.js";
 import { classifyCommand, relativizeCommand } from "./capture.js";
-import { readPolicy } from "./policy.js";
+import { matchCatalog, readPolicy } from "./policy.js";
 
 /** The subset of a Claude Code hook payload Graft reads. */
 export interface ClaudeCodeEvent {
@@ -19,7 +19,7 @@ export interface ClaudeCodeEvent {
 export type CaptureOutcome =
   | { action: "ignored"; reason: string }
   | { action: "started"; id: string; task: string }
-  | { action: "recorded"; id: string; label: string; command: string; exitCode: number; opened: boolean };
+  | { action: "recorded"; id: string; label: string; command: string; exitCode: number; opened: boolean; name?: string };
 
 const TASK_CAP = 500;
 
@@ -50,8 +50,9 @@ export async function handleClaudeCodeEvent(graft: Graft, event: ClaudeCodeEvent
   const topLevel = await graft.git.topLevel();
   const policy = await readPolicy(topLevel);
   const command = relativizeCommand(typed, topLevel);
-  const kind = classifyCommand(command, policy.captureCommands);
-  if (!kind) return { action: "ignored", reason: "not a test, build, lint or type-check command" };
+  const name = matchCatalog(policy, command);
+  const kind = name ? "catalog" : classifyCommand(command, policy.captureCommands);
+  if (!kind) return { action: "ignored", reason: "not a policy command or a test, build, lint or type-check command" };
 
   let exitCode = 0;
   let output: string;
@@ -73,10 +74,10 @@ export async function handleClaudeCodeEvent(graft: Graft, event: ClaudeCodeEvent
     });
     opened = true;
   }
-  const label = `${kind} (captured)`;
-  const ev = await graft.evidenceCaptured({ command, exitCode, output, durationMs: event.duration_ms ?? 0, label, via: "claude-code" });
+  const label = name ?? `${kind} (captured)`;
+  const ev = await graft.evidenceCaptured({ command, exitCode, output, durationMs: event.duration_ms ?? 0, label, via: "claude-code", ...(name ? { name } : {}) });
   const open = (await graft.status())!;
-  return { action: "recorded", id: open.id, label, command: ev.kind === "command" ? ev.command : command, exitCode, opened };
+  return { action: "recorded", id: open.id, label, command: ev.kind === "command" ? ev.command : command, exitCode, opened, ...(name ? { name } : {}) };
 }
 
 function clipTask(task: string): string {

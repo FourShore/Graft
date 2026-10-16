@@ -5,9 +5,9 @@ import { execFileSync } from "node:child_process";
 import { beforeEach, describe, expect, it } from "vitest";
 import { Graft, GraftError } from "../src/graft.js";
 import { isChangeId, newChangeId, parseTrailers, shellJoin } from "../src/record.js";
-import { expandTrailers } from "../src/policy.js";
+import { evaluateRules, expandTrailers, matchCatalog, readPolicy } from "../src/policy.js";
 import { classifyCommand, relativizeCommand } from "../src/capture.js";
-import { secretFilesNamed } from "../src/redact.js";
+import { globToRegExp, secretFilesNamed } from "../src/redact.js";
 import { handleClaudeCodeEvent } from "../src/claude-code.js";
 import { installHooks, CLAUDE_SETTINGS_PATH } from "../src/hooks.js";
 import { existsSync } from "node:fs";
@@ -245,6 +245,107 @@ describe("policy trailers", () => {
   });
 });
 
+describe("command catalog and rules", () => {
+  const policy = {
+    version: 1 as const,
+    requireEvidence: true as const,
+    commands: { test: "go test  ./...", vet386: "env GOOS=windows GOARCH=386 go vet ./..." },
+    rules: [
+      { paths: ["**/*.go"], require: ["test", "vet386"] },
+      { paths: ["migrations/**"], require: ["test"] },
+    ],
+  };
+
+  it("matches a typed command to a catalog name, ignoring whitespace", () => {
+    expect(matchCatalog(policy, "go test ./...")).toBe("test");
+    expect(matchCatalog(policy, "go test ./pkg/...")).toBeNull();
+    expect(matchCatalog({ version: 1, requireEvidence: true }, "go test ./...")).toBeNull();
+  });
+
+  it("reports the named commands a change's files need and its evidence lacks", () => {
+    const at = new Date().toISOString();
+    const pass = (extra: object) => ({ kind: "command" as const, at, exitCode: 0, durationMs: 1, output: "", command: "x", ...extra });
+    expect(evaluateRules(policy, ["README.md"], [])).toEqual([]);
+    expect(evaluateRules(policy, ["cmd/a.go", "README.md"], [])).toEqual([
+      { name: "test", command: "go test  ./...", files: ["cmd/a.go"] },
+      { name: "vet386", command: "env GOOS=windows GOARCH=386 go vet ./...", files: ["cmd/a.go"] },
+    ]);
+    // Covered by name, by label (a record rebuilt from the message), or by the catalog's command text.
+    expect(evaluateRules(policy, ["a.go"], [pass({ name: "test" }), pass({ label: "vet386" })])).toEqual([]);
+    expect(evaluateRules(policy, ["a.go"], [pass({ command: "go test ./..." }), pass({ command: "env GOOS=windows GOARCH=386 go vet ./..." })])).toEqual([]);
+    // Not covered by a failure, an attested run, or a note.
+    expect(evaluateRules(policy, ["migrations/1.sql"], [pass({ name: "test", exitCode: 1 })]).map((u) => u.name)).toEqual(["test"]);
+    expect(evaluateRules(policy, ["migrations/1.sql"], [pass({ name: "test", attested: true })]).map((u) => u.name)).toEqual(["test"]);
+    expect(evaluateRules(policy, ["migrations/1.sql"], [{ kind: "note", at, text: "test" }]).map((u) => u.name)).toEqual(["test"]);
+  });
+
+  it("matches rule globs: ** spans directories, a trailing ** is everything beneath", () => {
+    const want = (glob: string, path: string, hit: boolean) => expect(globToRegExp(glob).test(path), `${glob} vs ${path}`).toBe(hit);
+    want("src/**", "src/a.ts", true);
+    want("src/**", "src/deep/b.ts", true);
+    want("src/**", "srcs/a.ts", false);
+    want("**/*.go", "a.go", true);
+    want("**/*.go", "cmd/x/a.go", true);
+    want("**/*.go", "a.go.txt", false);
+    want("*.go", "cmd/a.go", true);
+    want("hasura/migrations/**", "hasura/migrations/1/up.sql", true);
+  });
+
+  it("rejects a policy whose rule names a command the catalog lacks", async () => {
+    await mkdir(join(dir, ".graft"), { recursive: true });
+    await writeFile(join(dir, ".graft/policy.json"), JSON.stringify({ version: 1, rules: [{ paths: ["**/*.go"], require: ["test"] }] }));
+    await expect(readPolicy(dir)).rejects.toThrow(/requires "test", which "commands" does not define/);
+    await writeFile(join(dir, ".graft/policy.json"), JSON.stringify({ version: 1, commands: { "bad name": "x" } }));
+    await expect(readPolicy(dir)).rejects.toThrow(/command name "bad name"/);
+  });
+
+  it("runs a command by name, records the name, and gates land on the rules for the staged files", async () => {
+    await mkdir(join(dir, ".graft"), { recursive: true });
+    await writeFile(
+      join(dir, ".graft/policy.json"),
+      JSON.stringify({
+        version: 1,
+        commands: { test: "echo tests ok", lint: "echo lint ok" },
+        rules: [{ paths: ["src/**"], require: ["test", "lint"] }],
+      }),
+    );
+    expect(await graft.catalog()).toEqual({ test: "echo tests ok", lint: "echo lint ok" });
+    await graft.start({ task: "catalog", ref: "https://example.com/thread/1" });
+    await expect(graft.evidenceNamed("nope")).rejects.toThrow(/No command named "nope".*Known: test, lint/);
+    await mkdir(join(dir, "src"), { recursive: true });
+    await writeFile(join(dir, "src", "a.ts"), "a\n");
+    await writeFile(join(dir, "README.md"), "r\n");
+    const ev = await graft.evidenceNamed("test");
+    expect(ev).toMatchObject({ kind: "command", name: "test", command: "echo tests ok", exitCode: 0, output: "tests ok\n" });
+    await expect(graft.land({ all: true })).rejects.toThrow(/passing run of "lint" \(echo lint ok\) for changes to src\/a\.ts.*graft evidence lint/);
+    // A file outside the rule's paths lands with what is there (the failed attempt above left src/a.ts staged).
+    sh(["rm", "-q", "--cached", "src/a.ts"]);
+    await expect(graft.land({ paths: ["README.md"] })).resolves.toBeTruthy();
+    await graft.start({ task: "catalog 2" });
+    await graft.evidenceNamed("test", "unit");
+    await graft.evidenceCommand("echo lint ok", "the lint, typed by hand");
+    const { commit } = await graft.land({ all: true });
+    const body = sh(["log", "-1", "--format=%B"]);
+    expect(body).toContain("Evidence:\n  [pass unit] echo tests ok (");
+    expect(body).toContain("  [pass the lint, typed by hand] echo lint ok (");
+
+    // Rebuilt from the message, a named run keeps its name as the label and a ref survives in its trailer.
+    sh(["notes", "--ref=refs/notes/graft", "remove", commit]);
+    await graft.start({ task: "catalog 3", ref: "https://example.com/thread/2" });
+    await writeFile(join(dir, "src", "a.ts"), "b\n");
+    await graft.evidenceNamed("test");
+    await graft.evidenceNamed("lint");
+    const third = await graft.land({ all: true });
+    expect(sh(["log", "-1", "--format=%B"])).toMatch(/^Graft-Task-Ref: https:\/\/example\.com\/thread\/2$/m);
+    sh(["notes", "--ref=refs/notes/graft", "remove", third.commit]);
+    const rebuilt = await graft.show(third.commit);
+    expect(rebuilt?.recordSource).toBe("message");
+    expect(rebuilt?.record?.ref).toBe("https://example.com/thread/2");
+    expect(rebuilt?.record?.evidence.map((e) => e.label)).toEqual(["test", "lint"]);
+    expect(evaluateRules(await readPolicy(dir), ["src/a.ts"], rebuilt!.record!.evidence)).toEqual([]);
+  });
+});
+
 describe("capture", () => {
   it("classifies test, build, lint and type-check commands and nothing else", () => {
     expect(classifyCommand("npm test")).toBe("test");
@@ -325,6 +426,17 @@ describe("capture", () => {
 
     // A run with nothing open opens a placeholder change so the evidence is not lost.
     const top = await graft.git.topLevel();
+    await mkdir(join(dir, ".graft"), { recursive: true });
+    await writeFile(join(dir, ".graft/policy.json"), JSON.stringify({ version: 1, commands: { test: "npm test", vet386: "env GOOS=windows GOARCH=386 go vet ./..." } }));
+    const byName = await handleClaudeCodeEvent(graft, {
+      hook_event_name: "PostToolUse",
+      tool_name: "Bash",
+      tool_input: { command: `cd ${top} && env  GOOS=windows GOARCH=386 go vet ./...` },
+      tool_response: { stdout: "" },
+    });
+    expect(byName).toMatchObject({ action: "recorded", name: "vet386", label: "vet386", command: "env  GOOS=windows GOARCH=386 go vet ./..." });
+    expect((await graft.status())!.evidence.at(-1)).toMatchObject({ name: "vet386", label: "vet386", via: "claude-code" });
+    await rm(join(dir, ".graft"), { recursive: true });
     const moved = await handleClaudeCodeEvent(graft, {
       hook_event_name: "PostToolUse",
       tool_name: "Bash",

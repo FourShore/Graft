@@ -13,6 +13,8 @@ export interface ChangeRecord {
   task: string;
   /** How they intended to do it. Optional while a change is open. */
   plan?: string;
+  /** Where the task came from: the thread, issue or ticket that asked for it, as a URL or id. */
+  ref?: string;
   /** Who did the work. */
   author: ChangeAuthor;
   /** ISO 8601 timestamps. */
@@ -55,8 +57,10 @@ export interface CommandEvidence {
   durationMs: number;
   /** Trimmed tail of combined stdout/stderr, capped at EVIDENCE_OUTPUT_CAP bytes. */
   output: string;
-  /** Optional label, e.g. "unit tests". */
+  /** Optional label, e.g. "unit tests". Defaults to `name` in the message. */
   label?: string;
+  /** The policy catalog name this run satisfies, when it was run or matched by name. */
+  name?: string;
   /**
    * Set when a harness reported the run through a hook ("claude-code")
    * instead of Graft running it. The exit code and output are the harness's
@@ -115,6 +119,7 @@ export function evidenceSummary(evidence: Evidence[]): string {
 export const TRAILER_KEYS = {
   change: "Graft-Change",
   task: "Graft-Task",
+  ref: "Graft-Task-Ref",
   author: "Graft-Author",
   model: "Graft-Model",
   evidence: "Graft-Evidence",
@@ -124,8 +129,9 @@ export function trailersFor(record: ChangeRecord): Array<[string, string]> {
   const t: Array<[string, string]> = [
     [TRAILER_KEYS.change, record.id],
     [TRAILER_KEYS.task, oneLine(record.task)],
-    [TRAILER_KEYS.author, `${record.author.kind}:${record.author.name}`],
   ];
+  if (record.ref) t.push([TRAILER_KEYS.ref, oneLine(record.ref)]);
+  t.push([TRAILER_KEYS.author, `${record.author.kind}:${record.author.name}`]);
   if (record.author.model) t.push([TRAILER_KEYS.model, record.author.model]);
   t.push([TRAILER_KEYS.evidence, evidenceSummary(record.evidence)]);
   return t;
@@ -134,7 +140,7 @@ export function trailersFor(record: ChangeRecord): Array<[string, string]> {
 export function parseTrailers(message: string): Record<string, string> {
   const out: Record<string, string> = {};
   for (const line of message.split("\n")) {
-    const m = /^(Graft-[A-Za-z]+):\s*(.*)$/.exec(line);
+    const m = /^(Graft-[A-Za-z-]+):\s*(.*)$/.exec(line);
     if (m) out[m[1]] = m[2].trim();
   }
   return out;
@@ -166,7 +172,8 @@ const MESSAGE_LINE_CAP = 200;
  */
 export function evidenceLines(evidence: Evidence[]): string[] {
   return evidence.map((ev) => {
-    const label = ev.label ? ` ${bracketSafe(ev.label)}` : "";
+    const shown = ev.label ?? (ev.kind === "command" ? ev.name : undefined);
+    const label = shown ? ` ${bracketSafe(shown)}` : "";
     if (ev.kind === "note") return `  [note${label}] ${clip(oneLine(ev.text))}`;
     const failed = ev.exitCode === 0 ? "" : ` fail ${ev.exitCode}`;
     if (ev.attested) return `  [attested${failed}${label}] ${clip(oneLine(ev.command))}`;
@@ -224,6 +231,7 @@ export function parseMessageRecord(message: string, authoredAt: string): ChangeR
     version: 1,
     id,
     task: trailers[TRAILER_KEYS.task] ?? lines[0],
+    ref: trailers[TRAILER_KEYS.ref] || undefined,
     plan: plan || undefined,
     author: {
       kind: kind === "agent" ? "agent" : "human",

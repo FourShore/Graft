@@ -82,6 +82,7 @@ program
   .description("open a change: record what you were asked to do")
   .argument("<task...>", "the task, in your own words")
   .option("--plan <plan>", "how you intend to do it")
+  .option("--ref <ref>", "where the task came from: the thread, issue or ticket URL")
   .option("--author <name>", "who is doing the work (default: from environment)")
   .option("--model <model>", "model id, when the author is an agent")
   .option("--human", "mark the author as a human rather than an agent")
@@ -90,6 +91,7 @@ program
     const record = await graft().start({
       task: task.join(" "),
       plan: o.plan,
+      ref: o.ref,
       author: { name: o.author, model: o.model, kind: o.human ? "human" : undefined },
       replace: o.replace,
     });
@@ -107,13 +109,13 @@ program
 
 program
   .command("evidence")
-  .description("run a command and record its result, attach a run you already made, or record a note")
+  .description("run a command (or a policy command by name) and record its result, attach a run you already made, or record a note")
   .option("--label <label>", "what this evidence shows, e.g. 'unit tests'")
   .option("--note <text>", "record a note instead of running a command")
   .option("--attach", "do not run the command; record it as a run you already made, marked attested")
   .option("--exit <code>", "with --attach: the exit code of your run (default 0)")
   .option("--output-file <path>", "with --attach: a file holding your run's output (last 4 KB kept)")
-  .argument("[command...]", "command to run (put -- before it)")
+  .argument("[command...]", "a name from the policy's commands, or a command to run (put -- before it)")
   .action(async (command: string[], o) => {
     const g = graft();
     if (o.note) {
@@ -121,7 +123,24 @@ program
       out(ev, `Recorded note${o.label ? ` (${o.label})` : ""}`);
       return;
     }
-    if (!command.length) throw new GraftError("Give a command after --, or use --note.");
+    if (!command.length) {
+      const names = Object.entries(await g.catalog());
+      throw new GraftError(
+        names.length
+          ? `Give a policy command by name (${names.map(([n]) => n).join(", ")}), a command after --, or use --note.`
+          : "Give a command after --, or use --note.",
+      );
+    }
+    if (command.length === 1 && !o.attach && (await g.catalog())[command[0]]) {
+      const ev = await g.evidenceNamed(command[0], o.label);
+      if (ev.kind === "command") {
+        process.stdout.write(ev.output);
+        if (ev.output && !ev.output.endsWith("\n")) process.stdout.write("\n");
+        out(ev, `Recorded ${command[0]}: ${ev.command} -> exit ${ev.exitCode} (${ev.durationMs} ms)`, true);
+        if (ev.exitCode !== 0) process.exitCode = ev.exitCode;
+      }
+      return;
+    }
     const cmd = shellJoin(command);
     if (o.attach) {
       const exitCode = o.exit === undefined ? 0 : Number(o.exit);
@@ -210,8 +229,11 @@ program
   .command("status")
   .description("show the open change")
   .action(async () => {
-    const record = await graft().status();
-    out(record, record ? formatRecord(record) : "No change is open.");
+    const g = graft();
+    const record = await g.status();
+    const names = Object.entries(await g.catalog());
+    const commands = names.length ? `\ncommands: ${names.map(([n, c]) => `${n} (${c})`).join(", ")}` : "";
+    out(record, (record ? formatRecord(record) : "No change is open.") + commands);
   });
 
 program
@@ -334,6 +356,7 @@ function formatRecord(r: ChangeRecord): string {
   const lines = [
     `change: ${r.id}`,
     `task:   ${r.task}`,
+    ...(r.ref ? [`ref:    ${r.ref}`] : []),
     `author: ${r.author.kind}:${r.author.name}${r.author.model ? ` (${r.author.model})` : ""}`,
   ];
   if (r.plan) lines.push(`plan:   ${r.plan.split("\n").join("\n        ")}`);
@@ -341,7 +364,7 @@ function formatRecord(r: ChangeRecord): string {
   for (const ev of r.evidence) {
     lines.push(
       ev.kind === "command"
-        ? `  ${ev.attested ? (ev.exitCode === 0 ? "attested" : `ATTESTED FAIL ${ev.exitCode}`) : ev.exitCode === 0 ? "pass" : "FAIL"}  ${ev.command}${ev.label ? `  [${ev.label}]` : ""}`
+        ? `  ${ev.attested ? (ev.exitCode === 0 ? "attested" : `ATTESTED FAIL ${ev.exitCode}`) : ev.exitCode === 0 ? "pass" : "FAIL"}  ${ev.command}${ev.label ?? ev.name ? `  [${ev.label ?? ev.name}]` : ""}`
         : `  note  ${ev.text}${ev.label ? `  [${ev.label}]` : ""}`,
     );
   }

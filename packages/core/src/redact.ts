@@ -68,13 +68,15 @@ export function secretFilesNamed(command: string, extra: string[] = []): string[
   return [...new Set(words.filter((w) => looksLikeSecretFile(w, extra)))];
 }
 
-/** Minimal glob: `**` spans directories, `*` and `?` stay within one segment. */
+/** Minimal glob: `**` spans directories (`a/**` is everything under a), `*` and `?` stay within one segment. */
 export function globToRegExp(glob: string): RegExp {
   const body = glob
     .replace(/[.+^${}()|[\]\\]/g, "\\$&")
-    .replace(/\*\*\/?/g, "\u0000")
+    .replace(/\*\*\//g, "\u0000")
+    .replace(/\*\*/g, "\u0001")
     .replace(/\*/g, "[^/]*")
     .replace(/\?/g, "[^/]")
-    .replace(/\u0000/g, "(?:.*/)?");
+    .replace(/\u0000/g, "(?:.*/)?")
+    .replace(/\u0001/g, ".*");
   return new RegExp(glob.includes("/") ? `^${body}$` : `(^|/)${body}$`);
 }

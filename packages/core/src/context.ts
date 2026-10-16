@@ -92,6 +92,7 @@ export function renderContextEntry(e: ContextEntry, full: boolean): string {
   if (!e.record) return [head, "  (no change record)", ...(e.files.length ? [`  files: ${e.files.join(", ")}`] : [])].join("\n");
   const r = e.record;
   const lines = [head, `  task: ${indentRest(r.task, 8)}`];
+  if (r.ref) lines.push(`  ref: ${r.ref}`);
   if (full && r.plan) lines.push(`  plan: ${indentRest(r.plan, 8)}`);
   if (full && r.evidence.length) {
     lines.push(`  evidence: ${evidenceLines(r.evidence).map((l) => l.trim()).join("\n            ")}`);

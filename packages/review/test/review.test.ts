@@ -382,6 +382,56 @@ describe("check", () => {
     await expect(runCheck({ repo: dir, base: "nope" })).rejects.toThrow(/"nope" is not a commit in this clone/);
   });
 
+  it("fails a commit whose files match a rule its evidence does not cover, and re-runs a named command by its current definition", async () => {
+    const base = await seed();
+    await mkdir(join(dir, ".graft"), { recursive: true });
+    const policy = (test: string) => ({
+      version: 1,
+      requireEvidence: true,
+      commands: { test, lint: "echo lint" },
+      rules: [{ paths: ["src/**"], require: ["test", "lint"] }],
+      checkCommands: ["^never$"],
+    });
+    await writeFile(join(dir, ".graft/policy.json"), JSON.stringify(policy("echo old tests")));
+    // 1: covered by name
+    await graft.start({ task: "covered" });
+    await writeFile(join(dir, "src", "a.ts"), "export const a = 2;\n");
+    await graft.evidenceNamed("test");
+    await graft.evidenceNamed("lint");
+    await graft.land({ all: true });
+    // 2: evidence, but not the lint the rule asks for
+    await graft.start({ task: "half covered" });
+    await writeFile(join(dir, "src", "a.ts"), "export const a = 3;\n");
+    await graft.evidenceNamed("test");
+    await graft.land({ all: true, allowNoEvidence: true });
+    // 3: a docs commit matches no rule
+    await writeFile(join(dir, "README.md"), "docs\n");
+    sh(["commit", "-q", "-am", "docs"]);
+    // The catalog's test command changes after the fact; the re-run uses the new definition.
+    await graft.start({ task: "retune policy" });
+    await writeFile(join(dir, ".graft/policy.json"), JSON.stringify(policy("echo new tests")));
+    await graft.evidenceNamed("test");
+    await graft.land({ all: true });
+
+    const r = await runCheck({ repo: dir, base, rerun: true });
+    expect(r.commits.map((c) => [c.entry.title, c.ok])).toEqual([
+      ["retune policy", true],
+      ["docs", true],
+      ["half covered", false],
+      ["covered", true],
+    ]);
+    expect(r.findings).toMatchObject([{ kind: "rule-unmet", title: "half covered", files: ["src/a.ts"], names: [{ name: "lint", command: "echo lint" }] }]);
+    // Catalog commands re-run even though checkCommands would not allow them as raw text, under their current definition.
+    expect(r.reruns.map((x) => [x.name, x.command, x.exitCode])).toEqual([
+      ["test", "echo new tests", 0],
+      ["lint", "echo lint", 0],
+    ]);
+    const text = renderCheckText(r);
+    expect(text).toContain('"half covered" changed src/a.ts without a passing run of "lint" (echo lint)');
+    expect(text).toContain("pass  test: echo new tests");
+    expect(r.ok).toBe(false);
+  });
+
   it("re-runs only commands allowed by checkCommands and reports the rest as skipped without failing", async () => {
     const base = await seed();
     await mkdir(join(dir, ".graft"), { recursive: true });
