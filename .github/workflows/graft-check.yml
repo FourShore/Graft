@@ -23,12 +23,14 @@ jobs:
           node-version: 22
       - name: Install the project so recorded commands can run
         run: npm ci
-      - name: Install Graft
-        # In this repo Graft is the project itself; elsewhere use `npm install -g @fourshore/graft`.
-        run: npm run build && npm link -w packages/cli
+      - name: Build Graft
+        # This repo is Graft itself, so the check runs from the build below.
+        # In another repo replace this step with: npm install -g @fourshore/graft
+        # and run `graft check ...` in the last step.
+        run: npm run build
       - name: Graft check
         env:
           # Re-run recorded commands only for branches of this repository: a fork's
           # commit messages are text a stranger wrote, and the check would execute them.
           RERUN: ${{ github.event.pull_request.head.repo.full_name == github.repository && '--rerun' || '' }}
-        run: graft check --base "origin/${{ github.event.pull_request.base.ref }}" --format github $RERUN
+        run: node packages/cli/dist/cli.js check --base "origin/${{ github.event.pull_request.base.ref }}" --format github $RERUN
