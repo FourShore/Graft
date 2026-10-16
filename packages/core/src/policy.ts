@@ -34,6 +34,12 @@ export interface Policy {
    * with a hole in it.
    */
   trailers?: string[];
+  /**
+   * Extra regular expressions (as strings) for commands the capture hooks
+   * record as evidence, on top of the built-in test, build, lint and
+   * type-check patterns: for example "^\\./scripts/verify".
+   */
+  captureCommands?: string[];
 }
 
 export const DEFAULT_POLICY: Policy = { version: 1, requireEvidence: true };

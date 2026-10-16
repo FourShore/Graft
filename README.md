@@ -70,6 +70,28 @@ Tools: `graft_start`, `graft_plan`, `graft_evidence`, `graft_note`,
 `graft_abandon`. `graft_land` commits what's staged plus any `paths` you give
 it; `stageAll` is off by default.
 
+## Capture without ritual
+
+`graft init` also installs hooks, so records exist whether or not anyone
+remembers Graft:
+
+- **Claude Code hooks** in `.claude/settings.json`. The prompt opens a change
+  (the prompt is the task, as the agent received it), and every Bash call that
+  looks like a test, build, lint or type-check run is recorded as evidence
+  with the exit code and output the harness itself reported, so it is a pass
+  or a fail, not a claim. Other commands are ignored. Widen the filter with
+  `captureCommands` in the policy. An explicit `graft start` afterwards just
+  names the task and keeps what was captured.
+- **Git hooks** (`prepare-commit-msg` and `post-commit`). A plain
+  `git commit` with a change open gets the Plan and Evidence blocks and the
+  trailers in its message and the full record as a note, exactly like
+  `graft land`, and the same policy gate applies (`GRAFT_ALLOW_NO_EVIDENCE=1`
+  or `GRAFT_ALLOW_SECRETS=1` override it for one commit). Merges, squashes and
+  amends are left alone, and a hook that is already there is not overwritten.
+
+The hooks run `graft`, so it has to be on PATH. `graft init --no-hooks` skips
+them. Claude Code runs project hooks only after you trust the folder.
+
 ## Use it from the shell
 
 ```
@@ -197,6 +219,8 @@ filled from the environment, so the lines you would otherwise pass with
 
 A trailer whose variable is not set is left out of that commit, and `land`
 says so, rather than written with an empty value.
+`captureCommands` lists extra regular expressions for commands the capture
+hooks record on top of the built-in test, build, lint and type-check patterns.
 [docs/CHANGE.md](docs/CHANGE.md#where-it-lives) covers what survives rebases,
 amends, and squashes.
 

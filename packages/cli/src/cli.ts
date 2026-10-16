@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { Command } from "commander";
-import { Graft, GraftError, shellJoin, type LogEntry } from "@fourshore/graft-core";
+import { Graft, GraftError, handleClaudeCodeEvent, shellJoin, type ClaudeCodeEvent, type LogEntry } from "@fourshore/graft-core";
 import type { ChangeRecord } from "@fourshore/graft-core";
 import { createReviewServer } from "@fourshore/graft-review";
 import type { AddressInfo } from "node:net";
@@ -27,8 +27,9 @@ program
   .option("--remote <name>", "remote to configure (default: origin)")
   .option("--force", "overwrite an existing policy file")
   .option("--no-agents", "leave AGENTS.md alone")
+  .option("--no-hooks", "do not install the Claude Code and git capture hooks")
   .action(async (o) => {
-    const r = await graft().init({ remote: o.remote, force: o.force, agents: o.agents });
+    const r = await graft().init({ remote: o.remote, force: o.force, agents: o.agents, hooks: o.hooks });
     const lines = [
       r.configured.length ? `Set ${r.configured.join(", ")}` : "Git config already set",
       r.policyWritten ? `Wrote .graft/policy.json` : ".graft/policy.json already exists",
@@ -36,6 +37,23 @@ program
     if (r.agents) {
       lines.push(r.agents.written ? "Added a Version control section to AGENTS.md; commit it" : `${r.agents.coveredBy} already covers Graft`);
       if (r.agents.claudeHint) lines.push("Claude Code reads CLAUDE.md, not AGENTS.md: add a line `@AGENTS.md` to CLAUDE.md.");
+    }
+    if (r.hooks) {
+      const h = r.hooks;
+      lines.push(
+        h.claudeCode === "written"
+          ? "Added capture hooks to .claude/settings.json (prompt opens a change, test/build/lint runs become evidence); commit it"
+          : h.claudeCode === "present"
+            ? ".claude/settings.json already has the capture hooks"
+            : ".claude/settings.json is not valid JSON; capture hooks not added",
+      );
+      const gitHooks = Object.entries(h.git);
+      const foreign = gitHooks.filter(([, state]) => state === "foreign").map(([name]) => name);
+      const written = gitHooks.filter(([, state]) => state === "written").map(([name]) => name);
+      if (written.length) lines.push(`Installed git hooks ${written.join(", ")} in ${h.hooksDir}, so a plain git commit carries the record`);
+      else if (!foreign.length) lines.push("Git hooks already installed");
+      if (foreign.length) lines.push(`Left ${foreign.join(" and ")} alone in ${h.hooksDir}: another hook is there. Add \`graft hook <name> "$@"\` to it yourself.`);
+      lines.push("The hooks run `graft`, so it must be on PATH for Claude Code and git.");
     }
     if (!r.remote) lines.push("No remote yet; run `graft init` again after `git remote add`.");
     out(r, lines.join("\n"));
@@ -134,6 +152,39 @@ program
   });
 
 program
+  .command("hook")
+  .description("entry points for the hooks graft init installs: claude-code (stdin JSON), prepare-commit-msg <file> [source], post-commit")
+  .argument("<kind>", "claude-code | prepare-commit-msg | post-commit")
+  .argument("[args...]", "what git passes the hook")
+  .action(async (kind: string, args: string[]) => {
+    if (kind === "claude-code") {
+      // Never break the agent's session: swallow everything, exit 0.
+      try {
+        const raw = await readStdin();
+        const event = JSON.parse(raw) as ClaudeCodeEvent;
+        const outcome = await handleClaudeCodeEvent(graft(), event);
+        if (json()) console.log(JSON.stringify(outcome));
+      } catch (err) {
+        process.stderr.write(`graft hook: ${err instanceof Error ? err.message : String(err)}\n`);
+      }
+      return;
+    }
+    if (kind === "prepare-commit-msg") {
+      const [file, source] = args;
+      if (!file) throw new GraftError("prepare-commit-msg needs the message file git passes it.");
+      const r = await graft().prepareCommitMessage(file, source);
+      if (r.applied) process.stderr.write(`graft: added change ${r.id} to the commit message\n`);
+      return;
+    }
+    if (kind === "post-commit") {
+      const r = await graft().finishCommit();
+      if (r.attached) console.log(`graft: recorded change ${r.id} on ${r.commit?.slice(0, 10)}`);
+      return;
+    }
+    throw new GraftError(`Unknown hook '${kind}'. Expected claude-code, prepare-commit-msg or post-commit.`);
+  });
+
+program
   .command("abandon")
   .description("drop the open change without committing")
   .action(async () => {
@@ -190,6 +241,16 @@ program
     if (!entry) throw new GraftError(`No change found for ${ref}.`);
     out(entry, entry.record && entry.recordSource === "note" ? formatRecord(entry.record) : formatEntry(entry));
   });
+
+function readStdin(): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let data = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (c) => (data += c));
+    process.stdin.on("end", () => resolve(data));
+    process.stdin.on("error", reject);
+  });
+}
 
 function out(data: unknown, text: string, textAlways = false): void {
   if (json()) console.log(JSON.stringify(data, null, 2));

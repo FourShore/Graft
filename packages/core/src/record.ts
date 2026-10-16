@@ -26,6 +26,13 @@ export interface ChangeRecord {
    * original SHA, not the one the note is now attached to.
    */
   commit?: string;
+  /**
+   * Set when a capture hook opened the change from the harness's own event
+   * (the prompt, or a recorded run with nothing open) rather than an explicit
+   * `graft start`. A later `graft start` adopts such a change, naming the
+   * task and keeping the evidence, instead of refusing.
+   */
+  capturedBy?: string;
 }
 
 export interface ChangeAuthor {
@@ -50,6 +57,12 @@ export interface CommandEvidence {
   output: string;
   /** Optional label, e.g. "unit tests". */
   label?: string;
+  /**
+   * Set when a harness reported the run through a hook ("claude-code")
+   * instead of Graft running it. The exit code and output are the harness's
+   * own, so this is still a pass or a fail, not a claim.
+   */
+  via?: string;
 }
 
 export interface NoteEvidence {
