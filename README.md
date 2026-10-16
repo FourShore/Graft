@@ -168,7 +168,7 @@ jobs:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
       # your install step (npm ci, go mod download, ...), so recorded commands can run
-      - uses: FourShore/Graft@main   # pin to a tag or SHA to fix the version
+      - uses: FourShore/Graft@v0   # v0 moves with each 0.x release; pin @v0.1.0 or a SHA for one exact version
 ```
 
 The action installs Graft, fetches the notes, and runs the check against the

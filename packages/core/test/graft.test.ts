@@ -815,7 +815,7 @@ describe("init", () => {
     const ci = (await graft.init({ agents: false, hooks: false, ci: true })).ci;
     expect(ci).toEqual({ state: "written", path: ".github/workflows/graft-check.yml" });
     const workflow = await readFile(join(dir, ".github/workflows/graft-check.yml"), "utf8");
-    expect(workflow).toContain("uses: FourShore/Graft@main");
+    expect(workflow).toContain("uses: FourShore/Graft@v0");
     expect(workflow).toContain("fetch-depth: 0");
     expect((await graft.init({ agents: false, hooks: false, ci: true })).ci).toEqual({ state: "present", path: ".github/workflows/graft-check.yml" });
     expect(await readFile(join(dir, ".github/workflows/graft-check.yml"), "utf8")).toBe(workflow);
