@@ -52,9 +52,22 @@ describe("shellJoin", () => {
     expect(shellJoin(["node", "-e", 'console.log("a b")'])).toBe(`node -e 'console.log("a b")'`);
     expect(shellJoin(["echo", "it's"])).toBe(`echo 'it'\\''s'`);
     expect(shellJoin(["npm test && npm run lint"])).toBe("npm test && npm run lint");
+    expect(shellJoin(["go", "version", "2>&1"])).toBe("go version '2>&1'");
     await graft.start({ task: "q" });
     const ev = await graft.evidenceCommand(shellJoin(["node", "-e", 'console.log("a b", (1+1))']));
     expect(ev.kind === "command" && [ev.exitCode, ev.output.trim()]).toEqual([0, "a b 2"]);
+  });
+});
+
+describe("shellJoin on Windows", () => {
+  it("quotes for cmd.exe and the C runtime instead of POSIX sh", () => {
+    expect(shellJoin(["npm", "test"], "win32")).toBe("npm test");
+    expect(shellJoin(["type", "C:\\logs\\out.txt"], "win32")).toBe("type C:\\logs\\out.txt");
+    expect(shellJoin(["node", "-e", 'console.log("a b")'], "win32")).toBe('node -e ^"console.log^(\\^"a b\\^"^)^"');
+    expect(shellJoin(["echo", "100%", "x&y"], "win32")).toBe('echo ^"100^%^" ^"x^&y^"');
+    expect(shellJoin(["go", "version", "2>&1"], "win32")).toBe('go version ^"2^>^&1^"');
+    expect(shellJoin(["dir", "C:\\a b\\"], "win32")).toBe('dir ^"C:\\a b\\\\^"');
+    expect(shellJoin(["npm test && npm run lint"], "win32")).toBe("npm test && npm run lint");
   });
 });
 
@@ -214,6 +227,67 @@ describe("attested evidence", () => {
     await expect(graft.land({ all: true })).rejects.toThrow(/passing command/);
     await graft.evidenceAttested("make check", 0);
     await expect(graft.land({ all: true })).resolves.toBeTruthy();
+  });
+});
+
+describe("context", () => {
+  it("returns the recorded changes that touched the paths, newest first, within a budget", async () => {
+    await mkdir(join(dir, "src"), { recursive: true });
+    await writeFile(join(dir, "src", "a.ts"), "a\n");
+    await writeFile(join(dir, "other.txt"), "o\n");
+    sh(["add", "-A"]);
+    sh(["commit", "-q", "-m", "plain commit touching a"]);
+
+    await graft.start({ task: "first change to a", plan: "edit a\ncarefully" });
+    await writeFile(join(dir, "src", "a.ts"), "a2\n");
+    await graft.evidenceCommand("echo ok", "smoke");
+    await graft.land({ all: true });
+
+    await graft.start({ task: "only other" });
+    await writeFile(join(dir, "other.txt"), "o2\n");
+    await graft.evidenceNote("looked");
+    await graft.land({ all: true });
+
+    await graft.start({ task: "second change to a" });
+    await writeFile(join(dir, "src", "a.ts"), "a3\n");
+    await graft.evidenceNote("checked by hand");
+    const second = await graft.land({ all: true });
+
+    const ctx = await graft.context(["src"]);
+    expect(ctx.entries.map((e) => e.record?.task)).toEqual(["second change to a", "first change to a"]);
+    expect(ctx.entries[0].commit).toBe(second.commit);
+    expect(ctx.entries[0].files).toEqual(["src/a.ts"]);
+    expect(ctx.unrecorded).toBe(1);
+    expect(ctx.omitted).toBe(0);
+    expect(ctx.text).toContain("Context for src (2 recorded changes, newest first; 1 commit without a record)");
+    expect(ctx.text).toContain("  plan: edit a\n        carefully");
+    expect(ctx.text).toContain("  evidence: [pass smoke] echo ok (");
+    expect(ctx.text).toContain("  files: src/a.ts");
+    expect(ctx.text).not.toContain("plain commit");
+
+    const all = await graft.context(["src/a.ts"], { all: true });
+    expect(all.entries).toHaveLength(3);
+    expect(all.text).toContain("plain commit touching a\n  (no change record)");
+
+    const whole = await graft.context([]);
+    expect(whole.entries).toHaveLength(3);
+
+    const tight = await graft.context(["src"], { budget: 300 });
+    expect(tight.entries).toHaveLength(1);
+    expect(tight.omitted).toBe(1);
+    expect(tight.text).toContain("(1 older commit omitted to fit the budget");
+    expect(tight.text.length).toBeLessThanOrEqual(300);
+
+    const plans = await graft.context(["src"], { budget: 360 });
+    expect(plans.entries).toHaveLength(2);
+    expect(plans.text).not.toContain("carefully");
+    expect(plans.text).toContain("evidence: 1 command, 1 passed");
+  });
+
+  it("is empty before the first commit", async () => {
+    const ctx = await graft.context(["x"]);
+    expect(ctx.entries).toEqual([]);
+    expect(ctx.text).toContain("0 recorded changes");
   });
 });
 
