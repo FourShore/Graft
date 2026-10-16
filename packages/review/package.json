@@ -1,6 +1,6 @@
 {
   "name": "@fourshore/graft-review",
-  "version": "0.0.10",
+  "version": "0.1.0",
   "description": "Triage and verification of Graft changes: group a diff by what evidence covers, and check a branch's records against policy (graft check).",
   "license": "MIT",
   "type": "module",
@@ -42,6 +42,6 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@fourshore/graft-core": "0.0.10"
+    "@fourshore/graft-core": "0.1.0"
   }
 }
