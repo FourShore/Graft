@@ -362,6 +362,26 @@ describe("check", () => {
     expect(gh.summary).toContain("| ❌ |");
   });
 
+  it("falls back to origin/<base> when the base is not a local ref, and names a base that is neither", async () => {
+    const base = await seed();
+    const remote = await mkdtemp(join(tmpdir(), "graft-remote-"));
+    execFileSync("git", ["init", "-q", "--bare", remote]);
+    sh(["remote", "add", "origin", remote]);
+    sh(["push", "-q", "origin", "main"]);
+    sh(["checkout", "-q", "-b", "feature"]);
+    sh(["branch", "-D", "main"]);
+    await graft.start({ task: "y" });
+    await writeFile(join(dir, "src", "a.ts"), "export const a = 7;\n");
+    await graft.evidenceCommand("true");
+    await graft.land({ all: true });
+    const r = await runCheck({ repo: dir, base: "main" });
+    expect(r.base).toBe("origin/main");
+    expect(r.commits).toHaveLength(1);
+    expect(renderCheckText(r)).toContain("in origin/main..");
+    expect(sh(["rev-parse", "origin/main"])).toBe(base);
+    await expect(runCheck({ repo: dir, base: "nope" })).rejects.toThrow(/"nope" is not a commit in this clone/);
+  });
+
   it("re-runs only commands allowed by checkCommands and reports the rest as skipped without failing", async () => {
     const base = await seed();
     await mkdir(join(dir, ".graft"), { recursive: true });

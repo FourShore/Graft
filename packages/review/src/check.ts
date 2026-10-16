@@ -1,4 +1,4 @@
-import { Graft, readPolicy, runShell, type CommandEvidence, type LogEntry, type Policy } from "@fourshore/graft-core";
+import { Graft, GraftError, readPolicy, runShell, type CommandEvidence, type LogEntry, type Policy } from "@fourshore/graft-core";
 import { parseDiff } from "./diff.js";
 import { triage, type Triage } from "./triage.js";
 
@@ -36,6 +36,7 @@ export interface Rerun {
 }
 
 export interface CheckResult {
+  /** The base as resolved: `main` becomes `origin/main` in a clone that has no local branch of that name. */
   base: string;
   head: string;
   policy: Policy;
@@ -63,7 +64,8 @@ export async function runCheck(opts: CheckOptions): Promise<CheckResult> {
   const topLevel = await graft.git.topLevel();
   const policy = await readPolicy(topLevel);
   const head = (await graft.git.head()) ?? "";
-  const entries = await graft.log({ range: `${opts.base}..HEAD`, limit: opts.limit ?? 200, noMerges: true });
+  const base = await resolveBase(graft, opts.base);
+  const entries = await graft.log({ range: `${base}..HEAD`, limit: opts.limit ?? 200, noMerges: true });
   const findings: Finding[] = [];
   const commits: CheckedCommit[] = [];
   for (const entry of entries) {
@@ -122,7 +124,26 @@ export async function runCheck(opts: CheckOptions): Promise<CheckResult> {
     }
   }
   const ok = findings.every((f) => f.kind === "rerun-skipped");
-  return { base: opts.base, head, policy, commits, reruns, findings, ok, ...(nested ? { nested: true } : {}) };
+  return { base, head, policy, commits, reruns, findings, ok, ...(nested ? { nested: true } : {}) };
+}
+
+/**
+ * A CI checkout has `origin/main` but no local `main`, so a recorded
+ * `graft check --base main` would fail there for no reason of its own: when
+ * the base is not a ref in this clone, try the same name under `origin/`.
+ */
+async function resolveBase(graft: Graft, base: string): Promise<string> {
+  const exists = async (ref: string) => {
+    try {
+      await graft.git.run(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (await exists(base)) return base;
+  if (!base.includes("/") && (await exists(`origin/${base}`))) return `origin/${base}`;
+  throw new GraftError(`Base "${base}" is not a commit in this clone (nor is origin/${base}). Fetch it, or pass --base <ref>.`);
 }
 
 /**
