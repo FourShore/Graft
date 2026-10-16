@@ -41,3 +41,23 @@ jobs:
           # commit messages are text a stranger wrote, and the check would execute them.
           RERUN: ${{ github.event.pull_request.head.repo.full_name == github.repository && '--rerun' || '' }}
         run: node packages/cli/dist/cli.js check --base "origin/${{ github.event.pull_request.base.ref }}" --format github $RERUN
+
+  # The reusable action other repos use (action.yml at the root), run from this
+  # checkout so its plumbing (install, notes fetch, base resolution, flags) is
+  # exercised on every pull request. It installs the published CLI, so it
+  # checks this branch's records with the last release; re-runs stay off here
+  # because the job above already runs them from the build.
+  action:
+    name: Graft check (reusable action)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - uses: ./
+        with:
+          rerun: "false"

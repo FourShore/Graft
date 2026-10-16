@@ -343,17 +343,24 @@ await g.evidenceCommand("npm test", "unit tests");
 const { commit, record } = await g.land({ paths: ["src/api.ts"] });
 ```
 
-## Roadmap
+## What's next
 
-| Phase | What | Status |
-| --- | --- | --- |
-| 0 | Change records on plain git: spec, CLI, MCP server | done |
-| 1 | Instant workspaces: copy-on-write checkouts handed to agents through an API | next |
-| 2 | Optimistic merge: concurrent landing, conflicts as data an agent can resolve, post-merge checks | |
-| 3 | History as a query service: CI-verified evidence as a second tier, changes that span repos, the artifact a commit produced | next after 0.1 |
+Everything below runs on plain git and the CLI. Nothing in this repository
+needs a server; the record format is designed so a service that wants to read
+it can, without Graft having to be one.
 
-Phases 1 to 3 need a server. Phase 0 doesn't, on purpose, so the record format
-gets real use before anything depends on it.
+- **CI as a second tier of evidence.** `graft check --rerun` emits a result
+  the pull request summary and `graft show` can tell apart from the author's
+  run, so author-run and CI-verified are visible everywhere.
+- **A log across repositories.** `graft start --id` already lands one change
+  in several repositories; a `graft log` that reads several clones and groups
+  by change id follows when someone needs it.
+- **The agent as installer.** A skill and an `AGENTS.md` template, so an agent
+  setting up a repository runs `graft init` the way it writes a `.gitignore`.
+
+Earlier roadmaps here described instant workspaces, optimistic merging and a
+history query service. Those need a server and are not planned in this
+repository.
 
 ## Development
 

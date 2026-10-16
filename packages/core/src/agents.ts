@@ -11,27 +11,24 @@ export const CLAUDE_PATH = "CLAUDE.md" as const;
  */
 export const AGENTS_SECTION = `## Version control
 
-This repo uses Graft (https://github.com/FourShore/Graft). Every commit records
-the task you were given, your plan, and the checks you ran, so the next reader
-knows why the code is the way it is.
+This repo uses Graft (https://github.com/FourShore/Graft): every commit carries
+the task it was given, the checks that ran and whether they passed, and a commit
+without them is refused. The hooks do most of the work; three things are yours.
 
-- Before editing, open a change: \`graft start "<the task, in the words you were given>"\`.
-  If the capture hooks are installed your prompt already opened one and this
-  just names the task. If it says a change is already open from another session,
-  use \`graft start --replace\`.
-- Record each check as you run it: \`graft evidence --label "unit tests" -- npm test\`,
-  or \`graft evidence --note "<what you checked by hand>"\` for anything manual.
-  When \`.graft/policy.json\` names commands, run them by name (\`graft evidence test\`);
-  \`graft status\` lists the names, and they are what the landing gate checks.
-- Commit with \`graft land <paths> -m "<title>"\`, not \`git commit\`. It refuses to
-  land without evidence.
-- The record travels in the commit message. \`graft sync\` after a push is optional;
-  it moves the command output, which lives in a git note.
-- Before editing a file, run \`graft context <paths>\` to read the changes that
-  touched it. To learn why code is the way it is, run \`graft log\` or \`graft show <id>\`.
+- \`graft start "<the task, in the words you were given>"\` names the change.
+  With the capture hooks installed your prompt already opened one and this only
+  names it; if another session left one open, add \`--replace\`.
+- Run the repo's checks before committing. \`.graft/policy.json\` names them and
+  says which files need which; \`graft status\` lists them. Test, build and lint
+  runs you make are recorded by the hooks; \`graft evidence <name>\` runs one by
+  name and records it; \`graft evidence --note "<what you checked by hand>"\`
+  records a manual check. A check that ran before your last edit does not count.
+- Commit with \`graft land <paths> -m "<title>"\`, or a plain \`git commit\` where
+  the git hooks are installed; either refuses a change whose checks are missing.
 
-With the Graft MCP server the same steps are \`graft_start\`, \`graft_evidence\`,
-\`graft_note\`, \`graft_land\`, \`graft_sync\`, \`graft_context\` and \`graft_log\`.
+Before editing a file, \`graft context <paths>\` shows the changes that touched
+it. Over MCP the same steps are \`graft_start\`, \`graft_evidence\`, \`graft_land\`
+and \`graft_context\`.
 `;
 
 export interface AgentsResult {
