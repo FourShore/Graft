@@ -6,6 +6,11 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { Graft, GraftError } from "../src/graft.js";
 import { isChangeId, newChangeId, parseTrailers, shellJoin } from "../src/record.js";
 import { expandTrailers } from "../src/policy.js";
+import { classifyCommand } from "../src/capture.js";
+import { handleClaudeCodeEvent } from "../src/claude-code.js";
+import { installHooks, CLAUDE_SETTINGS_PATH } from "../src/hooks.js";
+import { existsSync } from "node:fs";
+import { chmod } from "node:fs/promises";
 
 let dir: string;
 let graft: Graft;
@@ -229,6 +234,163 @@ describe("policy trailers", () => {
     } finally {
       delete process.env.GRAFT_TEST_SESSION;
     }
+  });
+});
+
+describe("capture", () => {
+  it("classifies test, build, lint and type-check commands and nothing else", () => {
+    expect(classifyCommand("npm test")).toBe("test");
+    expect(classifyCommand("cd packages/core && npx vitest run --reporter dot")).toBe("test");
+    expect(classifyCommand("go test ./...")).toBe("test");
+    expect(classifyCommand("npm run build")).toBe("build");
+    expect(classifyCommand("cargo clippy -- -D warnings")).toBe("lint");
+    expect(classifyCommand("npx tsc -p .")).toBe("typecheck");
+    expect(classifyCommand("ls -la")).toBeNull();
+    expect(classifyCommand("git status")).toBeNull();
+    expect(classifyCommand("./scripts/verify.sh", ["^\\./scripts/verify"])).toBe("custom");
+    expect(classifyCommand("./scripts/verify.sh", ["("])).toBeNull();
+  });
+
+  it("opens a change from the prompt, records matching Bash runs with the harness's exit code, ignores the rest", async () => {
+    expect(await handleClaudeCodeEvent(graft, { hook_event_name: "UserPromptSubmit", prompt: "  " })).toMatchObject({ action: "ignored" });
+    expect(await handleClaudeCodeEvent(graft, { hook_event_name: "UserPromptSubmit", prompt: "/clear" })).toMatchObject({ action: "ignored" });
+    const started = await handleClaudeCodeEvent(graft, { hook_event_name: "UserPromptSubmit", prompt: "Fix the flaky test" });
+    expect(started).toMatchObject({ action: "started", task: "Fix the flaky test" });
+    expect((await graft.status())?.capturedBy).toBe("claude-code");
+    expect(await handleClaudeCodeEvent(graft, { hook_event_name: "UserPromptSubmit", prompt: "another prompt" })).toMatchObject({ action: "ignored" });
+
+    expect(await handleClaudeCodeEvent(graft, { hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: { command: "ls" }, tool_response: { stdout: "a" } })).toMatchObject({ action: "ignored" });
+    expect(await handleClaudeCodeEvent(graft, { hook_event_name: "PostToolUse", tool_name: "Edit", tool_input: {} })).toMatchObject({ action: "ignored" });
+    const pass = await handleClaudeCodeEvent(graft, {
+      hook_event_name: "PostToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "npm test" },
+      tool_response: { stdout: "12 passed\n", stderr: "" },
+      duration_ms: 2500,
+    });
+    expect(pass).toMatchObject({ action: "recorded", label: "test (captured)", exitCode: 0, opened: false });
+    const fail = await handleClaudeCodeEvent(graft, {
+      hook_event_name: "PostToolUseFailure",
+      tool_name: "Bash",
+      tool_input: { command: "npm run lint" },
+      error: "Exit code 1\nsrc/a.ts:3 unused",
+      duration_ms: 300,
+    });
+    expect(fail).toMatchObject({ action: "recorded", label: "lint (captured)", exitCode: 1 });
+    expect(await handleClaudeCodeEvent(graft, { hook_event_name: "PostToolUseFailure", tool_name: "Bash", tool_input: { command: "npm test" }, error: "spawn failed" })).toMatchObject({ action: "ignored" });
+    expect(await handleClaudeCodeEvent(graft, { hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: { command: "npm test" }, tool_response: { stdout: "", interrupted: true } })).toMatchObject({ action: "ignored" });
+
+    const open = (await graft.status())!;
+    expect(open.evidence).toMatchObject([
+      { kind: "command", command: "npm test", exitCode: 0, durationMs: 2500, output: "12 passed\n", via: "claude-code", label: "test (captured)" },
+      { kind: "command", command: "npm run lint", exitCode: 1, durationMs: 300, output: "src/a.ts:3 unused", via: "claude-code" },
+    ]);
+
+    // An explicit start adopts the hook-opened change instead of refusing.
+    const named = await graft.start({ task: "Fix the flaky retry test", plan: "bump the timeout" });
+    expect(named.id).toBe(open.id);
+    expect(named.task).toBe("Fix the flaky retry test");
+    expect(named.evidence).toHaveLength(2);
+    await expect(graft.start({ task: "again" })).resolves.toMatchObject({ id: open.id });
+    await graft.abandon();
+
+    // A run with nothing open opens a placeholder change so the evidence is not lost.
+    const orphan = await handleClaudeCodeEvent(graft, { hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: { command: "npm run build" }, tool_response: { stdout: "" } });
+    expect(orphan).toMatchObject({ action: "recorded", opened: true });
+    expect((await graft.status())?.task).toMatch(/prompt not captured/);
+  });
+
+  it("installs Claude Code and git hooks idempotently and leaves foreign hooks alone", async () => {
+    const hooksDir = join(dir, ".git", "hooks");
+    await mkdir(hooksDir, { recursive: true });
+    await writeFile(join(hooksDir, "post-commit"), "#!/bin/sh\necho mine\n");
+    const first = await installHooks(graft.git, dir);
+    expect(first).toMatchObject({ claudeCode: "written", git: { "prepare-commit-msg": "written", "post-commit": "foreign" } });
+    const settings = JSON.parse(await readFile(join(dir, CLAUDE_SETTINGS_PATH), "utf8"));
+    expect(Object.keys(settings.hooks)).toEqual(["UserPromptSubmit", "PostToolUse", "PostToolUseFailure"]);
+    expect(settings.hooks.PostToolUse[0]).toMatchObject({ matcher: "Bash", hooks: [{ type: "command", command: "graft hook claude-code" }] });
+    expect(await readFile(join(hooksDir, "post-commit"), "utf8")).toBe("#!/bin/sh\necho mine\n");
+    expect(await readFile(join(hooksDir, "prepare-commit-msg"), "utf8")).toContain("graft hook prepare-commit-msg");
+
+    const second = await installHooks(graft.git, dir);
+    expect(second).toMatchObject({ claudeCode: "present", git: { "prepare-commit-msg": "present", "post-commit": "foreign" } });
+
+    // Other settings survive and the hooks are not added twice.
+    await writeFile(join(dir, CLAUDE_SETTINGS_PATH), JSON.stringify({ permissions: { allow: ["Bash(npm test)"] }, hooks: { PostToolUse: [{ matcher: "Edit", hooks: [{ type: "command", command: "prettier" }] }] } }));
+    await installHooks(graft.git, dir);
+    const merged = JSON.parse(await readFile(join(dir, CLAUDE_SETTINGS_PATH), "utf8"));
+    expect(merged.permissions.allow).toEqual(["Bash(npm test)"]);
+    expect(merged.hooks.PostToolUse).toHaveLength(2);
+  });
+
+  it("prepare-commit-msg adds the record and post-commit attaches the note; merges and amends are left alone", async () => {
+    await writeFile(join(dir, "a.txt"), "a\n");
+    sh(["add", "-A"]);
+    sh(["commit", "-q", "-m", "base"]);
+    const msgFile = join(dir, ".git", "MSG");
+
+    await writeFile(msgFile, "Anything\n");
+    expect(await graft.prepareCommitMessage(msgFile)).toMatchObject({ applied: false, reason: "no change is open" });
+
+    await graft.start({ task: "hooked change", plan: "do it" });
+    await writeFile(join(dir, "a.txt"), "b\n");
+    sh(["add", "a.txt"]);
+    await writeFile(msgFile, "Title\n");
+    await expect(graft.prepareCommitMessage(msgFile)).rejects.toThrow(/GRAFT_ALLOW_NO_EVIDENCE/);
+    await graft.evidenceNote("looked");
+    expect(await graft.prepareCommitMessage(msgFile, "merge")).toMatchObject({ applied: false });
+    expect(await graft.prepareCommitMessage(msgFile, "commit")).toMatchObject({ applied: false });
+
+    // Editor flow: git's comment block follows the record.
+    await writeFile(msgFile, "\n# Please enter the commit message\n#\n# Changes to be committed:\n");
+    const r = await graft.prepareCommitMessage(msgFile, "template");
+    expect(r.applied).toBe(true);
+    const prepared = await readFile(msgFile, "utf8");
+    expect(prepared).toMatch(/^\n\nPlan:\n  do it\n\nEvidence:\n  \[note\] looked\n\nGraft-Change: /);
+    expect(prepared.indexOf("# Please enter")).toBeGreaterThan(prepared.indexOf("Graft-Evidence:"));
+    expect(await graft.prepareCommitMessage(msgFile)).toMatchObject({ applied: false, reason: "message already carries a record" });
+
+    expect(await graft.finishCommit()).toMatchObject({ attached: false, reason: "HEAD does not carry the open change" });
+    sh(["commit", "-q", "-F", msgFile, "--cleanup=strip"]);
+    const fin = await graft.finishCommit();
+    expect(fin).toMatchObject({ attached: true, id: r.id });
+    expect(await graft.status()).toBeNull();
+    const shown = await graft.show(fin.commit!);
+    expect(shown?.recordSource).toBe("note");
+    expect(shown?.record).toMatchObject({ id: r.id, task: "hooked change", plan: "do it", commit: fin.commit });
+    expect(shown?.record?.landedAt).toBeTruthy();
+  });
+
+  it("a plain git commit lands the open change through the installed hooks", async () => {
+    const cli = join(process.cwd(), "packages", "cli", "dist", "cli.js");
+    if (!existsSync(cli)) return; // needs a build; npm test runs after npm run build
+    const bin = join(dir, ".bin");
+    await mkdir(bin, { recursive: true });
+    await writeFile(join(bin, "graft"), `#!/bin/sh\nexec node ${JSON.stringify(cli)} "$@"\n`);
+    await chmod(join(bin, "graft"), 0o755);
+    await installHooks(graft.git, dir);
+    const env = { ...process.env, PATH: `${bin}:${process.env.PATH}` };
+    const git = (args: string[]) => execFileSync("git", args, { cwd: dir, encoding: "utf8", env });
+
+    await writeFile(join(dir, "a.txt"), "a\n");
+    git(["add", "-A"]);
+    await graft.start({ task: "via git commit" });
+    await graft.evidenceCommand("true", "smoke");
+    git(["commit", "-q", "-m", "Plain commit"]);
+    const body = git(["log", "-1", "--format=%B"]);
+    expect(body).toMatch(/^Plain commit\n\nEvidence:\n  \[pass smoke\] true/);
+    expect(await graft.status()).toBeNull();
+    const entry = (await graft.log())[0];
+    expect(entry.recordSource).toBe("note");
+    expect(entry.record?.task).toBe("via git commit");
+
+    // graft land still works with the hooks installed and does not double-apply.
+    await graft.start({ task: "via land" });
+    await writeFile(join(dir, "a.txt"), "b\n");
+    await graft.evidenceNote("ok");
+    const landed = await graft.land({ all: true });
+    expect(git(["log", "-1", "--format=%B"]).match(/Graft-Change:/g)).toHaveLength(1);
+    expect((await graft.show(landed.commit))?.recordSource).toBe("note");
   });
 });
 

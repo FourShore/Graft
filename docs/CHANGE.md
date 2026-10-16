@@ -60,6 +60,7 @@ change is being made.
 | `startedAt`, `landedAt` | yes / on land | ISO 8601. |
 | `commit` | on land | The SHA the record was first landed on. Informational; the trailer is the durable link. After an amend or rebase the note moves with the commit but this field keeps the original SHA, so readers take the commit from where the note is attached, never from this field. |
 | `evidence[]` | yes (may be empty) | Ordered list of what was done to verify the change. |
+| `capturedBy` | no | The harness whose hook opened the change (`claude-code`, from the prompt) rather than an explicit `graft start`. A later `graft start` adopts such a change, naming the task and keeping its evidence. |
 
 ### Evidence
 
@@ -71,7 +72,10 @@ Two kinds in version 1.
   just that something did. With `attested: true` the author attached a run
   they made themselves; Graft did not run it, the duration is 0, and readers
   say "attested" instead of "pass" so the record is honest about who ran it.
-  It still counts as a command for `requireEvidence: "command"`.
+  It still counts as a command for `requireEvidence: "command"`. With `via`
+  set (for example `"claude-code"`) a harness reported the run through a
+  hook, with its own exit code and output: a pass or fail like any other,
+  marked only so a reader knows who ran it.
 - `note`: free text for verification that did not come from a command: a manual
   check, a link to a CI run, a screenshot description.
 
@@ -198,7 +202,10 @@ even though its heuristics would file them under mechanical, such as a schema
 or a spec kept in Markdown. `trailers`, optional, is a list of `Key: value`
 lines added to every landed commit after Graft's own trailers, with `$NAME`
 and `${NAME}` expanded from the environment; a line naming an unset variable
-is left out of that commit, never written empty. Readers
+is left out of that commit, never written empty. `captureCommands`, optional,
+is a list of regular expressions (as strings) for commands the capture hooks
+record as evidence on top of the built-in test, build, lint and type-check
+patterns. Readers
 reject unknown policy versions. The file is committed, so changing policy is a
 reviewed change like any other.
 
