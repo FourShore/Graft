@@ -17,7 +17,7 @@ import {
   trailersFor,
 } from "./record.js";
 import { OpenChangeStore } from "./store.js";
-import { DEFAULT_POLICY, POLICY_PATH, readPolicy, expandTrailers, type Policy } from "./policy.js";
+import { DEFAULT_POLICY, POLICY_PATH, readPolicy, expandTrailers, evaluateRules, type Policy } from "./policy.js";
 import { looksLikeSecretFile, redact, secretFilesNamed } from "./redact.js";
 import { writeAgentsSection, type AgentsResult } from "./agents.js";
 import { installHooks, type HooksResult } from "./hooks.js";
@@ -34,6 +34,8 @@ export class GraftError extends Error {
 export interface StartOptions {
   task: string;
   plan?: string;
+  /** Where the task came from: the thread, issue or ticket that asked for it. */
+  ref?: string;
   author?: Partial<ChangeAuthor>;
   /** Abandon a change left open (for example by a crashed session) instead of refusing. */
   replace?: boolean;
@@ -77,6 +79,8 @@ export interface CapturedRun {
   output?: string;
   durationMs?: number;
   label?: string;
+  /** The policy catalog name the command matched, when it did. */
+  name?: string;
   /** Which harness reported it, e.g. "claude-code". */
   via: string;
 }
@@ -150,6 +154,7 @@ export class Graft {
       if (!opts.task?.trim()) throw new GraftError("A task is required.");
       open.task = opts.task.trim();
       if (opts.plan?.trim()) open.plan = opts.plan.trim();
+      if (opts.ref?.trim()) open.ref = opts.ref.trim();
       if (opts.author) open.author = defaultAuthor(opts.author);
       await this.store.write(open);
       return open;
@@ -166,6 +171,7 @@ export class Graft {
       id: newChangeId(),
       task: opts.task.trim(),
       plan: opts.plan?.trim() || undefined,
+      ref: opts.ref?.trim() || undefined,
       author: defaultAuthor(opts.author),
       startedAt: new Date().toISOString(),
       evidence: [],
@@ -200,7 +206,7 @@ export class Graft {
   }
 
   /** Run a command, capture its result as evidence. The command runs in the repo root. */
-  async evidenceCommand(command: string, label?: string): Promise<Evidence> {
+  async evidenceCommand(command: string, label?: string, name?: string): Promise<Evidence> {
     const open = await this.requireOpen();
     const cwd = await this.topLevel();
     const started = Date.now();
@@ -213,10 +219,35 @@ export class Graft {
       durationMs: Date.now() - started,
       output: await this.keepOutput(command, output),
       label,
+      ...(name ? { name } : {}),
     };
     open.evidence.push(ev);
     await this.store.write(open);
     return ev;
+  }
+
+  /** The policy's named commands, for `graft evidence <name>` and for showing what a repo expects. */
+  async catalog(): Promise<Record<string, string>> {
+    return (await readPolicy(await this.git.topLevel())).commands ?? {};
+  }
+
+  /**
+   * Run a command from the policy catalog by name and record it under that
+   * name, or with `attest` record a run of it the author already made.
+   */
+  async evidenceNamed(name: string, label?: string, attest?: { exitCode: number; output?: string }): Promise<Evidence> {
+    const commands = await this.catalog();
+    const command = commands[name];
+    if (!command) {
+      const known = Object.keys(commands);
+      throw new GraftError(
+        known.length
+          ? `No command named "${name}" in ${POLICY_PATH}. Known: ${known.join(", ")}.`
+          : `${POLICY_PATH} names no commands, so "${name}" cannot be run by name. Add a "commands" map, or run it with --.`,
+      );
+    }
+    if (attest) return this.evidenceAttested(command, attest.exitCode, attest.output ?? "", label, name);
+    return this.evidenceCommand(command, label, name);
   }
 
   /**
@@ -224,7 +255,7 @@ export class Graft {
    * build or test suite is not run twice. Graft did not run it, so the record
    * marks it attested: the exit code and output are the author's claim.
    */
-  async evidenceAttested(command: string, exitCode: number, output = "", label?: string): Promise<Evidence> {
+  async evidenceAttested(command: string, exitCode: number, output = "", label?: string, name?: string): Promise<Evidence> {
     const open = await this.requireOpen();
     if (!command.trim()) throw new GraftError("The command you ran is required, so the record says what was attested.");
     if (!Number.isInteger(exitCode)) throw new GraftError("Exit code must be an integer.");
@@ -236,6 +267,7 @@ export class Graft {
       durationMs: 0,
       output: await this.keepOutput(command, output),
       label,
+      ...(name ? { name } : {}),
       attested: true,
     };
     open.evidence.push(ev);
@@ -269,6 +301,7 @@ export class Graft {
       durationMs: run.durationMs ?? 0,
       output: await this.keepOutput(run.command, run.output ?? ""),
       label: run.label,
+      ...(run.name ? { name: run.name } : {}),
       via: run.via,
     };
     open.evidence.push(ev);
@@ -312,6 +345,17 @@ export class Graft {
     }
     if (staged.length === 0) {
       throw new GraftError("Nothing staged to commit. Stage files, name paths, or pass --all.");
+    }
+    if (!opts.allowNoEvidence) {
+      const unmet = evaluateRules(policy, staged, open.evidence);
+      if (unmet.length) {
+        const wants = unmet.map((u) => `"${u.name}" (${u.command})`).join(" and ");
+        const files = [...new Set(unmet.flatMap((u) => u.files))];
+        throw new GraftError(
+          `Policy requires a passing run of ${wants} for changes to ${files.join(", ")}. ` +
+            `Run graft evidence ${unmet.map((u) => u.name).join(", graft evidence ")}, or pass --allow-no-evidence.`,
+        );
+      }
     }
     const suspicious = staged.filter((p) => looksLikeSecretFile(p, policy.secretFiles));
     if (suspicious.length > 0 && !opts.allowSecrets) {

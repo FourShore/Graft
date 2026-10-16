@@ -54,6 +54,7 @@ change is being made.
 | `id` | yes | 20-character Crockford base32: 8 characters of millisecond timestamp, 12 random. Sortable, unique, and stable for the life of the change. |
 | `task` | yes | What the author was asked to do, in the words they were given. Not a summary of the diff. |
 | `plan` | no | How they intended to do it. May be set at start, revised during, or set at land. |
+| `ref` | no | Where the task came from: the thread, issue or ticket that asked for it, as a URL or id. Written as the `Graft-Task-Ref` trailer. |
 | `author.kind` | yes | `agent` or `human`. |
 | `author.name` | yes | Tool or person: `claude-code`, `cursor`, `zach`. |
 | `author.model` | no | Model identifier when the author is an agent. |
@@ -76,7 +77,12 @@ Two kinds in version 1.
   Graft or a harness saw, though `graft check --rerun` runs it. With `via`
   set (for example `"claude-code"`) a harness reported the run through a
   hook, with its own exit code and output: a pass or fail like any other,
-  marked only so a reader knows who ran it.
+  marked only so a reader knows who ran it. With `name` set the run is one
+  of the policy's named commands (`graft evidence test`, or a captured
+  command that matched the catalog); the message line carries the name in
+  place of any free label, so a record rebuilt from the message still
+  satisfies the rules that ask for that name and `graft check --rerun` can
+  run the name's current definition without the note.
 - `note`: free text for verification that did not come from a command: a manual
   check, a link to a CI run, a screenshot description.
 
@@ -126,6 +132,7 @@ Graft-Evidence: 1 command, 1 passed; 1 note
 | --- | --- |
 | `Graft-Change` | The change id. **The only trailer readers must rely on.** |
 | `Graft-Task` | The task, collapsed to one line. |
+| `Graft-Task-Ref` | Present when the change has a `ref`: the URL or id of what asked for it. |
 | `Graft-Author` | `<kind>:<name>`. |
 | `Graft-Model` | Present only for agents with a known model. |
 | `Graft-Evidence` | Human-readable summary of the evidence list. |
@@ -213,7 +220,15 @@ record as evidence on top of the built-in test, build, lint and type-check
 patterns.
 `checkCommands`, optional, is a list of regular
 expressions (as strings); when set, `graft check --rerun` re-runs only the
-recorded commands that match one of them. Readers
+recorded commands that match one of them, plus any command the catalog
+defines. `commands`, optional, is a map of name to shell command: the repo's
+checks, named once, run by `graft evidence <name>`, recognised by the
+capture hooks, and re-run by `graft check --rerun` under their current
+definition. `rules`, optional, is a list of `{ "paths": [globs], "require":
+[names] }`: a change touching a file that matches `paths` must carry a
+passing, non-attested run of every named command, or `land` refuses and
+`check` fails the commit. A rule naming a command that `commands` does not
+define makes the policy unreadable, so the mistake surfaces at once. Readers
 reject unknown policy versions. The file is committed, so changing policy is a
 reviewed change like any other.
 

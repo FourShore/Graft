@@ -1,4 +1,4 @@
-import { Graft, GraftError, readPolicy, runShell, type CommandEvidence, type LogEntry, type Policy } from "@fourshore/graft-core";
+import { Graft, GraftError, evaluateRules, normalizeCommand, readPolicy, runShell, type CommandEvidence, type LogEntry, type Policy } from "@fourshore/graft-core";
 import { parseDiff } from "./diff.js";
 import { triage, type Triage } from "./triage.js";
 
@@ -17,6 +17,7 @@ export type Finding =
   | { kind: "note-missing"; commit: string; title: string; files: string[] }
   | { kind: "no-evidence"; commit: string; title: string; files: string[] }
   | { kind: "no-passing-command"; commit: string; title: string; files: string[] }
+  | { kind: "rule-unmet"; commit: string; title: string; files: string[]; names: { name: string; command: string }[] }
   | { kind: "rerun-failed"; command: string; commits: string[]; exitCode: number; output: string }
   | { kind: "rerun-skipped"; command: string; commits: string[]; reason: string };
 
@@ -29,6 +30,8 @@ export interface CheckedCommit {
 
 export interface Rerun {
   command: string;
+  /** The catalog name whose current definition was run, when the record carried one. */
+  name?: string;
   commits: string[];
   exitCode: number;
   durationMs: number;
@@ -75,13 +78,16 @@ export async function runCheck(opts: CheckOptions): Promise<CheckResult> {
     const files = parseDiff(await graft.diff(entry.commit));
     const t = triage(entry.record, files, entry.trailers, entry.recordSource, policy.behaviorFiles);
     const behavior = t.groups.behavior.map((f) => f.path);
+    // "partial" is triage's name for a record whose evidence lives only in a note this clone lacks.
+    const partial = t.risk === "partial";
+    const unmet = partial ? [] : evaluateRules(policy, files.map((f) => f.path), entry.record?.evidence ?? []);
     let ok = true;
     if (behavior.length && policy.requireEvidence) {
       const base = { commit: entry.commit, title: entry.title, files: behavior };
       if (!entry.record) {
         findings.push({ kind: "no-record", ...base });
         ok = false;
-      } else if (noteMissing(entry)) {
+      } else if (partial) {
         findings.push({ kind: "note-missing", ...base });
         ok = false;
       } else if (entry.record.evidence.length === 0) {
@@ -92,22 +98,45 @@ export async function runCheck(opts: CheckOptions): Promise<CheckResult> {
         ok = false;
       }
     }
+    if (unmet.length) {
+      const ruleFiles = [...new Set(unmet.flatMap((u) => u.files))];
+      if (!entry.record) {
+        if (ok) findings.push({ kind: "no-record", commit: entry.commit, title: entry.title, files: ruleFiles });
+      } else if (partial) {
+        if (ok) findings.push({ kind: "note-missing", commit: entry.commit, title: entry.title, files: ruleFiles });
+      } else {
+        findings.push({
+          kind: "rule-unmet",
+          commit: entry.commit,
+          title: entry.title,
+          files: ruleFiles,
+          names: unmet.map((u) => ({ name: u.name, command: u.command })),
+        });
+      }
+      ok = false;
+    }
     commits.push({ entry, triage: t, ok });
   }
 
   const reruns: Rerun[] = [];
   const nested = Boolean(opts.rerun && process.env[RERUN_ENV]);
   if (opts.rerun && !nested) {
-    const byCommand = new Map<string, string[]>();
+    // A run recorded under a catalog name re-runs the name's current definition.
+    const byCommand = new Map<string, { shas: string[]; name?: string }>();
     for (const c of commits) {
       for (const ev of passingCommands(c.entry, true)) {
-        const list = byCommand.get(ev.command) ?? [];
-        list.push(c.entry.commit);
-        byCommand.set(ev.command, list);
+        // A record read from the commit message carries the name as the label.
+        const named = ev.name ?? ev.label;
+        const name = named && policy.commands?.[named] ? named : undefined;
+        const command = name ? policy.commands![name] : ev.command;
+        const slot = byCommand.get(command) ?? { shas: [], ...(name ? { name } : {}) };
+        slot.shas.push(c.entry.commit);
+        byCommand.set(command, slot);
       }
     }
-    for (const [command, shas] of byCommand) {
-      if (policy.checkCommands && !policy.checkCommands.some((p) => safeTest(p, command))) {
+    const inCatalog = new Set(Object.values(policy.commands ?? {}).map(normalizeCommand));
+    for (const [command, { shas, name }] of byCommand) {
+      if (policy.checkCommands && !inCatalog.has(normalizeCommand(command)) && !policy.checkCommands.some((p) => safeTest(p, command))) {
         findings.push({ kind: "rerun-skipped", command, commits: shas, reason: "not in policy checkCommands" });
         continue;
       }
@@ -127,7 +156,7 @@ export async function runCheck(opts: CheckOptions): Promise<CheckResult> {
         else process.env[RERUN_ENV] = previous;
       }
       const { exitCode, output } = result;
-      reruns.push({ command, commits: shas, exitCode, durationMs: Date.now() - started, output });
+      reruns.push({ command, ...(name ? { name } : {}), commits: shas, exitCode, durationMs: Date.now() - started, output });
       if (exitCode !== 0) findings.push({ kind: "rerun-failed", command, commits: shas, exitCode, output });
     }
   }
@@ -165,19 +194,6 @@ function passingCommands(entry: LogEntry, withAttested = false): CommandEvidence
   );
 }
 
-/**
- * The commit's trailer says it carries evidence, but the clone has no note
- * and the message holds no Evidence block (records older than 0.0.6 kept it
- * in the note alone), so nothing can be judged until the note is fetched.
- */
-function noteMissing(entry: LogEntry): boolean {
-  return (
-    entry.recordSource === "message" &&
-    entry.record?.evidence.length === 0 &&
-    (entry.trailers["Graft-Evidence"] ?? "none") !== "none"
-  );
-}
-
 function safeTest(pattern: string, s: string): boolean {
   try {
     return new RegExp(pattern).test(s);
@@ -203,7 +219,7 @@ export function renderCheckText(r: CheckResult): string {
   if (r.reruns.length) {
     lines.push("", `Re-ran ${r.reruns.length} recorded command${r.reruns.length === 1 ? "" : "s"} on this checkout:`);
     for (const x of r.reruns) {
-      lines.push(`  ${x.exitCode === 0 ? "pass" : `FAIL ${x.exitCode}`}  ${x.command} (${(x.durationMs / 1000).toFixed(1)}s, recorded on ${x.commits.map((s) => s.slice(0, 10)).join(", ")})`);
+      lines.push(`  ${x.exitCode === 0 ? "pass" : `FAIL ${x.exitCode}`}  ${x.name ? `${x.name}: ` : ""}${x.command} (${(x.durationMs / 1000).toFixed(1)}s, recorded on ${x.commits.map((s) => s.slice(0, 10)).join(", ")})`);
     }
   }
   if (r.findings.length) {
@@ -230,6 +246,8 @@ export function describeFinding(f: Finding): string {
       return `${f.commit.slice(0, 10)} "${f.title}" changed ${f.files.join(", ")} with a record but no evidence.`;
     case "no-passing-command":
       return `${f.commit.slice(0, 10)} "${f.title}" changed ${f.files.join(", ")} with no passing command as evidence (policy requireEvidence: "command"; notes and attested runs do not count).`;
+    case "rule-unmet":
+      return `${f.commit.slice(0, 10)} "${f.title}" changed ${f.files.join(", ")} without a passing run of ${f.names.map((n) => `"${n.name}" (${n.command})`).join(" and ")}, which the policy rules require for those paths.`;
     case "rerun-failed":
       return `"${f.command}" was recorded as passing on ${f.commits.map((s) => s.slice(0, 10)).join(", ")} but exits ${f.exitCode} on this checkout.\n${indent(tail(f.output, 20))}`;
     case "rerun-skipped":

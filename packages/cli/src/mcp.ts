@@ -38,6 +38,7 @@ server.registerTool(
     inputSchema: {
       task: z.string().describe("The task, in the words you were given"),
       plan: z.string().optional().describe("How you intend to do it"),
+      ref: z.string().optional().describe("Where the task came from: the thread, issue or ticket URL"),
       author: z.string().optional().describe("Your agent name, e.g. claude-code"),
       model: z.string().optional().describe("Your model id"),
       replace: z
@@ -46,8 +47,8 @@ server.registerTool(
         .describe("Drop a change another session left open instead of failing"),
     },
   },
-  async ({ task, plan, author, model, replace }) =>
-    guarded(() => graft.start({ task, plan, author: { name: author, model, kind: "agent" }, replace })),
+  async ({ task, plan, ref, author, model, replace }) =>
+    guarded(() => graft.start({ task, plan, ref, author: { name: author, model, kind: "agent" }, replace })),
 );
 
 server.registerTool(
@@ -63,16 +64,21 @@ server.registerTool(
   "graft_evidence",
   {
     description:
-      "Run a verification command (tests, lint, build) and attach its exit code and output to the open change as evidence. Returns the result so you can read it. To attach a run you already made instead of running it again, pass its exitCode (and output); it is then recorded as attested rather than pass.",
+      "Run a verification command (tests, lint, build) and attach its exit code and output to the open change as evidence. Returns the result so you can read it. Pass `name` to run one of the repo's policy commands by name (graft_status lists them); the landing gate and graft check look for those names. To attach a run you already made instead of running it again, pass its exitCode (and output); it is then recorded as attested rather than pass, which does not satisfy a policy that requires a command.",
     inputSchema: {
-      command: z.string().describe("Shell command, run from the repo root (or, with exitCode, the command you ran)"),
+      name: z.string().optional().describe("A name from the policy's commands; runs that command and records it under the name (with exitCode, attaches your run of it instead)"),
+      command: z.string().optional().describe("Shell command, run from the repo root (or, with exitCode, the command you ran)"),
       label: z.string().optional().describe("What this shows, e.g. 'unit tests'"),
       exitCode: z.number().int().optional().describe("Give this to attach a run you already made; the command is not run"),
       output: z.string().optional().describe("With exitCode: the output of your run (last 4 KB kept)"),
     },
   },
-  async ({ command, label, exitCode, output }) =>
-    guarded(() => (exitCode === undefined ? graft.evidenceCommand(command, label) : graft.evidenceAttested(command, exitCode, output, label))),
+  async ({ name, command, label, exitCode, output }) =>
+    guarded(() => {
+      if (name) return graft.evidenceNamed(name, label, exitCode === undefined ? undefined : { exitCode, output });
+      if (!command) throw new GraftError("Give a policy command name or a command.");
+      return exitCode === undefined ? graft.evidenceCommand(command, label) : graft.evidenceAttested(command, exitCode, output, label);
+    }),
 );
 
 server.registerTool(
@@ -108,8 +114,8 @@ server.registerTool(
 
 server.registerTool(
   "graft_status",
-  { description: "Show the open change, or null if none.", inputSchema: {} },
-  async () => guarded(() => graft.status()),
+  { description: "The open change (null if none) and the policy's named commands, which graft_evidence runs by `name`.", inputSchema: {} },
+  async () => guarded(async () => ({ open: await graft.status(), commands: await graft.catalog() })),
 );
 
 server.registerTool(

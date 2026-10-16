@@ -99,14 +99,20 @@ them. Claude Code runs project hooks only after you trust the folder.
 ## Use it from the shell
 
 ```
-graft start "Add rate limiting to the public API" --plan "Token bucket per key"
+graft start "Add rate limiting to the public API" --plan "Token bucket per key" --ref https://issues.example/42
 # edit code
+graft evidence test                     # a command the policy names, run by name
 graft evidence --label "unit tests" -- npm test
 graft evidence --note "Hit the endpoint 200 times; 429 after 100 as expected"
 graft land src/api.ts src/api.test.ts -m "Add rate limiting"
 graft sync
 ```
 
+`start --ref` records where the task came from (a thread, issue or ticket
+URL) as a `Graft-Task-Ref` trailer, so a commit links back to the ask.
+
+`evidence <name>` runs a command the policy names (see [Policy](#policy))
+and records it under that name; `graft status` lists the names. Otherwise
 `evidence` runs what follows `--` with each argument passed as given, so
 quotes and parentheses survive (`graft evidence -- node -e 'console.log("ok")'`).
 A single argument is run through the shell as written, so pipes and `&&`
@@ -227,7 +233,8 @@ graft check --base origin/main --rerun    # and every recorded passing command i
 It walks `base..HEAD`, groups each commit's files the way `graft review`
 does, and fails when a commit that changed behavior has no record, no
 evidence, or (under `requireEvidence: "command"`) no passing command that
-Graft or a harness ran. A commit whose trailers promise evidence that only
+Graft or a harness ran, and when a commit touched files a policy rule
+covers without a passing run of every command the rule names. A commit whose trailers promise evidence that only
 the git note holds fails as "note missing" and says to fetch
 `refs/notes/graft`, rather than as a commit with none. Commits that only
 touch tests, docs or lockfiles need nothing. With `--rerun` each distinct
@@ -259,6 +266,37 @@ const { commit, record } = await g.land({ paths: ["src/api.ts"] });
 ```json
 { "version": 1, "requireEvidence": true, "secretFiles": ["nova.json", "config/*.secret"] }
 ```
+
+The repo's definition of done goes in the same file, as a catalog of named
+commands and rules that say which paths need which:
+
+```json
+{
+  "version": 1,
+  "commands": {
+    "test": "go test ./...",
+    "vet386": "env GOOS=windows GOARCH=386 go vet ./...",
+    "migrate": "hasura migrate apply --dry-run"
+  },
+  "rules": [
+    { "paths": ["**/*.go"], "require": ["test", "vet386"] },
+    { "paths": ["hasura/migrations/**"], "require": ["migrate"] }
+  ]
+}
+```
+
+`commands` names the checks once. `graft evidence test` runs one by name,
+the capture hooks record a typed command that matches one under its name
+(so `cd /abs/repo && go test ./...` counts as `test`), and `graft check
+--rerun` runs the name's current definition, so a command can change
+without invalidating history. `rules` are checked by `land` against the
+staged files and by `check` against each commit: a change that touches a
+file matching `paths` must carry a passing run, by Graft or a harness and
+not attested, of every name in `require`. `land` refuses otherwise and
+says which name to run; `check` fails the commit. A rule that names a
+command the catalog does not define is a policy error. This is how the
+command list in a repo's CLAUDE.md becomes something the gate enforces
+rather than prose.
 
 Set `requireEvidence` to `false` to turn off the landing gate for a repo, or
 to `"command"` to require at least one recorded command that exited 0 and
