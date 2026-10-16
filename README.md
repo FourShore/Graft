@@ -66,7 +66,7 @@ claude mcp add graft -- graft-mcp --repo /path/to/your/repo
 ```
 
 Tools: `graft_start`, `graft_plan`, `graft_evidence`, `graft_note`,
-`graft_land`, `graft_sync`, `graft_status`, `graft_log`, `graft_show`,
+`graft_land`, `graft_sync`, `graft_status`, `graft_context`, `graft_log`, `graft_show`,
 `graft_abandon`. `graft_land` commits what's staged plus any `paths` you give
 it; `stageAll` is off by default.
 
@@ -94,10 +94,21 @@ and refuses staged files that look like credentials such as `.env`, `*.pem`,
 of any value held in an environment variable whose name looks secret.
 
 ```
-graft log            # history as changes: task, author, evidence
-graft show <id>      # one change in full, by id or commit
-graft status         # the open change, if any
+graft context <paths>  # before editing: the changes that touched these files, sized for a prompt
+graft log              # history as changes: task, author, evidence
+graft show <id>        # one change in full, by id or commit
+graft status           # the open change, if any
 ```
+
+`context` is the reading side for a cold start. Give it the files or
+directories you are about to edit and it prints the commits that touched them,
+newest first, each with its task, plan, evidence lines and the files it
+changed, then stops at `--budget` characters (default 8000), dropping plans
+before it drops older commits. It reads the note when it is in the clone and
+the commit message when it is not, so it works in a fresh clone. `--all` adds
+commits that have no record as one line each; `--json` returns the entries
+with the same text in a `text` field, which is also what `graft_context`
+returns.
 
 The commit ends up looking like this:
 

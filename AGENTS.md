@@ -17,7 +17,8 @@ knows why the code is the way it is.
 - Commit with `graft land <paths> -m "<title>"`, not `git commit`. It refuses to
   land without evidence.
 - After `git push`, run `graft sync` so the full records reach the remote.
-- To learn why code is the way it is, run `graft log` or `graft show <id>`.
+- Before editing a file, run `graft context <paths>` to read the changes that
+  touched it. To learn why code is the way it is, run `graft log` or `graft show <id>`.
 
 With the Graft MCP server the same steps are `graft_start`, `graft_evidence`,
-`graft_note`, `graft_land`, `graft_sync` and `graft_log`.
+`graft_note`, `graft_land`, `graft_sync`, `graft_context` and `graft_log`.

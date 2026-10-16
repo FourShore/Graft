@@ -128,6 +128,21 @@ server.registerTool(
 );
 
 server.registerTool(
+  "graft_context",
+  {
+    description:
+      "Read before editing: the changes that touched the given files or directories, newest first, with task, plan and evidence, trimmed to fit a prompt. Use the `text` field as-is.",
+    inputSchema: {
+      paths: z.array(z.string()).describe("Files or directories, relative to the repo root; empty for the whole repository"),
+      limit: z.number().int().positive().optional().default(50).describe("Commits to scan"),
+      budget: z.number().int().positive().optional().default(8000).describe("Characters of text to stay within"),
+      includeUnrecorded: z.boolean().optional().default(false).describe("Include commits that have no change record"),
+    },
+  },
+  async ({ paths, limit, budget, includeUnrecorded }) => guarded(() => graft.context(paths, { limit, budget, all: includeUnrecorded })),
+);
+
+server.registerTool(
   "graft_sync",
   {
     description: "Fetch, merge and push change records (git notes) with the remote so other clones see full records.",

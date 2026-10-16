@@ -203,6 +203,14 @@ reviewed change like any other.
 `Graft-Change` trailer, so a change is findable from any branch that contains
 it, note or no note.
 
+`graft context <paths>` is the read an agent makes before editing: `git log
+--name-only -- <paths>` over the newest commits, each record read as above,
+rendered newest first and cut at a character budget. The first thing cut from
+an entry is its plan, then its evidence lines (replaced by the trailer-style
+summary); when an entry still does not fit, it and everything older are dropped
+and the text says how many. Commits without a record are counted in the header
+and shown only on request.
+
 Readers must tolerate a commit that has trailers but no note (show the
 trailers) and must ignore commits with neither.
 

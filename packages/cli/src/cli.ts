@@ -159,6 +159,18 @@ program
   });
 
 program
+  .command("context")
+  .description("what you should know before editing these paths: the changes that touched them, trimmed to fit a prompt")
+  .argument("[paths...]", "files or directories (default: the whole repository)")
+  .option("-n, --limit <n>", "number of commits to scan", "50")
+  .option("--budget <chars>", "characters of text to stay within", "8000")
+  .option("--all", "include commits without a change record")
+  .action(async (paths: string[], o) => {
+    const result = await graft().context(paths, { limit: Number(o.limit), budget: Number(o.budget), all: Boolean(o.all) });
+    out(result, result.text);
+  });
+
+program
   .command("review")
   .description("open a local web view: changes ranked by risk, claim first, then the diff")
   .option("-p, --port <port>", "port to listen on (default: 7777, 0 for any)", "7777")
