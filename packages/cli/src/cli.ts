@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { Command } from "commander";
-import { Graft, GraftError, type LogEntry } from "@fourshore/graft-core";
+import { Graft, GraftError, shellJoin, type LogEntry } from "@fourshore/graft-core";
 import type { ChangeRecord } from "@fourshore/graft-core";
 import { createReviewServer } from "@fourshore/graft-review";
 import type { AddressInfo } from "node:net";
@@ -34,7 +34,7 @@ program
       r.policyWritten ? `Wrote .graft/policy.json` : ".graft/policy.json already exists",
     ];
     if (r.agents) {
-      lines.push(r.agents.written ? "Added a Version control section to AGENTS.md; commit it" : "AGENTS.md already covers Graft");
+      lines.push(r.agents.written ? "Added a Version control section to AGENTS.md; commit it" : `${r.agents.coveredBy} already covers Graft`);
       if (r.agents.claudeHint) lines.push("Claude Code reads CLAUDE.md, not AGENTS.md: add a line `@AGENTS.md` to CLAUDE.md.");
     }
     if (!r.remote) lines.push("No remote yet; run `graft init` again after `git remote add`.");
@@ -99,7 +99,7 @@ program
       return;
     }
     if (!command.length) throw new GraftError("Give a command after --, or use --note.");
-    const cmd = command.join(" ");
+    const cmd = shellJoin(command);
     const ev = await g.evidenceCommand(cmd, o.label);
     if (ev.kind === "command") {
       process.stdout.write(ev.output);
