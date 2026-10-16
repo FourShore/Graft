@@ -195,6 +195,67 @@ describe("redaction", () => {
   });
 });
 
+describe("context", () => {
+  it("returns the recorded changes that touched the paths, newest first, within a budget", async () => {
+    await mkdir(join(dir, "src"), { recursive: true });
+    await writeFile(join(dir, "src", "a.ts"), "a\n");
+    await writeFile(join(dir, "other.txt"), "o\n");
+    sh(["add", "-A"]);
+    sh(["commit", "-q", "-m", "plain commit touching a"]);
+
+    await graft.start({ task: "first change to a", plan: "edit a\ncarefully" });
+    await writeFile(join(dir, "src", "a.ts"), "a2\n");
+    await graft.evidenceCommand("echo ok", "smoke");
+    await graft.land({ all: true });
+
+    await graft.start({ task: "only other" });
+    await writeFile(join(dir, "other.txt"), "o2\n");
+    await graft.evidenceNote("looked");
+    await graft.land({ all: true });
+
+    await graft.start({ task: "second change to a" });
+    await writeFile(join(dir, "src", "a.ts"), "a3\n");
+    await graft.evidenceNote("checked by hand");
+    const second = await graft.land({ all: true });
+
+    const ctx = await graft.context(["src"]);
+    expect(ctx.entries.map((e) => e.record?.task)).toEqual(["second change to a", "first change to a"]);
+    expect(ctx.entries[0].commit).toBe(second.commit);
+    expect(ctx.entries[0].files).toEqual(["src/a.ts"]);
+    expect(ctx.unrecorded).toBe(1);
+    expect(ctx.omitted).toBe(0);
+    expect(ctx.text).toContain("Context for src (2 recorded changes, newest first; 1 commit without a record)");
+    expect(ctx.text).toContain("  plan: edit a\n        carefully");
+    expect(ctx.text).toContain("  evidence: [pass smoke] echo ok (");
+    expect(ctx.text).toContain("  files: src/a.ts");
+    expect(ctx.text).not.toContain("plain commit");
+
+    const all = await graft.context(["src/a.ts"], { all: true });
+    expect(all.entries).toHaveLength(3);
+    expect(all.text).toContain("plain commit touching a\n  (no change record)");
+
+    const whole = await graft.context([]);
+    expect(whole.entries).toHaveLength(3);
+
+    const tight = await graft.context(["src"], { budget: 300 });
+    expect(tight.entries).toHaveLength(1);
+    expect(tight.omitted).toBe(1);
+    expect(tight.text).toContain("(1 older commit omitted to fit the budget");
+    expect(tight.text.length).toBeLessThanOrEqual(300);
+
+    const plans = await graft.context(["src"], { budget: 360 });
+    expect(plans.entries).toHaveLength(2);
+    expect(plans.text).not.toContain("carefully");
+    expect(plans.text).toContain("evidence: 1 command, 1 passed");
+  });
+
+  it("is empty before the first commit", async () => {
+    const ctx = await graft.context(["x"]);
+    expect(ctx.entries).toEqual([]);
+    expect(ctx.text).toContain("0 recorded changes");
+  });
+});
+
 describe("log and show", () => {
   it("returns changes with records and finds by id", async () => {
     await writeFile(join(dir, "plain.txt"), "p\n");
