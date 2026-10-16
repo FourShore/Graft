@@ -68,7 +68,10 @@ Two kinds in version 1.
 - `command`: a shell command run from the repository root, with its exit code,
   wall-clock duration, and the last 4 KB of combined stdout and stderr. Exit
   code 0 is "passed". The output is kept so a reader can see *what* passed, not
-  just that something did.
+  just that something did. With `attested: true` the author attached a run
+  they made themselves; Graft did not run it, the duration is 0, and readers
+  say "attested" instead of "pass" so the record is honest about who ran it.
+  It still counts as a command for `requireEvidence: "command"`.
 - `note`: free text for verification that did not come from a command: a manual
   check, a link to a CI run, a screenshot description.
 

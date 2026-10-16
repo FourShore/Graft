@@ -86,6 +86,12 @@ quotes and parentheses survive (`graft evidence -- node -e 'console.log("ok")'`)
 A single argument is run through the shell as written, so pipes and `&&`
 work there (`graft evidence -- "npm test && npm run lint"`).
 
+If you already ran the slow thing through your own tools, attach it instead of
+running it twice: `graft evidence --attach --label "go tests" --exit 0 --output-file
+out.txt -- go test ./...`. Nothing is run; the record carries the command, exit
+code and output as `attested` rather than `pass`, so a reader knows Graft did
+not see it run. Over MCP, pass `exitCode` (and `output`) to `graft_evidence`.
+
 `land` commits what's staged, plus any files you name, or everything with
 `-a`. Add your own trailers with `--trailer "Co-Authored-By: ..."` (repeatable;
 `trailers` on `graft_land`). It refuses to commit without evidence (`--allow-no-evidence` overrides)

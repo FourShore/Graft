@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { readFile } from "node:fs/promises";
 import { Command } from "commander";
 import { Graft, GraftError, shellJoin, type LogEntry } from "@fourshore/graft-core";
 import type { ChangeRecord } from "@fourshore/graft-core";
@@ -87,9 +88,12 @@ program
 
 program
   .command("evidence")
-  .description("run a command and record its result, or record a note")
+  .description("run a command and record its result, attach a run you already made, or record a note")
   .option("--label <label>", "what this evidence shows, e.g. 'unit tests'")
   .option("--note <text>", "record a note instead of running a command")
+  .option("--attach", "do not run the command; record it as a run you already made, marked attested")
+  .option("--exit <code>", "with --attach: the exit code of your run (default 0)")
+  .option("--output-file <path>", "with --attach: a file holding your run's output (last 4 KB kept)")
   .argument("[command...]", "command to run (put -- before it)")
   .action(async (command: string[], o) => {
     const g = graft();
@@ -100,6 +104,15 @@ program
     }
     if (!command.length) throw new GraftError("Give a command after --, or use --note.");
     const cmd = shellJoin(command);
+    if (o.attach) {
+      const exitCode = o.exit === undefined ? 0 : Number(o.exit);
+      if (!Number.isInteger(exitCode)) throw new GraftError(`--exit must be an integer, got ${o.exit}.`);
+      const output = o.outputFile ? await readFile(o.outputFile, "utf8") : "";
+      const ev = await g.evidenceAttested(cmd, exitCode, output, o.label);
+      out(ev, `Recorded as attested: ${cmd} -> exit ${exitCode}`);
+      return;
+    }
+    if (o.exit !== undefined || o.outputFile) throw new GraftError("--exit and --output-file go with --attach.");
     const ev = await g.evidenceCommand(cmd, o.label);
     if (ev.kind === "command") {
       process.stdout.write(ev.output);
@@ -218,7 +231,7 @@ function formatRecord(r: ChangeRecord): string {
   for (const ev of r.evidence) {
     lines.push(
       ev.kind === "command"
-        ? `  ${ev.exitCode === 0 ? "pass" : "FAIL"}  ${ev.command}${ev.label ? `  [${ev.label}]` : ""}`
+        ? `  ${ev.attested ? (ev.exitCode === 0 ? "attested" : `ATTESTED FAIL ${ev.exitCode}`) : ev.exitCode === 0 ? "pass" : "FAIL"}  ${ev.command}${ev.label ? `  [${ev.label}]` : ""}`
         : `  note  ${ev.text}${ev.label ? `  [${ev.label}]` : ""}`,
     );
   }

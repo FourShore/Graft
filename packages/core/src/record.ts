@@ -50,6 +50,12 @@ export interface CommandEvidence {
   output: string;
   /** Optional label, e.g. "unit tests". */
   label?: string;
+  /**
+   * True when the author attached a run they made themselves instead of
+   * letting Graft run the command. The exit code and output are their claim;
+   * readers show it as "attested", not "pass".
+   */
+  attested?: true;
 }
 
 export interface NoteEvidence {
@@ -141,12 +147,16 @@ const MESSAGE_LINE_CAP = 200;
  *
  *   [pass unit tests] npm test (12.3s)
  *   [fail 1] npm run lint (0.4s)
+ *   [attested go tests] go test ./...
+ *   [attested fail 2 build] yarn build
  *   [note] manually verified in browser
  */
 export function evidenceLines(evidence: Evidence[]): string[] {
   return evidence.map((ev) => {
     const label = ev.label ? ` ${bracketSafe(ev.label)}` : "";
     if (ev.kind === "note") return `  [note${label}] ${clip(oneLine(ev.text))}`;
+    const failed = ev.exitCode === 0 ? "" : ` fail ${ev.exitCode}`;
+    if (ev.attested) return `  [attested${failed}${label}] ${clip(oneLine(ev.command))}`;
     const status = ev.exitCode === 0 ? "pass" : `fail ${ev.exitCode}`;
     return `  [${status}${label}] ${clip(oneLine(ev.command))} (${(ev.durationMs / 1000).toFixed(1)}s)`;
   });
@@ -157,7 +167,7 @@ function bracketSafe(label: string): string {
   return oneLine(label).replace(/[[\]]/g, "").slice(0, 60);
 }
 
-const EVIDENCE_LINE = /^\s*\[(pass|fail (-?\d+)|note)(?: ([^\]]*))?\] (.*)$/;
+const EVIDENCE_LINE = /^\s*\[(pass|fail (-?\d+)|note|attested(?: fail (-?\d+))?)(?: ([^\]]*))?\] (.*)$/;
 const DURATION = /^(.*) \((\d+(?:\.\d+)?)s\)$/;
 
 /**
@@ -176,18 +186,25 @@ export function parseMessageRecord(message: string, authoredAt: string): ChangeR
   for (const line of readBlock(lines, EVIDENCE_HEADER)?.split("\n") ?? []) {
     const m = EVIDENCE_LINE.exec(line);
     if (!m) continue;
-    const label = m[3] || undefined;
-    let rest = m[4];
-    let durationMs = 0;
-    if (m[1] !== "note") {
-      const d = DURATION.exec(rest);
-      if (d) {
-        rest = d[1];
-        durationMs = Math.round(Number(d[2]) * 1000);
-      }
+    const [, status, failCode, attestedFailCode, rawLabel, tail] = m;
+    const label = rawLabel || undefined;
+    if (status === "note") {
+      evidence.push({ kind: "note", at: authoredAt, text: tail, label });
+      continue;
     }
-    if (m[1] === "note") evidence.push({ kind: "note", at: authoredAt, text: rest, label });
-    else evidence.push({ kind: "command", at: authoredAt, command: rest, exitCode: m[2] ? Number(m[2]) : 0, durationMs, output: "", label });
+    if (status.startsWith("attested")) {
+      const exitCode = attestedFailCode ? Number(attestedFailCode) : 0;
+      evidence.push({ kind: "command", at: authoredAt, command: tail, exitCode, durationMs: 0, output: "", label, attested: true });
+      continue;
+    }
+    let rest = tail;
+    let durationMs = 0;
+    const d = DURATION.exec(rest);
+    if (d) {
+      rest = d[1];
+      durationMs = Math.round(Number(d[2]) * 1000);
+    }
+    evidence.push({ kind: "command", at: authoredAt, command: rest, exitCode: failCode ? Number(failCode) : 0, durationMs, output: "", label });
   }
   const [kind, ...name] = (trailers[TRAILER_KEYS.author] ?? "human:unknown").split(":");
   return {

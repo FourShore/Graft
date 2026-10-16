@@ -165,6 +165,30 @@ export class Graft {
     return ev;
   }
 
+  /**
+   * Attach a run the author already made through their own tools, so a slow
+   * build or test suite is not run twice. Graft did not run it, so the record
+   * marks it attested: the exit code and output are the author's claim.
+   */
+  async evidenceAttested(command: string, exitCode: number, output = "", label?: string): Promise<Evidence> {
+    const open = await this.requireOpen();
+    if (!command.trim()) throw new GraftError("The command you ran is required, so the record says what was attested.");
+    if (!Number.isInteger(exitCode)) throw new GraftError("Exit code must be an integer.");
+    const ev: Evidence = {
+      kind: "command",
+      at: new Date().toISOString(),
+      command: command.trim(),
+      exitCode,
+      durationMs: 0,
+      output: capOutput(redact(output)),
+      label,
+      attested: true,
+    };
+    open.evidence.push(ev);
+    await this.store.write(open);
+    return ev;
+  }
+
   /** Record evidence that was produced elsewhere (a manual check, a CI link). */
   async evidenceNote(text: string, label?: string): Promise<Evidence> {
     const open = await this.requireOpen();
