@@ -197,10 +197,21 @@ export class Graft {
     return open;
   }
 
+  private topLevelCache?: Promise<string>;
+
+  /** The working tree root, asked of git once per Graft instance. */
+  private topLevel(): Promise<string> {
+    this.topLevelCache ??= this.git.topLevel().catch((err) => {
+      this.topLevelCache = undefined;
+      throw err;
+    });
+    return this.topLevelCache;
+  }
+
   /** Run a command, capture its result as evidence. The command runs in the repo root. */
   async evidenceCommand(command: string, label?: string, name?: string): Promise<Evidence> {
     const open = await this.requireOpen();
-    const cwd = await this.git.topLevel();
+    const cwd = await this.topLevel();
     const started = Date.now();
     const { exitCode, output } = await runShell(command, cwd);
     const ev: Evidence = {
@@ -223,8 +234,11 @@ export class Graft {
     return (await readPolicy(await this.git.topLevel())).commands ?? {};
   }
 
-  /** Run a command from the policy catalog by name and record it under that name. */
-  async evidenceNamed(name: string, label?: string): Promise<Evidence> {
+  /**
+   * Run a command from the policy catalog by name and record it under that
+   * name, or with `attest` record a run of it the author already made.
+   */
+  async evidenceNamed(name: string, label?: string, attest?: { exitCode: number; output?: string }): Promise<Evidence> {
     const commands = await this.catalog();
     const command = commands[name];
     if (!command) {
@@ -235,6 +249,7 @@ export class Graft {
           : `${POLICY_PATH} names no commands, so "${name}" cannot be run by name. Add a "commands" map, or run it with --.`,
       );
     }
+    if (attest) return this.evidenceAttested(command, attest.exitCode, attest.output ?? "", label, name);
     return this.evidenceCommand(command, label, name);
   }
 
@@ -243,7 +258,7 @@ export class Graft {
    * build or test suite is not run twice. Graft did not run it, so the record
    * marks it attested: the exit code and output are the author's claim.
    */
-  async evidenceAttested(command: string, exitCode: number, output = "", label?: string): Promise<Evidence> {
+  async evidenceAttested(command: string, exitCode: number, output = "", label?: string, name?: string): Promise<Evidence> {
     const open = await this.requireOpen();
     if (!command.trim()) throw new GraftError("The command you ran is required, so the record says what was attested.");
     if (!Number.isInteger(exitCode)) throw new GraftError("Exit code must be an integer.");
@@ -255,6 +270,7 @@ export class Graft {
       durationMs: 0,
       output: await this.keepOutput(command, output),
       label,
+      ...(name ? { name } : {}),
       attested: true,
     };
     open.evidence.push(ev);
@@ -303,7 +319,7 @@ export class Graft {
    * hook sees the whole transcript and the record outlives the key.
    */
   private async keepOutput(command: string, output: string): Promise<string> {
-    const policy = await readPolicy(await this.git.topLevel());
+    const policy = await readPolicy(await this.topLevel());
     const named = secretFilesNamed(command, policy.secretFiles);
     if (named.length) return `[output withheld: the command names ${named.join(", ")}, which looks like a credential file]`;
     return capOutput(redact(output));

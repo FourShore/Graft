@@ -137,7 +137,15 @@ program
           : "Give a command after --, or use --note.",
       );
     }
-    if (command.length === 1 && !o.attach && (await g.catalog())[command[0]]) {
+    if (command.length === 1 && (await g.catalog())[command[0]]) {
+      if (o.attach) {
+        const exitCode = o.exit === undefined ? 0 : Number(o.exit);
+        if (!Number.isInteger(exitCode)) throw new GraftError(`--exit must be an integer, got ${o.exit}.`);
+        const output = o.outputFile ? await readFile(o.outputFile, "utf8") : "";
+        const ev = await g.evidenceNamed(command[0], o.label, { exitCode, output });
+        if (ev.kind === "command") out(ev, `Recorded ${command[0]} as attested: ${ev.command} -> exit ${exitCode}`);
+        return;
+      }
       const ev = await g.evidenceNamed(command[0], o.label);
       if (ev.kind === "command") {
         process.stdout.write(ev.output);
@@ -348,11 +356,16 @@ function formatRecord(r: ChangeRecord): string {
   for (const ev of r.evidence) {
     lines.push(
       ev.kind === "command"
-        ? `  ${ev.attested ? (ev.exitCode === 0 ? "attested" : `ATTESTED FAIL ${ev.exitCode}`) : ev.exitCode === 0 ? "pass" : "FAIL"}  ${ev.command}${ev.label ?? ev.name ? `  [${ev.label ?? ev.name}]` : ""}`
+        ? `  ${ev.attested ? (ev.exitCode === 0 ? "attested" : `ATTESTED FAIL ${ev.exitCode}`) : ev.exitCode === 0 ? "pass" : "FAIL"}  ${ev.command}${tag(ev.name, ev.label)}`
         : `  note  ${ev.text}${ev.label ? `  [${ev.label}]` : ""}`,
     );
   }
   return lines.join("\n");
+}
+
+function tag(name?: string, label?: string): string {
+  const shown = name && label && label !== name ? `${name}: ${label}` : (name ?? label);
+  return shown ? `  [${shown}]` : "";
 }
 
 function indent(s: string): string {

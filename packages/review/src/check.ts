@@ -78,14 +78,16 @@ export async function runCheck(opts: CheckOptions): Promise<CheckResult> {
     const files = parseDiff(await graft.diff(entry.commit));
     const t = triage(entry.record, files, entry.trailers, entry.recordSource, policy.behaviorFiles);
     const behavior = t.groups.behavior.map((f) => f.path);
-    const unmet = noteMissing(entry) ? [] : evaluateRules(policy, files.map((f) => f.path), entry.record?.evidence ?? []);
+    // "partial" is triage's name for a record whose evidence lives only in a note this clone lacks.
+    const partial = t.risk === "partial";
+    const unmet = partial ? [] : evaluateRules(policy, files.map((f) => f.path), entry.record?.evidence ?? []);
     let ok = true;
     if (behavior.length && policy.requireEvidence) {
       const base = { commit: entry.commit, title: entry.title, files: behavior };
       if (!entry.record) {
         findings.push({ kind: "no-record", ...base });
         ok = false;
-      } else if (noteMissing(entry)) {
+      } else if (partial) {
         findings.push({ kind: "note-missing", ...base });
         ok = false;
       } else if (entry.record.evidence.length === 0) {
@@ -100,7 +102,9 @@ export async function runCheck(opts: CheckOptions): Promise<CheckResult> {
       const ruleFiles = [...new Set(unmet.flatMap((u) => u.files))];
       if (!entry.record) {
         if (ok) findings.push({ kind: "no-record", commit: entry.commit, title: entry.title, files: ruleFiles });
-      } else if (!noteMissing(entry)) {
+      } else if (partial) {
+        if (ok) findings.push({ kind: "note-missing", commit: entry.commit, title: entry.title, files: ruleFiles });
+      } else {
         findings.push({
           kind: "rule-unmet",
           commit: entry.commit,
@@ -121,7 +125,9 @@ export async function runCheck(opts: CheckOptions): Promise<CheckResult> {
     const byCommand = new Map<string, { shas: string[]; name?: string }>();
     for (const c of commits) {
       for (const ev of passingCommands(c.entry, true)) {
-        const name = ev.name && policy.commands?.[ev.name] ? ev.name : undefined;
+        // A record read from the commit message carries the name as the label.
+        const named = ev.name ?? ev.label;
+        const name = named && policy.commands?.[named] ? named : undefined;
         const command = name ? policy.commands![name] : ev.command;
         const slot = byCommand.get(command) ?? { shas: [], ...(name ? { name } : {}) };
         slot.shas.push(c.entry.commit);
@@ -185,19 +191,6 @@ async function resolveBase(graft: Graft, base: string): Promise<string> {
 function passingCommands(entry: LogEntry, withAttested = false): CommandEvidence[] {
   return (entry.record?.evidence ?? []).filter(
     (e): e is CommandEvidence => e.kind === "command" && e.exitCode === 0 && (withAttested || !e.attested),
-  );
-}
-
-/**
- * The commit's trailer says it carries evidence, but the clone has no note
- * and the message holds no Evidence block (records older than 0.0.6 kept it
- * in the note alone), so nothing can be judged until the note is fetched.
- */
-function noteMissing(entry: LogEntry): boolean {
-  return (
-    entry.recordSource === "message" &&
-    entry.record?.evidence.length === 0 &&
-    (entry.trailers["Graft-Evidence"] ?? "none") !== "none"
   );
 }
 

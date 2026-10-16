@@ -324,10 +324,14 @@ describe("command catalog and rules", () => {
     await graft.start({ task: "catalog 2" });
     await graft.evidenceNamed("test", "unit");
     await graft.evidenceCommand("echo lint ok", "the lint, typed by hand");
+    const attested = await graft.evidenceNamed("lint", undefined, { exitCode: 0, output: "lint ok" });
+    expect(attested).toMatchObject({ kind: "command", name: "lint", command: "echo lint ok", attested: true, exitCode: 0 });
     const { commit } = await graft.land({ all: true });
     const body = sh(["log", "-1", "--format=%B"]);
-    expect(body).toContain("Evidence:\n  [pass unit] echo tests ok (");
+    // The message line carries the catalog name, not the free label, so a record rebuilt from it still meets the rules.
+    expect(body).toContain("Evidence:\n  [pass test] echo tests ok (");
     expect(body).toContain("  [pass the lint, typed by hand] echo lint ok (");
+    expect(body).toContain("  [attested lint] echo lint ok\n");
 
     // Rebuilt from the message, a named run keeps its name as the label and a ref survives in its trailer.
     sh(["notes", "--ref=refs/notes/graft", "remove", commit]);
@@ -368,6 +372,9 @@ describe("capture", () => {
     expect(relativizeCommand("npm test -- /home/me/repo/src/a.test.ts", top)).toBe("npm test -- ./src/a.test.ts");
     expect(relativizeCommand("echo a && cd /home/me/repo; npm test", top)).toBe("echo a && npm test");
     expect(relativizeCommand("cd /home/me/repository && x", top)).toBe("cd /home/me/repository && x");
+    expect(relativizeCommand("cd /mnt/backup/home/me/repo/x && npm test", top)).toBe("cd /mnt/backup/home/me/repo/x && npm test");
+    expect(relativizeCommand("cd /home/me/repo/ && npm test", top)).toBe("npm test");
+    expect(relativizeCommand("ROOT=/home/me/repo npm test", top)).toBe("ROOT=. npm test");
     expect(relativizeCommand("npm test", top)).toBe("npm test");
     expect(relativizeCommand("cd C:\\Users\\z\\repo\\pkg && go test ./...", "C:/Users/z/repo")).toBe("cd ./pkg && go test ./...");
     expect(relativizeCommand("cd c:/users/z/repo && go test ./...", "C:/Users/z/repo")).toBe("go test ./...");
