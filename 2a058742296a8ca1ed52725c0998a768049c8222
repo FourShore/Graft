@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "id": "m526jtt5r680te7an6ne",
+  "task": "Release v0.0.10: bump every package to 0.0.10",
+  "plan": "scripts/release.mjs rewrites the version fields and the lockfile; the Release workflow publishes on the tag",
+  "author": {
+    "kind": "human",
+    "name": "zachrasavanh"
+  },
+  "startedAt": "2026-10-16T11:12:01.861Z",
+  "evidence": [
+    {
+      "kind": "command",
+      "at": "2026-10-16T11:12:42.392Z",
+      "command": "npm run build && npm test",
+      "exitCode": 0,
+      "durationMs": 40428,
+      "output": "[... truncated ...]\nnd names a base that is neither  2394ms\n   ✓ check > fails a commit whose files match a rule its evidence does not cover, and re-runs a named command by its current definition  2241ms\n   ✓ check > re-runs only commands allowed by checkCommands and reports the rest as skipped without failing  973ms\n   ✓ check > does not re-run when it is itself a re-run command of an outer check  1683ms\n   ✓ check > is empty and passing when the branch has no commits past the base  400ms\ngraft: added change m526kasf2p1850wtvbag to the commit message\ngraft: recorded change m526kasf2p1850wtvbag on 0b37013bf4\nRemoving note for object ce896defd6959d16af5754b4551f711c7e42e2c7\nRemoving note for object b1e479f4bb808aecb9411d265237ce4781a08e06\nRemoving note for object 3c1b9555174b95cdccb3a3aab9a5e2b4162e52dd\n ✓ packages/core/test/graft.test.ts (52 tests) 37777ms\n   ✓ start / status / abandon > opens one change at a time  418ms\n   ✓ shellJoin > quotes argv elements so the shell sees them as given  354ms\n   ✓ evidence > records a command's exit code and output  382ms\n   ✓ land > writes trailers and a note, then clears the open change  672ms\n   ✓ land > refuses to land without evidence unless allowed  594ms\n   ✓ land > refuses to land with nothing staged  319ms\n   ✓ land > stages only the named paths  573ms\n   ✓ land > refuses staged files that look like credentials unless allowed  1223ms\n   ✓ extra trailers > appends them after Graft's own and rejects bad or reserved ones  914ms\n   ✓ redaction > scrubs secret-looking env values from evidence output and notes  366ms\n   ✓ policy trailers > writes policy trailers on land, after Graft's own and without duplicating explicit ones  569ms\n   ✓ command catalog and rules > runs a command by name, records the name, and gates land on the rules for the staged files  2588ms\n   ✓ capture > opens a change from the prompt, records matching Bash runs with the harness's exit code, ignores the rest  1866ms\n   ✓ capture > prepare-commit-msg adds the record and post-commit attaches the note; merges and amends are left alone  1072ms\n   ✓ capture > a plain git commit lands the open change through the installed hooks  2778ms\n   ✓ attested evidence > records a run the author made, marks it attested, and round-trips through the message  813ms\n   ✓ attested evidence > does not satisfy a policy that requires a passing command, since it is a claim  714ms\n   ✓ attested evidence > withholds the output of a command that names a credential file  442ms\n   ✓ context > returns the recorded changes that touched the paths, newest first, within a budget  2509ms\n   ✓ log and show > returns changes with records and finds by id  1036ms\n   ✓ log and show > survives a rebase: the id in the trailer follows the commit  977ms\n   ✓ log and show > rebuilds a record from the commit message when the note is missing  1014ms\n   ✓ log and show > reads back unlabeled entries that contain ': ' exactly, and strips brackets from labels  793ms\n   ✓ init > sets notes config, adds the fetch refspec, writes a policy file, and is idempotent  906ms\n   ✓ init > writes the agent instructions to AGENTS.md once and reports the CLAUDE.md hint  1486ms\n   ✓ init > leaves AGENTS.md alone when CLAUDE.md already covers Graft  502ms\n   ✓ init > creates AGENTS.md when there is none  434ms\n   ✓ init > works with no remote and reports it  433ms\n   ✓ policy > requireEvidence: false lets a change land without evidence  434ms\n   ✓ policy > requireEvidence: \"command\" refuses notes-only evidence  944ms\n   ✓ sync > pushes notes to a bare remote and a second clone receives the full record  2627ms\n   ✓ sync > merges records from two clones instead of overwriting  2633ms\n   ✓ sync > reports a refused notes push instead of failing  1147ms\n   ✓ policy secretFiles > extends the credential guard with repo-specific globs  802ms\n\n Test Files  2 passed (2)\n      Tests  72 passed (72)\n   Start at  06:12:03\n   Duration  38.68s (transform 449ms, setup 0ms, collect 628ms, tests 53.35s, environment 1ms, prepare 313ms)\n\n",
+      "label": "build and tests"
+    }
+  ],
+  "landedAt": "2026-10-16T11:12:42.561Z",
+  "commit": "2a058742296a8ca1ed52725c0998a768049c8222"
+}
