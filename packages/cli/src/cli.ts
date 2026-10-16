@@ -3,8 +3,7 @@ import { readFile } from "node:fs/promises";
 import { Command } from "commander";
 import { Graft, GraftError, handleClaudeCodeEvent, shellJoin, type ClaudeCodeEvent, type LogEntry } from "@fourshore/graft-core";
 import type { ChangeRecord } from "@fourshore/graft-core";
-import { createReviewServer, renderCheckGithub, renderCheckText, runCheck } from "@fourshore/graft-review";
-import type { AddressInfo } from "node:net";
+import { renderCheckGithub, renderCheckText, runCheck } from "@fourshore/graft-review";
 import { createRequire } from "node:module";
 import { appendFile } from "node:fs/promises";
 
@@ -30,8 +29,9 @@ program
   .option("--force", "overwrite an existing policy file")
   .option("--no-agents", "leave AGENTS.md alone")
   .option("--no-hooks", "do not install the Claude Code and git capture hooks")
+  .option("--ci", "write a GitHub Actions workflow that runs graft check on every pull request")
   .action(async (o) => {
-    const r = await graft().init({ remote: o.remote, force: o.force, agents: o.agents, hooks: o.hooks });
+    const r = await graft().init({ remote: o.remote, force: o.force, agents: o.agents, hooks: o.hooks, ci: o.ci });
     const lines = [
       r.configured.length ? `Set ${r.configured.join(", ")}` : "Git config already set",
       r.policyWritten ? `Wrote .graft/policy.json` : ".graft/policy.json already exists",
@@ -56,6 +56,13 @@ program
       else if (!foreign.length) lines.push("Git hooks already installed");
       if (foreign.length) lines.push(`Left ${foreign.join(" and ")} alone in ${h.hooksDir}: another hook is there. Add \`graft hook <name> "$@"\` to it yourself.`);
       lines.push("The hooks run `graft`, so it must be on PATH for Claude Code and git.");
+    }
+    if (r.ci) {
+      lines.push(
+        r.ci.state === "written"
+          ? `Wrote ${r.ci.path}; add your install step to it and commit it`
+          : `${r.ci.path} already exists; left alone`,
+      );
     }
     if (!r.remote) lines.push("No remote yet; run `graft init` again after `git remote add`.");
     out(r, lines.join("\n"));
@@ -84,7 +91,6 @@ program
   .option("--plan <plan>", "how you intend to do it")
   .option("--ref <ref>", "where the task came from: the thread, issue or ticket URL")
   .option("--author <name>", "who is doing the work (default: from environment)")
-  .option("--model <model>", "model id, when the author is an agent")
   .option("--human", "mark the author as a human rather than an agent")
   .option("--replace", "drop a change another session left open, then start this one")
   .action(async (task: string[], o) => {
@@ -92,7 +98,7 @@ program
       task: task.join(" "),
       plan: o.plan,
       ref: o.ref,
-      author: { name: o.author, model: o.model, kind: o.human ? "human" : undefined },
+      author: { name: o.author, kind: o.human ? "human" : undefined },
       replace: o.replace,
     });
     out(record, `Opened change ${record.id}\n  task: ${record.task}`);
@@ -259,28 +265,6 @@ program
   });
 
 program
-  .command("review")
-  .description("open a local web view: changes ranked by risk, claim first, then the diff")
-  .option("-p, --port <port>", "port to listen on (default: 7777, 0 for any)", "7777")
-  .option("-n, --limit <n>", "number of commits to show", "50")
-  .option("--only-recorded", "hide commits that have no change record")
-  .action(async (o) => {
-    const repo = program.opts<{ C: string }>().C;
-    const server = createReviewServer({ repo, limit: Number(o.limit), includeUnrecorded: !o.onlyRecorded });
-    await new Promise<void>((resolve, reject) => {
-      server.once("error", reject);
-      server.listen(Number(o.port), "127.0.0.1", resolve);
-    });
-    const { port } = server.address() as AddressInfo;
-    console.log(`Graft review: http://127.0.0.1:${port}/  (Ctrl-C to stop)`);
-    await new Promise<void>((resolve) => {
-      const stop = () => server.close(() => resolve());
-      process.once("SIGINT", stop);
-      process.once("SIGTERM", stop);
-    });
-  });
-
-program
   .command("check")
   .description("verify a branch's records like a reviewer at merge time: every behavior change needs evidence that meets the policy; --rerun runs the recorded commands again here")
   .option("--base <ref>", "commits in <ref>..HEAD are checked (default: origin/main, or the upstream of HEAD)")
@@ -357,7 +341,7 @@ function formatRecord(r: ChangeRecord): string {
     `change: ${r.id}`,
     `task:   ${r.task}`,
     ...(r.ref ? [`ref:    ${r.ref}`] : []),
-    `author: ${r.author.kind}:${r.author.name}${r.author.model ? ` (${r.author.model})` : ""}`,
+    `author: ${r.author.kind}:${r.author.name}`,
   ];
   if (r.plan) lines.push(`plan:   ${r.plan.split("\n").join("\n        ")}`);
   lines.push(`evidence: ${r.evidence.length ? "" : "none"}`);

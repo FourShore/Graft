@@ -1,11 +1,21 @@
 # Graft
 
-**Git records what changed. Graft records why, and whether it was tested.**
+**Git records what changed. Graft records what was asked, what was run, and
+refuses to merge a change that cannot show it.**
 
-Every commit gets a record: the task the author was given, the plan, who (or
-which agent) did the work, and the commands they ran to check it. It's stored
-as commit trailers and a git note, so git, GitHub, and your tools keep working
-as they are.
+Every commit carries a record: the task the author was given, who (or which
+agent) did the work, and the commands they ran to check it. It lives in the
+commit message as trailers and an `Evidence:` block, so git, GitHub and your
+tools keep working as they are. Three things make it more than a convention:
+
+- **The landing gate.** `graft land` refuses a change with no evidence, and a
+  policy names the commands each kind of file needs before it may land.
+- **The check in CI.** `graft check` fails a pull request whose behavior
+  changes carry no evidence that meets the policy, and re-runs the recorded
+  commands so a `[pass]` is a fact, not a claim.
+- **Capture without ritual.** Hooks record the prompt as the task and every
+  test, build or lint run as evidence, so the record exists whether or not the
+  agent remembers Graft.
 
 ## Why
 
@@ -14,20 +24,17 @@ can produce a working change in minutes, and the slow part is deciding whether
 to trust it. Nobody can read every diff at the rate agents produce them, and a
 diff on its own doesn't say what was asked for or what was checked.
 
-Git was built for the old bottleneck. It tracks what changed and who committed
-it, which was enough when a human typed every line and could be asked about
-it. It has no place for the task, the plan, or the evidence, so that context
-gets produced during agent work and thrown away.
+Most of what Graft records you could ask for by convention: a commit template,
+a line in CLAUDE.md that says "run the tests". What convention cannot do is
+enforce it when the session is lazy, or make it free when the session is
+careful. Graft does both. The gate makes "no evidence, no commit" mechanical,
+the check makes it hold at the pull request, and the hooks make the record
+appear without anyone typing it. For a repo where agents write most of the
+commits and CI is thin, that is a new guarantee. For a team with mature CI it
+is per-commit evidence and the task link, next to the diff.
 
-Graft keeps it. Each commit carries the task, the author, and the commands
-that were run, and `graft land` won't commit without evidence. Review starts
-from the claim, "this is what I was asked and this is what I ran", instead of
-from a bare diff. Months later, `graft log` answers "why is this here" without
-digging through chat logs.
-
-Status: early. The record format, a CLI, an MCP server, and a local review page
-work and are used on this repo. See [docs/CHANGE.md](docs/CHANGE.md) for the
-spec and the roadmap below for what's next.
+Status: early, and used on this repo. See [docs/CHANGE.md](docs/CHANGE.md)
+for the record format.
 
 ## Install
 
@@ -43,32 +50,82 @@ This installs `graft` and `graft-mcp`. Run the same command to update.
 ## Set up a repo
 
 ```
-graft init
+graft init         # policy, hooks, AGENTS.md section, notes config
+graft init --ci    # also a GitHub Actions workflow that runs graft check on every pull request
 ```
 
-Safe on an existing repo; it doesn't touch history. It sets a few git config
-keys so records survive `commit --amend` and `rebase`, adds the notes ref to
-`origin`'s fetch list, writes `.graft/policy.json`, and adds a "Version
-control" section to `AGENTS.md`. Commit both files.
+Safe on an existing repo; it doesn't touch history. It writes
+`.graft/policy.json`, installs the capture hooks, adds a "Version control"
+section to `AGENTS.md`, and sets a few git config keys so the optional notes
+survive `commit --amend` and `rebase`. Commit what it writes, including the
+edit to `.claude/settings.json`: a per-session `init` leaves a diff until
+that change is committed.
 
-## Point your agent at it
+## Policy: the definition of done
 
-The `AGENTS.md` section that `graft init` writes tells an agent to open a
-change before editing, record each check it runs, commit with `graft land`,
-and sync after pushing. Most agent harnesses read `AGENTS.md`. Claude Code
-reads `CLAUDE.md`, so put a line containing `@AGENTS.md` in it. Pass
-`--no-agents` to `graft init` to leave the file alone.
+`.graft/policy.json`, written by `graft init`:
 
-Agents with MCP support can use the same steps as tools. For Claude Code:
-
-```
-claude mcp add graft -- graft-mcp --repo /path/to/your/repo
+```json
+{ "version": 1, "requireEvidence": true, "secretFiles": ["nova.json", "config/*.secret"] }
 ```
 
-Tools: `graft_start`, `graft_plan`, `graft_evidence`, `graft_note`,
-`graft_land`, `graft_sync`, `graft_status`, `graft_context`, `graft_log`, `graft_show`,
-`graft_abandon`. `graft_land` commits what's staged plus any `paths` you give
-it; `stageAll` is off by default.
+The repo's definition of done goes in the same file, as a catalog of named
+commands and rules that say which paths need which:
+
+```json
+{
+  "version": 1,
+  "commands": {
+    "test": "go test ./...",
+    "vet386": "env GOOS=windows GOARCH=386 go vet ./...",
+    "migrate": "hasura migrate apply --dry-run"
+  },
+  "rules": [
+    { "paths": ["**/*.go"], "require": ["test", "vet386"] },
+    { "paths": ["hasura/migrations/**"], "require": ["migrate"] }
+  ]
+}
+```
+
+`commands` names the checks once. `graft evidence test` runs one by name,
+the capture hooks record a typed command that matches one under its name
+(so `cd /abs/repo && go test ./...` counts as `test`), and `graft check
+--rerun` runs the name's current definition, so a command can change
+without invalidating history. `rules` are checked by `land` against the
+staged files and by `check` against each commit: a change that touches a
+file matching `paths` must carry a passing run, by Graft or a harness and
+not attested, of every name in `require`. `land` refuses otherwise and
+says which name to run; `check` fails the commit. A rule that names a
+command the catalog does not define is a policy error. This is how the
+command list in a repo's CLAUDE.md becomes something the gate enforces
+rather than prose.
+
+Set `requireEvidence` to `false` to turn off the landing gate for a repo, or
+to `"command"` to require at least one recorded command that exited 0 and
+that Graft or a harness ran, so a note alone (`--note "checked"`) or an
+attested run (`--attach --exit 0`) doesn't pass.
+`secretFiles` adds repo-specific globs to the credential guard; `graft init`
+doesn't write it, add it when the repo has its own credential file names.
+`behaviorFiles` lists globs that `graft check` must treat as behavior even
+though they look mechanical, such as a schema or spec kept in Markdown.
+`trailers` adds trailers to every landed commit, with `$NAME` or `${NAME}`
+filled from the environment, so the lines you would otherwise pass with
+`--trailer` on every land cannot be forgotten:
+
+```json
+{ "version": 1, "requireEvidence": "command", "trailers": ["Claude-Session: https://claude.ai/code/session_${CLAUDE_CODE_REMOTE_SESSION_ID#cse_}"] }
+```
+
+A trailer whose variable is not set is left out of that commit, and `land`
+says so, rather than written with an empty value. `${NAME#prefix}` and
+`${NAME%suffix}` strip a literal affix, as in `sh`, for the case above where
+the variable carries an id in one spelling and the link needs another.
+`captureCommands` lists extra regular expressions for commands the capture
+hooks record on top of the built-in test, build, lint and type-check patterns.
+`checkCommands` lists regular expressions for the commands `graft check
+--rerun` may run again; unset means every recorded passing command.
+[docs/CHANGE.md](docs/CHANGE.md#where-it-lives) covers what survives rebases,
+amends, and squashes.
 
 ## Capture without ritual
 
@@ -96,6 +153,51 @@ remembers Graft:
 The hooks run `graft`, so it has to be on PATH. `graft init --no-hooks` skips
 them. Claude Code runs project hooks only after you trust the folder.
 
+## Verify at the pull request
+
+A `[pass]` in a record is the author's word. `graft check` makes it a fact
+where a human merges. The shortest route is the reusable action, which
+`graft init --ci` writes into `.github/workflows/graft-check.yml`:
+
+```yaml
+on: pull_request
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      # your install step (npm ci, go mod download, ...), so recorded commands can run
+      - uses: FourShore/Graft@main   # pin to a tag or SHA to fix the version
+```
+
+The action installs Graft, fetches the notes, and runs the check against the
+pull request's base with annotations and a step summary. It re-runs recorded
+commands only for branches of the same repository, since a fork's commit
+messages are text a stranger wrote; `rerun: "false"` never re-runs, and
+`checkCommands` in the policy can restrict what is re-run further. The same
+check runs from a shell:
+
+```
+graft check --base origin/main            # every behavior change needs evidence that meets the policy
+graft check --base origin/main --rerun    # and every recorded passing command is run again, here
+```
+
+It walks `base..HEAD`, groups each commit's files into behavior, tests and
+mechanical, and fails when a commit that changed behavior has no record, no
+evidence, or (under `requireEvidence: "command"`) no passing command that
+Graft or a harness ran, and when a commit touched files a policy rule covers
+without a passing run of every command the rule names. Commits that only
+touch tests, docs or lockfiles need nothing. With `--rerun` each distinct
+recorded passing command, attested ones included, runs once from the root of
+the current checkout, by its current catalog definition when it was recorded
+by name, and a non-zero exit fails the check with the output. A recorded
+`graft check --rerun` is run but does not re-run anything itself. A commit
+whose trailers promise evidence that only the git note holds fails as "note
+missing" and says to fetch `refs/notes/graft`, rather than as a commit with
+none. `--base main` resolves to `origin/main` in a clone that has no local
+`main`, which is every CI runner.
+
 ## Use it from the shell
 
 ```
@@ -105,7 +207,6 @@ graft evidence test                     # a command the policy names, run by nam
 graft evidence --label "unit tests" -- npm test
 graft evidence --note "Hit the endpoint 200 times; 429 after 100 as expected"
 graft land src/api.ts src/api.test.ts -m "Add rate limiting"
-graft sync
 ```
 
 `start --ref` records where the task came from (a thread, issue or ticket
@@ -175,78 +276,47 @@ Evidence:
 Graft-Change: m4z1gs7jgdyp3pj2za9c
 Graft-Task: Add rate limiting to the public API
 Graft-Author: agent:claude-code
-Graft-Model: example-model-1
 Graft-Evidence: 1 command, 1 passed; 1 note
 ```
 
-The message carries the task, plan and evidence list, so any clone and
-GitHub's commit view show them. The command output is a note on
-`refs/notes/graft`.
+The message is the record: any clone and GitHub's commit view show the task,
+plan and evidence list, and every reader (`log`, `show`, `context`, `check`)
+works from it. The command output is kept in a git note on `refs/notes/graft`,
+a cache that travels only with `graft sync` (see below).
 
 A crashed session can leave a change open in `.git`. `graft start --replace`
 drops it and opens the new one; `graft status` shows what is there.
 
-## Sharing records
+## Point your agent at it
 
-The commit message travels with the commit, so the task, plan and evidence
-list reach every clone with a plain `git push`. The command output lives in a
-note, and notes don't travel on their own, so run `graft sync` after
-`git push` and after `git pull`. It fetches the remote's notes, merges them
-with yours, and pushes.
+The `AGENTS.md` section that `graft init` writes tells an agent to open a
+change before editing, record each check it runs (by name when the policy
+names commands), and commit with `graft land`. Most agent harnesses read `AGENTS.md`. Claude Code
+reads `CLAUDE.md`, so put a line containing `@AGENTS.md` in it. Pass
+`--no-agents` to `graft init` to leave the file alone.
 
-Some hosted agent sessions can only push their own branch, so their notes
-push is refused. `graft sync` says so and carries on; `graft log` and
-`graft review` rebuild the record from the message, minus the output, until
-someone runs `graft sync` from a normal clone.
-
-## Review
+Agents with MCP support can use the same steps as tools. For Claude Code:
 
 ```
-graft review
+claude mcp add graft -- graft-mcp --repo /path/to/your/repo
 ```
 
-Opens a local page, no server or account, listing recent changes ranked by how
-much attention they need. Each change shows the task, plan, and evidence
-first, then the diff grouped into behavior, tests, and mechanical files.
+Tools: `graft_start`, `graft_plan`, `graft_evidence`, `graft_note`,
+`graft_land`, `graft_sync`, `graft_status`, `graft_context`, `graft_log`, `graft_show`,
+`graft_abandon`. `graft_land` commits what's staged plus any `paths` you give
+it; `stageAll` is off by default.
 
-| Badge | Meaning |
-| --- | --- |
-| Needs reading | Behavior changed, no passing test run recorded |
-| Verified | Behavior changed, recorded test run passed |
-| Mechanical | Only tests, docs, lockfiles, or generated files changed |
-| Note missing | The commit has Graft trailers but no evidence list in its message and no note in this clone; run `graft sync` |
-| No record | No Graft record on this commit |
+## Command output and notes
 
-The badges come from file paths and recorded evidence. They say where to look
-first, not what to approve.
-
-## Verify at the pull request
-
-A `[pass]` in a record is the author's word. `graft check` makes it a fact
-where a human merges:
-
-```
-graft check --base origin/main            # every behavior change needs evidence that meets the policy
-graft check --base origin/main --rerun    # and every recorded passing command is run again, here
-```
-
-It walks `base..HEAD`, groups each commit's files the way `graft review`
-does, and fails when a commit that changed behavior has no record, no
-evidence, or (under `requireEvidence: "command"`) no passing command that
-Graft or a harness ran, and when a commit touched files a policy rule
-covers without a passing run of every command the rule names. A commit whose trailers promise evidence that only
-the git note holds fails as "note missing" and says to fetch
-`refs/notes/graft`, rather than as a commit with none. Commits that only
-touch tests, docs or lockfiles need nothing. With `--rerun` each distinct
-recorded passing command, attested ones included, runs once from the root
-of the current checkout and a non-zero exit fails the check, with the
-output; a recorded `graft check --rerun` is run but does not re-run anything
-itself. `--format github` adds annotations and a step summary. The workflow
-in [.github/workflows/graft-check.yml](.github/workflows/graft-check.yml)
-fetches the notes and runs the check on every pull request; copy it into any
-repo that uses Graft. It re-runs commands only for branches of the same
-repository, since a fork's commit messages are text a stranger wrote, and
-`checkCommands` in the policy can restrict what is re-run further.
+The commit message carries everything a reader or the check needs: the task,
+the plan, the evidence list with each command, exit code and duration, and
+the trailers. It travels with a plain `git push` and survives rebase and
+cherry-pick. The one thing it does not carry is command output, which Graft
+keeps in a git note on `refs/notes/graft` as a cache. Notes do not travel on
+their own: `graft sync` pushes and fetches them when you want the output in
+another clone, and nothing else depends on them. Some hosted agent sessions
+cannot push the notes ref at all; `graft sync` says so and carries on, and
+every reader works from the message as usual.
 
 ## Use it from code
 
@@ -259,72 +329,6 @@ await g.evidenceCommand("npm test", "unit tests");
 const { commit, record } = await g.land({ paths: ["src/api.ts"] });
 ```
 
-## Policy
-
-`.graft/policy.json`, written by `graft init`:
-
-```json
-{ "version": 1, "requireEvidence": true, "secretFiles": ["nova.json", "config/*.secret"] }
-```
-
-The repo's definition of done goes in the same file, as a catalog of named
-commands and rules that say which paths need which:
-
-```json
-{
-  "version": 1,
-  "commands": {
-    "test": "go test ./...",
-    "vet386": "env GOOS=windows GOARCH=386 go vet ./...",
-    "migrate": "hasura migrate apply --dry-run"
-  },
-  "rules": [
-    { "paths": ["**/*.go"], "require": ["test", "vet386"] },
-    { "paths": ["hasura/migrations/**"], "require": ["migrate"] }
-  ]
-}
-```
-
-`commands` names the checks once. `graft evidence test` runs one by name,
-the capture hooks record a typed command that matches one under its name
-(so `cd /abs/repo && go test ./...` counts as `test`), and `graft check
---rerun` runs the name's current definition, so a command can change
-without invalidating history. `rules` are checked by `land` against the
-staged files and by `check` against each commit: a change that touches a
-file matching `paths` must carry a passing run, by Graft or a harness and
-not attested, of every name in `require`. `land` refuses otherwise and
-says which name to run; `check` fails the commit. A rule that names a
-command the catalog does not define is a policy error. This is how the
-command list in a repo's CLAUDE.md becomes something the gate enforces
-rather than prose.
-
-Set `requireEvidence` to `false` to turn off the landing gate for a repo, or
-to `"command"` to require at least one recorded command that exited 0 and
-that Graft or a harness ran, so a note alone (`--note "checked"`) or an
-attested run (`--attach --exit 0`) doesn't pass.
-`secretFiles` adds repo-specific globs to the credential guard; `graft init`
-doesn't write it, add it when the repo has its own credential file names.
-`behaviorFiles` lists globs that `graft review` must treat as behavior even
-though they look mechanical, such as a schema or spec kept in Markdown.
-`trailers` adds trailers to every landed commit, with `$NAME` or `${NAME}`
-filled from the environment, so the lines you would otherwise pass with
-`--trailer` on every land cannot be forgotten:
-
-```json
-{ "version": 1, "requireEvidence": "command", "trailers": ["Claude-Session: https://claude.ai/code/session_${CLAUDE_CODE_REMOTE_SESSION_ID#cse_}"] }
-```
-
-A trailer whose variable is not set is left out of that commit, and `land`
-says so, rather than written with an empty value. `${NAME#prefix}` and
-`${NAME%suffix}` strip a literal affix, as in `sh`, for the case above where
-the variable carries an id in one spelling and the link needs another.
-`captureCommands` lists extra regular expressions for commands the capture
-hooks record on top of the built-in test, build, lint and type-check patterns.
-`checkCommands` lists regular expressions for the commands `graft check
---rerun` may run again; unset means every recorded passing command.
-[docs/CHANGE.md](docs/CHANGE.md#where-it-lives) covers what survives rebases,
-amends, and squashes.
-
 ## Roadmap
 
 | Phase | What | Status |
@@ -332,7 +336,7 @@ amends, and squashes.
 | 0 | Change records on plain git: spec, CLI, MCP server | done |
 | 1 | Instant workspaces: copy-on-write checkouts handed to agents through an API | next |
 | 2 | Optimistic merge: concurrent landing, conflicts as data an agent can resolve, post-merge checks | |
-| 3 | History as a query service; review with re-run evidence and a server-backed queue | started (`graft review`) |
+| 3 | History as a query service: CI-verified evidence as a second tier, changes that span repos, the artifact a commit produced | next after 0.1 |
 
 Phases 1 to 3 need a server. Phase 0 doesn't, on purpose, so the record format
 gets real use before anything depends on it.
@@ -344,7 +348,7 @@ npm workspace, three packages:
 | Package | What |
 | --- | --- |
 | `packages/core` (`@fourshore/graft-core`) | Record model, git plumbing, start/evidence/land/log/sync |
-| `packages/review` (`@fourshore/graft-review`) | Review page and local server |
+| `packages/review` (`@fourshore/graft-review`) | Triage of a diff by evidence, and `graft check` |
 | `packages/cli` (`@fourshore/graft`) | `graft` and `graft-mcp` |
 
 ```
@@ -353,7 +357,7 @@ cd Graft
 npm install
 npm run build
 npm test
-npm link --workspace packages/cli   # point `graft` at this checkout
+node packages/cli/dist/cli.js       # run `graft` from this checkout
 ```
 
 Release: `npm run release -- patch` bumps all packages, commits, and tags.

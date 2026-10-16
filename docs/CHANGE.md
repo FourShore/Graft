@@ -57,7 +57,6 @@ change is being made.
 | `ref` | no | Where the task came from: the thread, issue or ticket that asked for it, as a URL or id. Written as the `Graft-Task-Ref` trailer. |
 | `author.kind` | yes | `agent` or `human`. |
 | `author.name` | yes | Tool or person: `claude-code`, `cursor`, `zach`. |
-| `author.model` | no | Model identifier when the author is an agent. |
 | `startedAt`, `landedAt` | yes / on land | ISO 8601. |
 | `commit` | on land | The SHA the record was first landed on. Informational; the trailer is the durable link. After an amend or rebase the note moves with the commit but this field keeps the original SHA, so readers take the commit from where the note is attached, never from this field. |
 | `evidence[]` | yes (may be empty) | Ordered list of what was done to verify the change. |
@@ -101,14 +100,14 @@ open per worktree.
 
 ### Landed
 
-On land, the record is written to two places in the commit, so that a reader
-with plain git sees the important part and a reader with Graft sees all of it.
+On land, the record is the commit message, and the command output is cached
+in a git note.
 
-**1. The commit message: trailers, plus `Plan:` and `Evidence:` blocks in the
-body.** These survive everything git does to a commit: rebase, cherry-pick,
-squash (if the message is kept), `git log --grep`, GitHub's commit view. They
-also need no extra ref to push, so they are the part of the record that is
-guaranteed to travel.
+**1. The commit message is the record: trailers, plus `Plan:` and `Evidence:`
+blocks in the body.** These survive everything git does to a commit: rebase,
+cherry-pick, squash (if the message is kept), `git log --grep`, GitHub's
+commit view. They need no extra ref to push, so they travel with the commit,
+and every reader (`log`, `show`, `context`, `check`) works from them alone.
 
 ```
 Add rate limiting to the public API
@@ -123,7 +122,6 @@ Evidence:
 Graft-Change: m4z1gs7jgdyp3pj2za9c
 Graft-Task: Add rate limiting to the public API
 Graft-Author: agent:claude-code
-Graft-Model: example-model-1
 Graft-Evidence: 1 command, 1 passed; 1 note
 ```
 
@@ -133,7 +131,6 @@ Graft-Evidence: 1 command, 1 passed; 1 note
 | `Graft-Task` | The task, collapsed to one line. |
 | `Graft-Task-Ref` | Present when the change has a `ref`: the URL or id of what asked for it. |
 | `Graft-Author` | `<kind>:<name>`. |
-| `Graft-Model` | Present only for agents with a known model. |
 | `Graft-Evidence` | Human-readable summary of the evidence list. |
 
 Other trailers can be added at land time (`graft land --trailer "Co-Authored-By: ..."`,
@@ -150,17 +147,22 @@ the bracket means a command or note containing `: ` is read back exactly.
 Labels lose any square brackets; commands and notes are collapsed to one line
 and cut at 200 characters. Output is not in the message.
 
-Readers rebuild a record from the message alone when the note is missing
-(`graft log`, `graft show`, `graft review` all do): the trailers give the id,
-task and author, the blocks give the plan and evidence, timestamps fall back
-to the commit date, and command output is empty. Such a record is marked as
-coming from the message so a reader knows the output is elsewhere.
+Readers build the record from the message: the trailers give the id, task,
+ref and author, the blocks give the plan and evidence, timestamps fall back
+to the commit date, and command output is empty unless the note is in the
+clone. `recordSource` says which was read, for tools that want to show
+output when they have it.
 
 **2. The full record as a git note** on `refs/notes/graft`, keyed by commit SHA,
-holding the JSON above verbatim. Notes carry the parts that do not belong in a
-commit message: full evidence output and timestamps.
+holding the JSON above verbatim. The note is a cache: it carries what does not
+belong in a commit message, the command output and exact timestamps, and
+nothing requires it. The one exception is a record from before 0.0.6, which
+had no `Evidence:` block, so its evidence exists only in the note; `graft
+check` names such a commit "note missing" rather than failing it as having
+none.
 
-Notes are a separate ref, so they have to be pushed and fetched on purpose:
+Notes are a separate ref, so they have to be pushed and fetched on purpose,
+and only when the output is wanted in another clone:
 
 ```
 git push origin refs/notes/graft
@@ -170,7 +172,8 @@ git fetch origin refs/notes/graft:refs/notes/graft
 `graft sync` does this: it fetches the remote's notes, merges them with
 `cat_sort_uniq` (so two clones' records combine rather than overwrite), and
 pushes. `graft init` adds the notes ref to the remote's fetch refspec so a
-plain `git fetch` brings records along too.
+plain `git fetch` brings the output along too. A clone that cannot push the
+ref (some hosted agent sessions) loses nothing but the output.
 
 ### What survives what
 
@@ -208,7 +211,7 @@ matches a file name anywhere in the tree. The same list decides whose output
 is withheld: a command that names one of these files keeps its command line,
 exit code and duration in the record, and its output is replaced with a
 line saying why. `behaviorFiles`, optional, is a
-list of globs (same rules) for files `graft review` must group as behavior
+list of globs (same rules) for files `graft check` must group as behavior
 even though its heuristics would file them under mechanical, such as a schema
 or a spec kept in Markdown. `trailers`, optional, is a list of `Key: value`
 lines added to every landed commit after Graft's own trailers, with `$NAME`

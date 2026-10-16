@@ -1,7 +1,9 @@
 # Verifies the Graft records on a pull request: every commit that changed
 # behavior must carry evidence that meets .graft/policy.json, and the recorded
 # commands are re-run on the merge commit so a [pass] is a fact, not a claim.
-# Copy this file into any repo that uses Graft; nothing here is specific to Graft itself.
+# Other repos should not copy this file: `graft init --ci` writes a workflow that
+# uses the reusable action (action.yml at the root of this repo). This one builds
+# Graft from source first, so the check runs on the code under review.
 name: Graft check
 
 on:

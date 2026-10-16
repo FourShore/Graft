@@ -20,7 +20,8 @@ knows why the code is the way it is.
   `graft status` lists the names, and they are what the landing gate checks.
 - Commit with `graft land <paths> -m "<title>"`, not `git commit`. It refuses to
   land without evidence.
-- After `git push`, run `graft sync` so the full records reach the remote.
+- The record travels in the commit message. `graft sync` after a push is optional;
+  it moves the command output, which lives in a git note.
 - Before editing a file, run `graft context <paths>` to read the changes that
   touched it. To learn why code is the way it is, run `graft log` or `graft show <id>`.
 
