@@ -776,6 +776,58 @@ describe("log and show", () => {
   });
 });
 
+describe("evidence lines from Graft 0.0.6", () => {
+  it("reads the label that 0.0.6 wrote outside the bracket, and leaves current-format lines alone", async () => {
+    await writeFile(join(dir, "a.go"), "package a\n");
+    sh(["add", "-A"]);
+    const old = [
+      "old style",
+      "",
+      "Evidence:",
+      "  [pass] go test: go test ./... (3.1s)",
+      "  [pass] vet386: env GOOS=windows GOARCH=386 go vet ./... (1.0s)",
+      "  [pass] echo status: ok (0.0s)",
+      "  [fail 1] golangci-lint run (2.0s)",
+      "  [note] Manual: clicked through the settings page",
+      "",
+      "Graft-Change: m4z1gs7jgdyp3pj2za9c",
+      "Graft-Task: old style",
+      "Graft-Author: agent:nova",
+      "Graft-Evidence: 3 commands, 2 passed; 1 note",
+      "",
+    ].join("\n");
+    execFileSync("git", ["commit", "-q", "-F", "-"], { cwd: dir, input: old });
+    const rebuilt = (await graft.show(sh(["rev-parse", "HEAD"])))?.record?.evidence;
+    expect(rebuilt).toMatchObject([
+      { kind: "command", command: "go test ./...", label: "go test", exitCode: 0, durationMs: 3100 },
+      { kind: "command", command: "env GOOS=windows GOARCH=386 go vet ./...", label: "vet386" },
+      { kind: "command", command: "echo status: ok", label: undefined },
+      { kind: "command", command: "golangci-lint run", label: undefined, exitCode: 1 },
+      { kind: "note", text: "Manual: clicked through the settings page", label: undefined },
+    ]);
+
+    // A block with any labelled bracket is the current format, where `: ` in a command is literal.
+    await writeFile(join(dir, "a.go"), "package b\n");
+    sh(["add", "-A"]);
+    const current = [
+      "new style",
+      "",
+      "Evidence:",
+      "  [pass unit tests] npm test (1.0s)",
+      "  [pass] go test: go test ./... (3.1s)",
+      "",
+      "Graft-Change: m4z1gs7jgdyp3pj2za9d",
+      "Graft-Task: new style",
+      "Graft-Author: agent:nova",
+      "Graft-Evidence: 2 commands, 2 passed",
+      "",
+    ].join("\n");
+    execFileSync("git", ["commit", "-q", "-F", "-"], { cwd: dir, input: current });
+    const kept = (await graft.show(sh(["rev-parse", "HEAD"])))?.record?.evidence;
+    expect(kept?.[1]).toMatchObject({ command: "go test: go test ./...", label: undefined });
+  });
+});
+
 describe("init", () => {
   it("sets notes config, adds the fetch refspec, writes a policy file, and is idempotent", async () => {
     const remote = await mkdtemp(join(tmpdir(), "graft-remote-"));
