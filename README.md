@@ -176,7 +176,8 @@ does, and fails when a commit that changed behavior has no record, no
 evidence, or (under `requireEvidence: "command"`) no passing command.
 Commits that only touch tests, docs or lockfiles need nothing. With
 `--rerun` each distinct recorded passing command runs once on the current
-checkout and a non-zero exit fails the check, with the output. `--format
+checkout and a non-zero exit fails the check, with the output; a recorded
+`graft check --rerun` is run but does not re-run anything itself. `--format
 github` adds annotations and a step summary. The workflow in
 [.github/workflows/graft-check.yml](.github/workflows/graft-check.yml) runs
 it on every pull request; copy it into any repo that uses Graft. It re-runs

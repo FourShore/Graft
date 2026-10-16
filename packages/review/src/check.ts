@@ -43,7 +43,12 @@ export interface CheckResult {
   findings: Finding[];
   /** False when any finding blocks. */
   ok: boolean;
+  /** Set when `rerun` was asked for but this check is itself a re-run command of an outer check, so it ran nothing. */
+  nested?: boolean;
 }
+
+/** Set in the environment of every re-run command, so a recorded `graft check --rerun` does not re-run itself without end. */
+export const RERUN_ENV = "GRAFT_CHECK_RERUN";
 
 /**
  * Verify a branch's records the way a reviewer would at merge time: every
@@ -82,7 +87,8 @@ export async function runCheck(opts: CheckOptions): Promise<CheckResult> {
   }
 
   const reruns: Rerun[] = [];
-  if (opts.rerun) {
+  const nested = Boolean(opts.rerun && process.env[RERUN_ENV]);
+  if (opts.rerun && !nested) {
     const byCommand = new Map<string, string[]>();
     for (const c of commits) {
       for (const ev of passingCommands(c.entry)) {
@@ -97,13 +103,22 @@ export async function runCheck(opts: CheckOptions): Promise<CheckResult> {
         continue;
       }
       const started = Date.now();
-      const { exitCode, output } = await runShell(command, topLevel);
+      const previous = process.env[RERUN_ENV];
+      process.env[RERUN_ENV] = "1";
+      let result: { exitCode: number; output: string };
+      try {
+        result = await runShell(command, topLevel);
+      } finally {
+        if (previous === undefined) delete process.env[RERUN_ENV];
+        else process.env[RERUN_ENV] = previous;
+      }
+      const { exitCode, output } = result;
       reruns.push({ command, commits: shas, exitCode, durationMs: Date.now() - started, output });
       if (exitCode !== 0) findings.push({ kind: "rerun-failed", command, commits: shas, exitCode, output });
     }
   }
   const ok = findings.every((f) => f.kind === "rerun-skipped");
-  return { base: opts.base, head, policy, commits, reruns, findings, ok };
+  return { base: opts.base, head, policy, commits, reruns, findings, ok, ...(nested ? { nested: true } : {}) };
 }
 
 function passingCommands(entry: LogEntry): CommandEvidence[] {
@@ -133,6 +148,7 @@ export function renderCheckText(r: CheckResult): string {
     lines.push(`  ${c.ok ? "ok  " : "FAIL"} ${c.entry.commit.slice(0, 10)}  ${c.entry.title}`);
     lines.push(`       ${c.triage.risk} · ${who} · ${files} · ${ev}`);
   }
+  if (r.nested) lines.push("", "Re-run skipped: this check is itself a command an outer graft check is re-running.");
   if (r.reruns.length) {
     lines.push("", `Re-ran ${r.reruns.length} recorded command${r.reruns.length === 1 ? "" : "s"} on this checkout:`);
     for (const x of r.reruns) {

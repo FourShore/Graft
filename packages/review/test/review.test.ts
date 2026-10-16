@@ -354,6 +354,32 @@ describe("check", () => {
     expect(r.ok).toBe(true);
   });
 
+  it("does not re-run when it is itself a re-run command of an outer check", async () => {
+    const base = await seed();
+    await graft.start({ task: "x" });
+    await writeFile(join(dir, "src", "a.ts"), "export const a = 5;\n");
+    await graft.evidenceCommand("echo once");
+    await graft.land({ all: true });
+    process.env.GRAFT_CHECK_RERUN = "1";
+    try {
+      const r = await runCheck({ repo: dir, base, rerun: true });
+      expect(r.reruns).toEqual([]);
+      expect(r.nested).toBe(true);
+      expect(r.ok).toBe(true);
+      expect(renderCheckText(r)).toContain("Re-run skipped");
+    } finally {
+      delete process.env.GRAFT_CHECK_RERUN;
+    }
+    // The outer check hands the marker to the commands it runs.
+    await graft.start({ task: "y" });
+    await writeFile(join(dir, "src", "a.ts"), "export const a = 6;\n");
+    await graft.evidenceCommand("test -n \"$GRAFT_CHECK_RERUN\" && exit 7; exit 0");
+    await graft.land({ all: true });
+    const outer = await runCheck({ repo: dir, base, rerun: true });
+    expect(outer.reruns.find((x) => x.command.startsWith("test -n"))?.exitCode).toBe(7);
+    expect(process.env.GRAFT_CHECK_RERUN).toBeUndefined();
+  });
+
   it("is empty and passing when the branch has no commits past the base", async () => {
     const base = await seed();
     const r = await runCheck({ repo: dir, base });
