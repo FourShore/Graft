@@ -18,12 +18,12 @@ export class GitError extends Error {
 export class Git {
   constructor(public readonly cwd: string) {}
 
-  async run(args: string[], opts: { input?: string } = {}): Promise<string> {
+  async run(args: string[], opts: { input?: string; env?: Record<string, string> } = {}): Promise<string> {
     try {
       const child = execFileAsync("git", args, {
         cwd: this.cwd,
         maxBuffer: 64 * 1024 * 1024,
-        env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+        env: { ...process.env, GIT_TERMINAL_PROMPT: "0", ...opts.env },
       });
       if (opts.input !== undefined && child.child.stdin) {
         child.child.stdin.end(opts.input);

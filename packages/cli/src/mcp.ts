@@ -38,16 +38,17 @@ server.registerTool(
     inputSchema: {
       task: z.string().describe("The task, in the words you were given"),
       plan: z.string().optional().describe("How you intend to do it"),
-      ref: z.string().optional().describe("Where the task came from: the thread, issue or ticket URL"),
+      ref: z.string().optional().describe("Where the task came from: the thread, issue or ticket URL (default: the policy's ref template)"),
+      id: z.string().optional().describe("Reuse an existing change id, so one change lands in several repositories"),
       author: z.string().optional().describe("Your agent name, e.g. claude-code"),
       replace: z
         .boolean()
         .optional()
-        .describe("Drop a change another session left open instead of failing"),
+        .describe("Abandon a change another session left open (its attempt is kept) instead of failing"),
     },
   },
-  async ({ task, plan, ref, author, replace }) =>
-    guarded(() => graft.start({ task, plan, ref, author: { name: author, kind: "agent" }, replace })),
+  async ({ task, plan, ref, id, author, replace }) =>
+    guarded(() => graft.start({ task, plan, ref, id, author: { name: author, kind: "agent" }, replace })),
 );
 
 server.registerTool(
@@ -161,8 +162,28 @@ server.registerTool(
 
 server.registerTool(
   "graft_abandon",
-  { description: "Drop the open change without committing.", inputSchema: {} },
-  async () => guarded(() => graft.abandon()),
+  {
+    description:
+      "Close the open change without committing. What it tried (plan, reason, evidence) is kept and lands with the next change as a Tried: block, so the next reader knows what did not work. Give a reason.",
+    inputSchema: {
+      reason: z.string().optional().describe("Why this attempt is being abandoned"),
+      discard: z.boolean().optional().default(false).describe("Keep nothing; the attempt is not carried into the next land"),
+    },
+  },
+  async ({ reason, discard }) => guarded(() => graft.abandon({ reason, discard })),
+);
+
+server.registerTool(
+  "graft_revert",
+  {
+    description:
+      "Open a change that undoes a landed one: runs git revert --no-commit on its commit and records what is being reverted and why. Then record evidence and land as usual.",
+    inputSchema: {
+      ref: z.string().describe("The change id or commit to undo"),
+      reason: z.string().optional().describe("Why it is being reverted; becomes the plan"),
+    },
+  },
+  async ({ ref, reason }) => guarded(() => graft.revert(ref, { reason })),
 );
 
 const transport = new StdioServerTransport();

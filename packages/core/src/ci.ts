@@ -3,8 +3,12 @@ import { dirname, join } from "node:path";
 
 export const CI_WORKFLOW_PATH = ".github/workflows/graft-check.yml";
 
-/** Where the Graft check action lives; pin to a tag or SHA in a repo that wants a fixed version. */
-export const CHECK_ACTION = "FourShore/Graft@main";
+/**
+ * Where the Graft check action lives. `v0` moves with every 0.x release, so a
+ * workflow follows fixes without tracking an unreleased branch; a repo that
+ * wants one exact version pins `@v0.1.0` or a commit SHA instead.
+ */
+export const CHECK_ACTION = "FourShore/Graft@v0";
 
 export interface CiResult {
   /** written: the workflow was created; present: a file already exists there and was left alone. */

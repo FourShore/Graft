@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { readFile } from "node:fs/promises";
 import { Command } from "commander";
-import { Graft, GraftError, handleClaudeCodeEvent, shellJoin, type ClaudeCodeEvent, type LogEntry } from "@fourshore/graft-core";
+import { Graft, GraftError, attemptLines, handleClaudeCodeEvent, shellJoin, type ClaudeCodeEvent, type LogEntry } from "@fourshore/graft-core";
 import type { ChangeRecord } from "@fourshore/graft-core";
 import { renderCheckGithub, renderCheckText, runCheck } from "@fourshore/graft-review";
 import { createRequire } from "node:module";
@@ -89,15 +89,17 @@ program
   .description("open a change: record what you were asked to do")
   .argument("<task...>", "the task, in your own words")
   .option("--plan <plan>", "how you intend to do it")
-  .option("--ref <ref>", "where the task came from: the thread, issue or ticket URL")
+  .option("--ref <ref>", "where the task came from: the thread, issue or ticket URL (default: the policy's ref template)")
+  .option("--id <id>", "reuse an existing change id, so one change lands in several repositories")
   .option("--author <name>", "who is doing the work (default: from environment)")
   .option("--human", "mark the author as a human rather than an agent")
-  .option("--replace", "drop a change another session left open, then start this one")
+  .option("--replace", "abandon a change another session left open (its attempt is kept), then start this one")
   .action(async (task: string[], o) => {
     const record = await graft().start({
       task: task.join(" "),
       plan: o.plan,
       ref: o.ref,
+      id: o.id,
       author: { name: o.author, kind: o.human ? "human" : undefined },
       replace: o.replace,
     });
@@ -233,10 +235,30 @@ program
 
 program
   .command("abandon")
-  .description("drop the open change without committing")
-  .action(async () => {
-    const record = await graft().abandon();
-    out(record, record ? `Abandoned ${record.id}` : "No change was open.");
+  .description("close the open change without committing; what it tried is kept and lands with the next change as a Tried: block")
+  .option("--reason <why>", "why it is being abandoned, kept with the attempt")
+  .option("--discard", "keep nothing: the attempt is not carried into the next land")
+  .action(async (o) => {
+    const g = graft();
+    const record = await g.abandon({ reason: o.reason, discard: o.discard });
+    if (!record) {
+      out(record, "No change was open.");
+      return;
+    }
+    const kept = (await g.attempts()).some((a) => a.id === record.id);
+    out(record, `Abandoned ${record.id}${kept ? "; kept as an attempt for the next land" : o.discard ? "" : " (nothing to keep: no plan, reason or evidence)"}`);
+  });
+
+program
+  .command("revert")
+  .description("open a change that undoes a landed one: git revert --no-commit, with a record naming what it reverts and why; then record evidence and land")
+  .argument("<ref>", "a change id or commit")
+  .option("--reason <why>", "why it is being reverted; becomes the plan")
+  .option("--author <name>", "who is doing the work (default: from environment)")
+  .option("--human", "mark the author as a human rather than an agent")
+  .action(async (ref: string, o) => {
+    const r = await graft().revert(ref, { reason: o.reason, author: { name: o.author, kind: o.human ? "human" : undefined } });
+    out(r, `Reverted ${r.commit.slice(0, 10)} "${r.title}" in the working tree and opened change ${r.record.id}.\nRecord evidence, then graft land -a.`);
   });
 
 program
@@ -247,7 +269,9 @@ program
     const record = await g.status();
     const names = Object.entries(await g.catalog());
     const commands = names.length ? `\ncommands: ${names.map(([n, c]) => `${n} (${c})`).join(", ")}` : "";
-    out(record, (record ? formatRecord(record) : "No change is open.") + commands);
+    const waiting = await g.attempts();
+    const attempts = waiting.length ? `\nattempts waiting for the next land: ${waiting.map((a) => `${a.id} (${a.reason ?? a.task})`).join(", ")}` : "";
+    out({ open: record, commands: await g.catalog(), attempts: waiting }, (record ? formatRecord(record) : "No change is open.") + commands + attempts);
   });
 
 program
@@ -295,8 +319,32 @@ program
   });
 
 program
+  .command("artifact")
+  .description("record a file this change produced, by SHA-256, so a build found in the field resolves to its change (graft show <sha256>)")
+  .argument("[path]", "the file to hash")
+  .option("--sha256 <hex>", "the hash, for a file that is not here (with --name)")
+  .option("--name <name>", "the file name to record (default: the path's base name)")
+  .action(async (path: string | undefined, o) => {
+    const a = await graft().recordArtifact({ path, sha256: o.sha256, name: o.name });
+    out(a, `Recorded artifact ${a.name} sha256:${a.sha256}`);
+  });
+
+program
+  .command("export")
+  .description("every recorded change with its diff, newest first, as JSON lines: the (task, diff, evidence) rows this repository has accumulated")
+  .option("-n, --limit <n>", "most commits to export (default: all)")
+  .option("--all", "include commits without a change record")
+  .option("--no-diff", "leave the diff out")
+  .action(async (o) => {
+    const limit = o.limit === undefined ? Infinity : Number(o.limit);
+    if (limit !== Infinity && (!Number.isInteger(limit) || limit < 1)) throw new GraftError(`--limit must be a positive integer, got ${o.limit}.`);
+    const rows = await graft().export({ limit, all: Boolean(o.all), diff: o.diff });
+    for (const row of rows) process.stdout.write(JSON.stringify(row) + "\n");
+  });
+
+program
   .command("show")
-  .description("show one change by id or commit")
+  .description("show one change by id, commit, or the SHA-256 of an artifact it recorded")
   .argument("<ref>")
   .action(async (ref: string) => {
     const entry = await graft().show(ref);
@@ -349,14 +397,17 @@ function formatRecord(r: ChangeRecord): string {
     `change: ${r.id}`,
     `task:   ${r.task}`,
     ...(r.ref ? [`ref:    ${r.ref}`] : []),
+    ...(r.reverts ? [`reverts: ${r.reverts}`] : []),
+    ...(r.artifacts ?? []).map((a) => `artifact: ${a.name} sha256:${a.sha256}`),
     `author: ${r.author.kind}:${r.author.name}`,
   ];
   if (r.plan) lines.push(`plan:   ${r.plan.split("\n").join("\n        ")}`);
+  if (r.attempts?.length) lines.push(`tried:  ${attemptLines(r.attempts).map((l) => l.trim()).join("\n        ")}`);
   lines.push(`evidence: ${r.evidence.length ? "" : "none"}`);
   for (const ev of r.evidence) {
     lines.push(
       ev.kind === "command"
-        ? `  ${ev.attested ? (ev.exitCode === 0 ? "attested" : `ATTESTED FAIL ${ev.exitCode}`) : ev.exitCode === 0 ? "pass" : "FAIL"}  ${ev.command}${tag(ev.name, ev.label)}`
+        ? `  ${ev.attested ? (ev.exitCode === 0 ? "attested" : `ATTESTED FAIL ${ev.exitCode}`) : ev.exitCode !== 0 ? "FAIL" : ev.stale ? "stale" : "pass"}  ${ev.command}${tag(ev.name, ev.label)}`
         : `  note  ${ev.text}${ev.label ? `  [${ev.label}]` : ""}`,
     );
   }

@@ -61,6 +61,9 @@ change is being made.
 | `commit` | on land | The SHA the record was first landed on. Informational; the trailer is the durable link. After an amend or rebase the note moves with the commit but this field keeps the original SHA, so readers take the commit from where the note is attached, never from this field. |
 | `evidence[]` | yes (may be empty) | Ordered list of what was done to verify the change. |
 | `capturedBy` | no | The harness whose hook opened the change (`claude-code`, from the prompt) rather than an explicit `graft start`. A later `graft start` adopts such a change, naming the task and keeping its evidence. |
+| `attempts[]` | no | Changes abandoned in this worktree since the last land, each with its `id`, `task`, `plan`, `reason`, `startedAt`, `abandonedAt` and `evidence`: the plans that did not work and why. Written as the `Tried:` block. |
+| `reverts` | no | The change id or commit this change undoes, when it was opened by `graft revert`. Written as the `Graft-Reverts` trailer. |
+| `artifacts[]` | no | Files the change produced, each `{ "name", "sha256" }` (lower-case hex), recorded with `graft artifact`. One `Graft-Artifact` trailer each, so a build found in the field resolves to its change with `graft show <sha256>`. |
 
 ### Evidence
 
@@ -81,12 +84,37 @@ Two kinds in version 1.
   command that matched the catalog); the message line carries the name in
   place of any free label, so a record rebuilt from the message still
   satisfies the rules that ask for that name and `graft check --rerun` can
-  run the name's current definition without the note.
+  run the name's current definition without the note. `tree` is the hash of
+  the working tree (tracked and untracked files, ignored ones left out) when
+  the run finished, hashed from an empty scratch index so it reflects
+  content, not a stat cache; it stays in the note. At land, a passing run
+  that a rule relies on is compared with what is being committed: when a
+  file the rule covers differs from the run's tree, the run is `stale`, it
+  does not satisfy the rule, and `land` refuses unless another run of the
+  same name is fresh (or `--allow-no-evidence` is passed). A stale run that
+  lands is written as `[stale name]` in the message, so a record rebuilt
+  from the message still reads it as not covering the rule. A run with no
+  `tree`, or whose tree this clone no longer has, is taken as fresh:
+  staleness is asserted only when it is certain.
 - `note`: free text for verification that did not come from a command: a manual
   check, a link to a CI run, a screenshot description.
 
 Evidence is append-only while a change is open. Tools must not edit or drop
 evidence; a failed run stays in the record next to the later run that passed.
+
+### Attempts
+
+`graft abandon` closes a change without landing it. Git keeps nothing of such
+a change; Graft keeps what it tried. The abandoned record becomes an attempt,
+stored at `$GIT_DIR/graft/attempts.json` beside the open change, and the next
+change that lands in that worktree carries every waiting attempt in its
+`attempts` list and its `Tried:` block, then the file is cleared. `graft start
+--replace` abandons the change it replaces the same way, with the reason
+"replaced by a new start". A change with no plan, no reason and no evidence
+tried nothing, so nothing is kept; `graft abandon --discard` keeps nothing on
+purpose. The next land is the right place because the attempts are, in time
+and usually in subject, the dead ends on the way to it; the reason says when
+they were not.
 
 ## Where it lives
 
@@ -131,8 +159,10 @@ Graft-Evidence: 1 command, 1 passed; 1 note
 | `Graft-Change` | The change id. **The only trailer readers must rely on.** |
 | `Graft-Task` | The task, collapsed to one line. |
 | `Graft-Task-Ref` | Present when the change has a `ref`: the URL or id of what asked for it. |
+| `Graft-Reverts` | Present when the change was opened by `graft revert`: the change id or commit it undoes. |
+| `Graft-Artifact` | One per recorded artifact: `sha256:<64 hex> <name>`. The only trailer that may repeat; readers collect every line. |
 | `Graft-Author` | `<kind>:<name>`. |
-| `Graft-Evidence` | Human-readable summary of the evidence list. |
+| `Graft-Evidence` | Human-readable summary of the evidence list: commands, how many passed, and how many of those were stale (`2 commands, 1 passed, 1 stale`), then notes. A stale run is not counted as passed. |
 
 Other trailers can be added at land time (`graft land --trailer "Co-Authored-By: ..."`,
 or `trailers` on `graft_land`); they go after Graft's own. The `Graft-` prefix
@@ -140,16 +170,19 @@ is reserved.
 
 The commit title is the task truncated to 72 characters unless the author gives
 a better one. The plan, if any, goes in the body under `Plan:` so it reads well
-in any git tool. The evidence list goes under `Evidence:`, one line per entry.
-The bracket holds the status, `pass`, `fail <exit code>` or `note`, and then
-the label if there is one (`[pass unit tests]`, `[note manual]`); after it
+in any git tool. Attempts, if any, go under `Tried:`, one line per attempt:
+`[<change id>] <task>: <reason, or the plan when no reason was given>
+(<evidence summary>)`, and a record rebuilt from the message keeps that line
+as the attempt's `summary`. The evidence list goes under `Evidence:`, one line per entry.
+The bracket holds the status, `pass`, `stale`, `fail <exit code>` or `note`,
+and then the label if there is one (`[pass unit tests]`, `[note manual]`); after it
 come the command and its duration, or the note text. Keeping the label inside
 the bracket means a command or note containing `: ` is read back exactly.
 Labels lose any square brackets; commands and notes are collapsed to one line
 and cut at 200 characters. Output is not in the message.
 
 Readers build the record from the message: the trailers give the id, task,
-ref and author, the blocks give the plan and evidence, timestamps fall back
+ref, reverts and author, the blocks give the plan, attempts and evidence, timestamps fall back
 to the commit date, and command output is empty unless the note is in the
 clone. `recordSource` says which was read, for tools that want to show
 output when they have it.
@@ -217,7 +250,11 @@ even though its heuristics would file them under mechanical, such as a schema
 or a spec kept in Markdown. `trailers`, optional, is a list of `Key: value`
 lines added to every landed commit after Graft's own trailers, with `$NAME`
 and `${NAME}` expanded from the environment; a line naming an unset variable
-is left out of that commit, never written empty. `captureCommands`, optional,
+is left out of that commit, never written empty. `ref`, optional, is one
+such template for the change's `ref`, used when `graft start` is given none
+(the capture hooks never pass one), so `Graft-Task-Ref` is filled from the
+harness's session variable on every change; an unset variable leaves the
+change without a ref. `captureCommands`, optional,
 is a list of regular expressions (as strings) for commands the capture hooks
 record as evidence on top of the built-in test, build, lint and type-check
 patterns.
@@ -229,8 +266,9 @@ checks, named once, run by `graft evidence <name>`, recognised by the
 capture hooks, and re-run by `graft check --rerun` under their current
 definition. `rules`, optional, is a list of `{ "paths": [globs], "require":
 [names] }`: a change touching a file that matches `paths` must carry a
-passing, non-attested run of every named command, or `land` refuses and
-`check` fails the commit. A rule naming a command that `commands` does not
+passing, non-attested run of every named command, made on the content being
+committed (see `tree` under Evidence), or `land` refuses and `check` fails
+the commit. A rule naming a command that `commands` does not
 define makes the policy unreadable, so the mistake surfaces at once. Readers
 reject unknown policy versions. The file is committed, so changing policy is a
 reviewed change like any other.
@@ -240,7 +278,14 @@ reviewed change like any other.
 `graft log` lists commits with their trailers, loading the note when present.
 `graft show <id|sha>` finds a change by id with `git log --all --grep` on the
 `Graft-Change` trailer, so a change is findable from any branch that contains
-it, note or no note.
+it, note or no note. Given a SHA-256 (64 hex characters, with or without a
+`sha256:` prefix) it searches the `Graft-Artifact` trailers the same way.
+
+`graft export` writes every recorded change as one JSON object per line
+(`commit`, `title`, `authoredAt`, `record`, `recordSource`, `diff`), newest
+first: the (task, diff, evidence) rows a repository has accumulated, for a
+script or a model to consume. `--all` adds commits without a record; `--no-diff`
+leaves the diff out.
 
 `graft context <paths>` is the read an agent makes before editing: `git log
 --name-only -- <paths>` over the newest commits, each record read as above,

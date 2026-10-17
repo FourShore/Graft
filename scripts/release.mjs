@@ -7,7 +7,11 @@
 // the release is a recorded change like every other commit in this repo.
 //
 //   npm run release -- patch     (or minor, major, or an exact version)
-//   git push --follow-tags
+//   git push --follow-tags && git push -f origin v0
+//
+// Besides the exact tag (v0.1.1) the script moves the major tag (v0) to the
+// same commit, so `uses: FourShore/Graft@v0` in other repos' workflows follows
+// each release. A moved tag needs a forced push; --follow-tags does not move it.
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 
@@ -66,7 +70,8 @@ await graft.start({
 console.log("running build and tests as evidence...");
 const check = await graft.evidenceCommand("npm run build && npm test", "build and tests");
 if (check.exitCode !== 0) {
-  await graft.abandon();
+  // A release that failed its checks is not an attempt worth folding into the next land.
+  await graft.abandon({ discard: true });
   console.error(check.output);
   console.error("build or tests failed; nothing committed (the version files are still modified)");
   process.exit(1);
@@ -76,7 +81,10 @@ await graft.land({
   paths: ["package.json", "package-lock.json", ...workspaces.map((w) => `${w}/package.json`)],
 });
 run("git", ["tag", "-a", `v${version}`, "-m", `v${version}`]);
-console.log(`v${version} committed and tagged. Now: git push --follow-tags`);
+const major = `v${version.split(".")[0]}`;
+run("git", ["tag", "-f", major, `v${version}`]);
+console.log(`v${version} committed and tagged; ${major} now points at it.`);
+console.log(`Now: git push --follow-tags && git push -f origin ${major}`);
 
 function next(current, how) {
   if (/^\d+\.\d+\.\d+$/.test(how)) return how;

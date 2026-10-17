@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { beforeEach, describe, expect, it } from "vitest";
 import { Graft, GraftError } from "../src/graft.js";
-import { isChangeId, newChangeId, parseTrailers, shellJoin } from "../src/record.js";
+import { evidenceSummary, isChangeId, newChangeId, parseArtifactTrailers, parseTrailers, shellJoin } from "../src/record.js";
 import { evaluateRules, expandTrailers, matchCatalog, readPolicy } from "../src/policy.js";
 import { classifyCommand, relativizeCommand } from "../src/capture.js";
 import { globToRegExp, secretFilesNamed } from "../src/redact.js";
@@ -245,6 +245,38 @@ describe("policy trailers", () => {
   });
 });
 
+describe("policy ref", () => {
+  it("fills a change's ref from the policy template unless one is given or a variable is unset", async () => {
+    await mkdir(join(dir, ".graft"), { recursive: true });
+    await writeFile(join(dir, ".graft/policy.json"), JSON.stringify({ version: 1, ref: "https://x/session_${GRAFT_TEST_SESSION#cse_}" }));
+    delete process.env.GRAFT_TEST_SESSION;
+    expect((await graft.start({ task: "no var" })).ref).toBeUndefined();
+    await graft.abandon();
+    process.env.GRAFT_TEST_SESSION = "cse_42";
+    try {
+      expect((await graft.start({ task: "from policy" })).ref).toBe("https://x/session_42");
+      await graft.abandon();
+      expect((await graft.start({ task: "explicit", ref: "https://issues/7" })).ref).toBe("https://issues/7");
+      await graft.abandon();
+      // The hook's start and the later adopting start both get it.
+      await handleClaudeCodeEvent(graft, { hook_event_name: "UserPromptSubmit", prompt: "do the thing" });
+      expect((await graft.status())?.ref).toBe("https://x/session_42");
+      expect((await graft.start({ task: "named" })).ref).toBe("https://x/session_42");
+      // A change opened before the policy had a ref gets it at land.
+      const open = (await graft.status())!;
+      delete open.ref;
+      await writeFile(join(dir, ".git", "graft", "open.json"), JSON.stringify(open));
+      await writeFile(join(dir, "a.txt"), "a\n");
+      await graft.evidenceNote("ok");
+      const { record } = await graft.land({ all: true });
+      expect(record.ref).toBe("https://x/session_42");
+      expect(sh(["log", "-1", "--format=%(trailers:key=Graft-Task-Ref,valueonly)"])).toBe("https://x/session_42");
+    } finally {
+      delete process.env.GRAFT_TEST_SESSION;
+    }
+  });
+});
+
 describe("command catalog and rules", () => {
   const policy = {
     version: 1 as const,
@@ -347,6 +379,330 @@ describe("command catalog and rules", () => {
     expect(rebuilt?.record?.ref).toBe("https://example.com/thread/2");
     expect(rebuilt?.record?.evidence.map((e) => e.label)).toEqual(["test", "lint"]);
     expect(evaluateRules(await readPolicy(dir), ["src/a.ts"], rebuilt!.record!.evidence)).toEqual([]);
+  });
+});
+
+describe("attempts and reverts", () => {
+  it("keeps an abandoned attempt and folds it into the next land as a Tried: block", async () => {
+    await graft.start({ task: "add rate limiting", plan: "a global bucket" });
+    await writeFile(join(dir, "a.txt"), "a\n");
+    await graft.evidenceCommand("false", "unit tests");
+    await graft.abandon({ reason: "429s were not deterministic" });
+    expect(await graft.status()).toBeNull();
+    expect((await graft.attempts()).map((a) => [a.task, a.reason, a.evidence.length])).toEqual([["add rate limiting", "429s were not deterministic", 1]]);
+    // Nothing tried, nothing kept; --discard keeps nothing either.
+    await graft.start({ task: "idle" });
+    await graft.abandon();
+    await graft.start({ task: "secret", plan: "p" });
+    await graft.abandon({ discard: true });
+    // A replaced change is an abandoned one.
+    await graft.start({ task: "left open", plan: "half done" });
+    await graft.start({ task: "add rate limiting, per key", plan: "token bucket per key", replace: true });
+    expect((await graft.attempts()).map((a) => a.reason ?? a.task)).toEqual(["429s were not deterministic", "replaced by a new start"]);
+
+    await graft.evidenceCommand("true", "unit tests");
+    const { record, commit } = await graft.land({ all: true });
+    expect(record.attempts?.map((a) => a.id)).toHaveLength(2);
+    expect(await graft.attempts()).toEqual([]);
+    const body = sh(["log", "-1", "--format=%B", commit]);
+    expect(body).toMatch(/Plan:\n  token bucket per key\n\nTried:\n  \[[0-9a-z]{20}\] add rate limiting: 429s were not deterministic \(1 command, 0 passed\)\n  \[[0-9a-z]{20}\] left open: replaced by a new start \(none\)\n\nEvidence:\n/);
+    const note = JSON.parse(sh(["notes", "--ref=refs/notes/graft", "show", commit]));
+    expect(note.attempts[0]).toMatchObject({ task: "add rate limiting", plan: "a global bucket", reason: "429s were not deterministic", evidence: [{ command: "false", exitCode: 1 }] });
+
+    sh(["notes", "--ref=refs/notes/graft", "remove", commit]);
+    const rebuilt = (await graft.show(commit))!.record!;
+    expect(rebuilt.attempts?.map((a) => a.summary)).toEqual(["add rate limiting: 429s were not deterministic", "left open: replaced by a new start"]);
+    const ctx = await graft.context(["a.txt"]);
+    expect(ctx.text).toContain("tried: [" + rebuilt.attempts![0].id + "] add rate limiting: 429s were not deterministic (1 command, 0 passed)");
+  });
+
+  it("carries attempts through a plain git commit via the hooks", async () => {
+    await writeFile(join(dir, "a.txt"), "a\n");
+    sh(["add", "-A"]);
+    sh(["commit", "-q", "-m", "base"]);
+    await graft.start({ task: "first try", plan: "nope" });
+    await graft.abandon({ reason: "wrong file" });
+    await graft.start({ task: "second try" });
+    await writeFile(join(dir, "a.txt"), "b\n");
+    sh(["add", "a.txt"]);
+    await graft.evidenceNote("looked");
+    const msgFile = join(dir, ".git", "MSG");
+    await writeFile(msgFile, "Title\n");
+    await graft.prepareCommitMessage(msgFile);
+    expect(await readFile(msgFile, "utf8")).toContain("Tried:\n  [");
+    expect(await graft.attempts()).toEqual([]);
+    sh(["commit", "-q", "-F", msgFile, "--cleanup=strip"]);
+    const fin = await graft.finishCommit();
+    const note = JSON.parse(sh(["notes", "--ref=refs/notes/graft", "show", fin.commit!]));
+    expect(note.attempts).toHaveLength(1);
+    expect(note.attempts[0].reason).toBe("wrong file");
+  });
+
+  it("revert opens a change that undoes a landed one and records what it reverts", async () => {
+    await graft.start({ task: "add greeting" });
+    await writeFile(join(dir, "hello.txt"), "hi\n");
+    await graft.evidenceNote("ok");
+    const landed = await graft.land({ all: true });
+    await expect(graft.revert("nope")).rejects.toThrow(/No change or commit found/);
+    const r = await graft.revert(landed.record.id, { reason: "greets in the wrong language" });
+    expect(r.commit).toBe(landed.commit);
+    expect(r.record).toMatchObject({ task: `Revert "add greeting" (${landed.record.id})`, plan: "greets in the wrong language", reverts: landed.record.id });
+    expect(existsSync(join(dir, "hello.txt"))).toBe(false);
+    await expect(graft.revert(landed.commit)).rejects.toThrow(/already open/);
+    await graft.evidenceNote("file gone");
+    const { commit } = await graft.land();
+    const body = sh(["log", "-1", "--format=%B", commit]);
+    expect(body).toMatch(/^Graft-Reverts: /m);
+    expect(body).toContain(`Graft-Reverts: ${landed.record.id}`);
+    sh(["notes", "--ref=refs/notes/graft", "remove", commit]);
+    expect((await graft.show(commit))!.record!.reverts).toBe(landed.record.id);
+    expect((await graft.context(["hello.txt"])).text).toContain(`reverts: ${landed.record.id}`);
+    // By commit SHA when the target has no record.
+    await writeFile(join(dir, "plain.txt"), "p\n");
+    sh(["add", "-A"]);
+    sh(["commit", "-q", "-m", "plain"]);
+    const plain = sh(["rev-parse", "HEAD"]);
+    const r2 = await graft.revert(plain);
+    expect(r2.record.reverts).toBe(plain);
+    expect(r2.record.task).toBe(`Revert "plain" (${plain})`);
+  });
+
+  it("start --id reuses a change id across repositories", async () => {
+    await expect(graft.start({ task: "x", id: "not-an-id" })).rejects.toThrow(/not a change id/);
+    const id = newChangeId();
+    const r = await graft.start({ task: "same change, other repo", id });
+    expect(r.id).toBe(id);
+  });
+});
+
+describe("artifacts and export", () => {
+  it("records a file's sha256, writes one trailer per artifact, and finds the change by hash", async () => {
+    await graft.start({ task: "build the binary" });
+    await writeFile(join(dir, "nova.exe"), "MZ fake binary\n");
+    await writeFile(join(dir, "src.txt"), "s\n");
+    const a = await graft.recordArtifact({ path: join(dir, "nova.exe") });
+    expect(a).toEqual({ name: "nova.exe", sha256: expect.stringMatching(/^[0-9a-f]{64}$/) });
+    expect(a.sha256).toBe(sh(["hash-object", "--stdin"]).length ? execFileSync("sha256sum", [join(dir, "nova.exe")], { encoding: "utf8" }).split(" ")[0] : a.sha256);
+    await graft.recordArtifact({ sha256: "SHA256:" + "a".repeat(64), name: "nova.dmg" });
+    await graft.recordArtifact({ path: join(dir, "nova.exe"), name: "nova-1.4.exe" }); // same hash: replaces the entry
+    await expect(graft.recordArtifact({ sha256: "zz" })).rejects.toThrow(/not a SHA-256/);
+    await expect(graft.recordArtifact({ sha256: "b".repeat(64) })).rejects.toThrow(/needs a name/);
+    await expect(graft.recordArtifact({ path: join(dir, "missing.bin") })).rejects.toThrow(/Cannot read/);
+    expect((await graft.status())!.artifacts!.map((x) => x.name)).toEqual(["nova.dmg", "nova-1.4.exe"]);
+    await graft.evidenceNote("ran it");
+    const { commit } = await graft.land({ paths: ["src.txt"] });
+    const body = sh(["log", "-1", "--format=%B", commit]);
+    expect(parseArtifactTrailers(body)).toEqual([
+      { sha256: "a".repeat(64), name: "nova.dmg" },
+      { sha256: a.sha256, name: "nova-1.4.exe" },
+    ]);
+    expect((await graft.show(a.sha256))?.commit).toBe(commit);
+    expect((await graft.show("sha256:" + "a".repeat(64)))?.commit).toBe(commit);
+    expect(await graft.show("c".repeat(64))).toBeNull();
+    sh(["notes", "--ref=refs/notes/graft", "remove", commit]);
+    expect((await graft.show(commit))!.record!.artifacts).toHaveLength(2);
+    expect((await graft.context(["src.txt"])).text).toContain(`artifacts: nova.dmg sha256:${"a".repeat(64)}, nova-1.4.exe sha256:${a.sha256}`);
+  });
+
+  it("exports every recorded change with its diff, newest first", async () => {
+    await writeFile(join(dir, "plain.txt"), "p\n");
+    sh(["add", "-A"]);
+    sh(["commit", "-q", "-m", "plain"]);
+    for (const n of [1, 2, 3]) {
+      await graft.start({ task: `change ${n}` });
+      await writeFile(join(dir, "a.txt"), `${n}\n`);
+      await graft.evidenceCommand("true", "smoke");
+      await graft.land({ all: true });
+    }
+    const rows = await graft.export();
+    expect(rows.map((r) => r.record?.task)).toEqual(["change 3", "change 2", "change 1"]);
+    expect(rows[0].diff).toContain("+3");
+    expect(rows[0].recordSource).toBe("note");
+    expect((await graft.export({ limit: 2, diff: false })).map((r) => [r.record?.task, r.diff])).toEqual([["change 3", undefined], ["change 2", undefined]]);
+    const all = await graft.export({ all: true, diff: false });
+    expect(all).toHaveLength(4);
+    expect(all[3].record).toBeNull();
+    expect((await graft.log({ limit: Infinity })).length).toBe(4);
+  });
+});
+
+describe("review fixes on hook-captured changes and the scratch index", () => {
+  it("start --id and revert apply to a change a hook opened", async () => {
+    await graft.start({ task: "add greeting" });
+    await writeFile(join(dir, "hello.txt"), "hi\n");
+    await graft.evidenceNote("ok");
+    const landed = await graft.land({ all: true });
+    // A prompt hook opened a change; the explicit start names it and may give it a shared id.
+    await graft.start({ task: "captured", capturedBy: "claude-code" });
+    const id = newChangeId();
+    const named = await graft.start({ task: "same change as in repo A", id });
+    expect(named.id).toBe(id);
+    expect((await graft.status())?.capturedBy).toBe("claude-code");
+    await expect(graft.start({ task: "bad id", id: "nope" })).rejects.toThrow(/not a change id/);
+    // A revert while a captured change is open adopts it and still records what it reverts.
+    const { record } = await graft.revert(landed.commit, { reason: "greeting was wrong" });
+    expect(record.id).toBe(id);
+    expect(record.reverts).toBe(landed.record.id);
+    expect(record.plan).toBe("greeting was wrong");
+    await graft.evidenceNote("checked");
+    const { commit } = await graft.land({ all: true });
+    expect(sh(["log", "-1", "--format=%B", commit])).toContain(`Graft-Reverts: ${landed.record.id}`);
+  });
+
+  it("abandon puts attempts a hook folded into a commit that never happened back in the queue", async () => {
+    await writeFile(join(dir, "a.txt"), "a\n");
+    sh(["add", "-A"]);
+    sh(["commit", "-q", "-m", "base"]);
+    await graft.start({ task: "first try", plan: "nope" });
+    await graft.abandon({ reason: "wrong file" });
+    await graft.start({ task: "second try", plan: "also nope" });
+    await writeFile(join(dir, "a.txt"), "b\n");
+    sh(["add", "a.txt"]);
+    await graft.evidenceNote("looked");
+    const msgFile = join(dir, ".git", "MSG");
+    await writeFile(msgFile, "Title\n");
+    await graft.prepareCommitMessage(msgFile);
+    expect(await graft.attempts()).toEqual([]);
+    // The commit is aborted (empty message, rejected hook); the change is then abandoned.
+    await graft.abandon({ reason: "gave up" });
+    expect((await graft.attempts()).map((a) => [a.task, a.reason])).toEqual([
+      ["first try", "wrong file"],
+      ["second try", "gave up"],
+    ]);
+  });
+
+  it("hashing the tree for evidence leaves credential files out of the object store", async () => {
+    await mkdir(join(dir, ".graft"), { recursive: true });
+    await writeFile(join(dir, ".graft/policy.json"), JSON.stringify({ version: 1, secretFiles: ["nova.json"] }));
+    const secret = "TOKEN=hunter2-" + Date.now() + "\n";
+    const named = '{"key": "also-secret-' + Date.now() + '"}\n';
+    const plain = "plain-" + Date.now() + "\n";
+    await writeFile(join(dir, ".env"), secret);
+    await writeFile(join(dir, "nova.json"), named);
+    await writeFile(join(dir, "a.txt"), plain);
+    await graft.start({ task: "hash" });
+    const run = await graft.evidenceCommand("true", "test");
+    expect((run as { tree?: string }).tree).toMatch(/^[0-9a-f]{40}$/);
+    const blob = (content: string) => execFileSync("git", ["hash-object", "--stdin"], { cwd: dir, input: content, encoding: "utf8" }).trim();
+    const has = (sha: string) => {
+      try {
+        sh(["cat-file", "-e", sha]);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    expect(has(blob(plain))).toBe(true);
+    expect(has(blob(secret))).toBe(false);
+    expect(has(blob(named))).toBe(false);
+  });
+
+  it("compares staged files by name, not as globs", async () => {
+    const policy = { version: 1, commands: { test: "true" }, rules: [{ paths: ["src/**"], require: ["test"] }] };
+    await mkdir(join(dir, ".graft"), { recursive: true });
+    await writeFile(join(dir, ".graft/policy.json"), JSON.stringify(policy));
+    await mkdir(join(dir, "src"), { recursive: true });
+    await graft.start({ task: "route" });
+    await writeFile(join(dir, "src", "[id].ts"), "1\n");
+    await graft.evidenceNamed("test");
+    await writeFile(join(dir, "src", "[id].ts"), "2\n");
+    await expect(graft.land({ all: true })).rejects.toThrow(/last passed before src\/\[id\]\.ts changed/);
+  });
+
+  it("counts a stale run apart from passed ones in the evidence summary", () => {
+    const run = { kind: "command" as const, at: "2026-01-01T00:00:00Z", command: "npm test", exitCode: 0, durationMs: 1, output: "" };
+    expect(evidenceSummary([run])).toBe("1 command, 1 passed");
+    expect(evidenceSummary([{ ...run, stale: true as const }, run])).toBe("2 commands, 1 passed, 1 stale");
+  });
+});
+
+describe("stale evidence", () => {
+  const policy = { version: 1, commands: { test: "true", lint: "true" }, rules: [{ paths: ["src/**"], require: ["test"] }] };
+  const tree = (ev: unknown) => (ev as { tree?: string }).tree;
+
+  it("records the tree a run checked and refuses a rule-required run that predates an edit to a covered file", async () => {
+    await mkdir(join(dir, ".graft"), { recursive: true });
+    await writeFile(join(dir, ".graft/policy.json"), JSON.stringify(policy));
+    await mkdir(join(dir, "src"), { recursive: true });
+    await graft.start({ task: "stale" });
+    await writeFile(join(dir, "src", "a.ts"), "1\n");
+    const first = await graft.evidenceNamed("test");
+    expect(tree(first)).toMatch(/^[0-9a-f]{40}$/);
+    await writeFile(join(dir, "src", "a.ts"), "2\n");
+    await expect(graft.land({ all: true })).rejects.toThrow(/"test" \(true\) last passed before src\/a\.ts changed.*graft evidence test again/);
+    sh(["reset", "-q"]);
+    const second = await graft.evidenceNamed("test");
+    expect(tree(second)).not.toBe(tree(first));
+    // An edit outside the rule's paths does not make the run stale for that rule.
+    await writeFile(join(dir, "README.md"), "docs\n");
+    const { commit } = await graft.land({ all: true });
+    const body = sh(["log", "-1", "--format=%B", commit]);
+    // The first run is marked stale in the message and the note: a.ts was edited after it ran.
+    expect(body).toMatch(/Evidence:\n  \[stale test\] true \(\d+\.\ds\)\n  \[pass test\] true \(\d+\.\ds\)\n/);
+    const note = JSON.parse(sh(["notes", "--ref=refs/notes/graft", "show", commit]));
+    expect(note.evidence.map((e: { stale?: true }) => e.stale)).toEqual([true, undefined]);
+    sh(["notes", "--ref=refs/notes/graft", "remove", commit]);
+    const rebuilt = (await graft.show(commit))!.record!;
+    expect(rebuilt.evidence.map((e) => e.kind === "command" && e.stale)).toEqual([true, undefined]);
+    expect(evaluateRules(await readPolicy(dir), ["src/a.ts"], rebuilt.evidence)).toEqual([]);
+  });
+
+  it("lets a stale run through with --allow-no-evidence, marked so that check sees the rule unmet", async () => {
+    await mkdir(join(dir, ".graft"), { recursive: true });
+    await writeFile(join(dir, ".graft/policy.json"), JSON.stringify(policy));
+    await mkdir(join(dir, "src"), { recursive: true });
+    await graft.start({ task: "bypass" });
+    await writeFile(join(dir, "src", "a.ts"), "1\n");
+    await graft.evidenceNamed("test");
+    await writeFile(join(dir, "src", "a.ts"), "2\n");
+    const { commit } = await graft.land({ all: true, allowNoEvidence: true });
+    expect(sh(["log", "-1", "--format=%B", commit])).toContain("[stale test] true");
+    sh(["notes", "--ref=refs/notes/graft", "remove", commit]);
+    const rebuilt = (await graft.show(commit))!.record!;
+    expect(evaluateRules(await readPolicy(dir), ["src/a.ts"], rebuilt.evidence).map((u) => u.name)).toEqual(["test"]);
+  });
+
+  it("takes a run with no recorded tree, or a tree this clone lacks, as fresh", async () => {
+    await mkdir(join(dir, ".graft"), { recursive: true });
+    await writeFile(join(dir, ".graft/policy.json"), JSON.stringify(policy));
+    await mkdir(join(dir, "src"), { recursive: true });
+    await graft.start({ task: "old record" });
+    await writeFile(join(dir, "src", "a.ts"), "1\n");
+    await graft.evidenceNamed("test");
+    const open = (await graft.status())!;
+    delete (open.evidence[0] as { tree?: string }).tree;
+    await writeFile(join(dir, ".git", "graft", "open.json"), JSON.stringify(open));
+    await writeFile(join(dir, "src", "a.ts"), "2\n");
+    await expect(graft.land({ all: true })).resolves.toBeTruthy();
+
+    await graft.start({ task: "pruned tree" });
+    await writeFile(join(dir, "src", "a.ts"), "3\n");
+    await graft.evidenceNamed("test");
+    const again = (await graft.status())!;
+    (again.evidence[0] as { tree?: string }).tree = "0".repeat(40);
+    await writeFile(join(dir, ".git", "graft", "open.json"), JSON.stringify(again));
+    await writeFile(join(dir, "src", "a.ts"), "4\n");
+    await expect(graft.land({ all: true })).resolves.toBeTruthy();
+    expect(sh(["log", "-1", "--format=%B"])).toContain("[pass test] true");
+  });
+
+  it("hashes untracked files too, so a new file the run never saw counts as a change", async () => {
+    await mkdir(join(dir, ".graft"), { recursive: true });
+    await writeFile(join(dir, ".graft/policy.json"), JSON.stringify(policy));
+    await mkdir(join(dir, "src"), { recursive: true });
+    await writeFile(join(dir, "src", "a.ts"), "1\n");
+    sh(["add", "-A"]);
+    sh(["commit", "-q", "-m", "base"]);
+    await graft.start({ task: "new file" });
+    await writeFile(join(dir, "src", "a.ts"), "2\n");
+    const captured = await handleClaudeCodeEvent(graft, { hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: { command: "true" }, tool_response: { stdout: "" } });
+    expect(captured).toMatchObject({ action: "recorded", name: "test" });
+    expect(tree((await graft.status())!.evidence[0])).toMatch(/^[0-9a-f]{40}$/);
+    await writeFile(join(dir, "src", "b.ts"), "new\n");
+    await expect(graft.land({ all: true })).rejects.toThrow(/before src\/b\.ts changed/);
+    sh(["reset", "-q"]);
+    await graft.evidenceNamed("test");
+    await expect(graft.land({ all: true })).resolves.toBeTruthy();
   });
 });
 
@@ -867,7 +1223,7 @@ describe("init", () => {
     const ci = (await graft.init({ agents: false, hooks: false, ci: true })).ci;
     expect(ci).toEqual({ state: "written", path: ".github/workflows/graft-check.yml" });
     const workflow = await readFile(join(dir, ".github/workflows/graft-check.yml"), "utf8");
-    expect(workflow).toContain("uses: FourShore/Graft@main");
+    expect(workflow).toContain("uses: FourShore/Graft@v0");
     expect(workflow).toContain("fetch-depth: 0");
     expect((await graft.init({ agents: false, hooks: false, ci: true })).ci).toEqual({ state: "present", path: ".github/workflows/graft-check.yml" });
     expect(await readFile(join(dir, ".github/workflows/graft-check.yml"), "utf8")).toBe(workflow);

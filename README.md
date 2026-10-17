@@ -95,8 +95,12 @@ without invalidating history. `rules` are checked by `land` against the
 staged files and by `check` against each commit: a change that touches a
 file matching `paths` must carry a passing run, by Graft or a harness and
 not attested, of every name in `require`. `land` refuses otherwise and
-says which name to run; `check` fails the commit. A rule that names a
-command the catalog does not define is a policy error. This is how the
+says which name to run; `check` fails the commit. The run must also be of
+the files being committed: every run records a hash of the working tree it
+checked, and a run that predates an edit to a file the rule covers is
+`stale`, which `land` refuses the same way (`graft evidence test` again) and
+which the message records as `[stale test]` if it lands anyway. A rule that
+names a command the catalog does not define is a policy error. This is how the
 command list in a repo's CLAUDE.md becomes something the gate enforces
 rather than prose.
 
@@ -120,6 +124,16 @@ A trailer whose variable is not set is left out of that commit, and `land`
 says so, rather than written with an empty value. `${NAME#prefix}` and
 `${NAME%suffix}` strip a literal affix, as in `sh`, for the case above where
 the variable carries an id in one spelling and the link needs another.
+`ref` is a template with the same expansion for where a task came from, so
+every change carries a `Graft-Task-Ref` without anyone passing `--ref`:
+
+```json
+{ "version": 1, "ref": "https://claude.ai/code/session_${CLAUDE_CODE_REMOTE_SESSION_ID#cse_}" }
+```
+
+The capture hook's change gets it when the prompt opens one, an explicit
+`graft start --ref` overrides it, and a change is left without a ref rather
+than given a half-filled one when the variable is unset.
 `captureCommands` lists extra regular expressions for commands the capture
 hooks record on top of the built-in test, build, lint and type-check patterns.
 `checkCommands` lists regular expressions for the commands `graft check
@@ -168,7 +182,7 @@ jobs:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
       # your install step (npm ci, go mod download, ...), so recorded commands can run
-      - uses: FourShore/Graft@main   # pin to a tag or SHA to fix the version
+      - uses: FourShore/Graft@v0   # v0 moves with each 0.x release; pin @v0.1.0 or a SHA for one exact version
 ```
 
 The action installs Graft, fetches the notes, and runs the check against the
@@ -285,7 +299,47 @@ works from it. The command output is kept in a git note on `refs/notes/graft`,
 a cache that travels only with `graft sync` (see below).
 
 A crashed session can leave a change open in `.git`. `graft start --replace`
-drops it and opens the new one; `graft status` shows what is there.
+abandons it and opens the new one; `graft status` shows what is there.
+
+## Keeping what did not work
+
+Git keeps nothing of a change that was never committed, so every agent
+rediscovers the dead ends. Graft keeps them:
+
+```
+graft abandon --reason "a global bucket made 429s nondeterministic"
+graft revert <id> --reason "greets in the wrong language"
+```
+
+`abandon` closes the open change and keeps what it tried: the task, plan,
+reason and evidence. The next change that lands in that worktree carries it
+in a `Tried:` block in the commit message (and in full in the note), so the
+record of the change that worked names the attempts that did not. A change
+with nothing tried (no plan, reason or evidence) leaves nothing behind;
+`--discard` keeps nothing on purpose. `graft start --replace` keeps the
+change it replaces the same way.
+
+`revert` runs `git revert --no-commit` on a landed change and opens a change
+whose task names what is being undone and whose plan is the reason, with a
+`Graft-Reverts` trailer pointing at the original. Record evidence and land it
+like any other change; `graft context` then shows the revert next to the
+change it undid.
+
+## Following a change out of the repo
+
+```
+graft artifact dist/nova.exe            # records its SHA-256 on the open change
+graft show 3b1f…e9                      # later: the change that produced that file
+graft export > changes.jsonl            # every recorded change with its diff, one per line
+```
+
+`artifact` records a file the change produced, by content hash, as a
+`Graft-Artifact` trailer; `--sha256 <hex> --name <file>` records one that is
+not on this machine. A binary found on an office machine then resolves to the
+task, the plan and the evidence that shipped it. `export` writes the (task,
+diff, evidence) rows a repository has accumulated as JSON lines, newest first,
+for a script or a model; `--all` adds commits without a record and `--no-diff`
+leaves the diff out.
 
 ## Point your agent at it
 
@@ -329,17 +383,24 @@ await g.evidenceCommand("npm test", "unit tests");
 const { commit, record } = await g.land({ paths: ["src/api.ts"] });
 ```
 
-## Roadmap
+## What's next
 
-| Phase | What | Status |
-| --- | --- | --- |
-| 0 | Change records on plain git: spec, CLI, MCP server | done |
-| 1 | Instant workspaces: copy-on-write checkouts handed to agents through an API | next |
-| 2 | Optimistic merge: concurrent landing, conflicts as data an agent can resolve, post-merge checks | |
-| 3 | History as a query service: CI-verified evidence as a second tier, changes that span repos, the artifact a commit produced | next after 0.1 |
+Everything below runs on plain git and the CLI. Nothing in this repository
+needs a server; the record format is designed so a service that wants to read
+it can, without Graft having to be one.
 
-Phases 1 to 3 need a server. Phase 0 doesn't, on purpose, so the record format
-gets real use before anything depends on it.
+- **CI as a second tier of evidence.** `graft check --rerun` emits a result
+  the pull request summary and `graft show` can tell apart from the author's
+  run, so author-run and CI-verified are visible everywhere.
+- **A log across repositories.** `graft start --id` already lands one change
+  in several repositories; a `graft log` that reads several clones and groups
+  by change id follows when someone needs it.
+- **The agent as installer.** A skill and an `AGENTS.md` template, so an agent
+  setting up a repository runs `graft init` the way it writes a `.gitignore`.
+
+Earlier roadmaps here described instant workspaces, optimistic merging and a
+history query service. Those need a server and are not planned in this
+repository.
 
 ## Development
 

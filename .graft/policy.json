@@ -1,6 +1,7 @@
 {
   "version": 1,
   "requireEvidence": true,
+  "ref": "https://claude.ai/code/session_${CLAUDE_CODE_REMOTE_SESSION_ID#cse_}",
   "commands": {
     "build": "npm run build",
     "test": "npm test"

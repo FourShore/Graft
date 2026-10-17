@@ -58,6 +58,14 @@ export interface Policy {
    */
   checkCommands?: string[];
   /**
+   * Where a change's task comes from when `graft start` is given no `--ref`:
+   * a URL template with the same `$NAME` / `${NAME#prefix}` expansion as
+   * `trailers`, usually built from the harness's session variable, so every
+   * change carries a `Graft-Task-Ref` without anyone passing one. Left out
+   * of a change when a variable it names is unset.
+   */
+  ref?: string;
+  /**
    * The repo's checks, named once: `{ "test": "go test ./...", "vet386":
    * "env GOOS=windows GOARCH=386 go vet ./..." }`. `graft evidence <name>`
    * runs one; the capture hooks record a typed command that matches one
@@ -142,11 +150,9 @@ export interface UnmetRule {
 export function evaluateRules(policy: Policy, files: string[], evidence: Evidence[]): UnmetRule[] {
   const commands = policy.commands ?? {};
   const unmet = new Map<string, Set<string>>();
-  for (const rule of policy.rules ?? []) {
-    const hit = files.filter((f) => rule.paths.some((g) => globToRegExp(g).test(f.replace(/\\/g, "/"))));
-    if (!hit.length) continue;
+  for (const { rule, files: hit } of rulesHit(policy, files)) {
     for (const name of rule.require) {
-      if (commands[name] && covers(evidence, name, commands[name])) continue;
+      if (commands[name] && coveringRuns(evidence, name, commands[name]).length) continue;
       const set = unmet.get(name) ?? new Set<string>();
       for (const f of hit) set.add(f);
       unmet.set(name, set);
@@ -155,21 +161,65 @@ export function evaluateRules(policy: Policy, files: string[], evidence: Evidenc
   return [...unmet].map(([name, set]) => ({ name, command: commands[name] ?? "", files: [...set] }));
 }
 
-function covers(evidence: Evidence[], name: string, command: string): boolean {
+/** The rules whose paths match any of `files`, each with the files that matched. */
+export function rulesHit(policy: Policy, files: string[]): { rule: CoverageRule; files: string[] }[] {
+  const out: { rule: CoverageRule; files: string[] }[] = [];
+  for (const rule of policy.rules ?? []) {
+    const hit = files.filter((f) => rule.paths.some((g) => globToRegExp(g).test(f.replace(/\\/g, "/"))));
+    if (hit.length) out.push({ rule, files: hit });
+  }
+  return out;
+}
+
+/**
+ * The runs that count for a named command: exited 0, run by Graft or a
+ * harness (not attested), not marked stale, and carrying the name, the name
+ * as label (a record rebuilt from a commit message), or the catalog's text.
+ */
+export function coveringRuns(evidence: Evidence[], name: string, command: string): CommandEvidence[] {
   const want = normalizeCommand(command);
-  return evidence.some(
+  return evidence.filter(
     (e): e is CommandEvidence =>
       e.kind === "command" &&
       e.exitCode === 0 &&
       !e.attested &&
+      !e.stale &&
       (e.name === name || e.label === name || normalizeCommand(e.command) === want),
   );
 }
 
 /**
- * Expand `$NAME` / `${NAME}` in policy trailers from `env`. Returns the
- * trailers to write and the ones skipped because a variable was unset, with
- * the variable's name, so the caller can say so.
+ * Expand `$NAME` / `${NAME}` in a policy template from `env`. `${NAME#prefix}`
+ * and `${NAME%suffix}` strip a literal affix, as in sh. `missing` names the
+ * first variable that was unset or empty, in which case the value is not
+ * usable and the caller leaves the line out rather than writing a hole.
+ */
+export function expandTemplate(
+  template: string,
+  env: Record<string, string | undefined> = process.env,
+): { value: string; missing?: string } {
+  let missing: string | undefined;
+  const value = template.replace(
+    /\$(?:\{([A-Za-z_][A-Za-z0-9_]*)(?:([#%])([^}]*))?\}|([A-Za-z_][A-Za-z0-9_]*))/g,
+    (_, braced, op, affix, bare) => {
+      const name = braced ?? bare;
+      let v = env[name];
+      if (v === undefined || v === "") {
+        missing ??= name;
+        return "";
+      }
+      if (op === "#" && affix && v.startsWith(affix)) v = v.slice(affix.length);
+      if (op === "%" && affix && v.endsWith(affix)) v = v.slice(0, -affix.length);
+      return v;
+    },
+  );
+  return missing ? { value, missing } : { value };
+}
+
+/**
+ * Expand policy trailers from `env`. Returns the trailers to write and the
+ * ones skipped because a variable was unset, with the variable's name, so the
+ * caller can say so.
  */
 export function expandTrailers(
   trailers: string[],
@@ -178,24 +228,9 @@ export function expandTrailers(
   const out: string[] = [];
   const skipped: { trailer: string; missing: string }[] = [];
   for (const t of trailers) {
-    let missing: string | undefined;
-    const expanded = t.replace(
-      /\$(?:\{([A-Za-z_][A-Za-z0-9_]*)(?:([#%])([^}]*))?\}|([A-Za-z_][A-Za-z0-9_]*))/g,
-      (_, braced, op, affix, bare) => {
-        const name = braced ?? bare;
-        let v = env[name];
-        if (v === undefined || v === "") {
-          missing ??= name;
-          return "";
-        }
-        // `${NAME#prefix}` and `${NAME%suffix}` strip a literal affix, as in sh.
-        if (op === "#" && affix && v.startsWith(affix)) v = v.slice(affix.length);
-        if (op === "%" && affix && v.endsWith(affix)) v = v.slice(0, -affix.length);
-        return v;
-      },
-    );
+    const { value, missing } = expandTemplate(t, env);
     if (missing) skipped.push({ trailer: t, missing });
-    else out.push(expanded);
+    else out.push(value);
   }
   return { trailers: out, skipped };
 }
