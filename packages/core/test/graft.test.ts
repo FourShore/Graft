@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { beforeEach, describe, expect, it } from "vitest";
 import { Graft, GraftError } from "../src/graft.js";
-import { isChangeId, newChangeId, parseArtifactTrailers, parseTrailers, shellJoin } from "../src/record.js";
+import { evidenceSummary, isChangeId, newChangeId, parseArtifactTrailers, parseTrailers, shellJoin } from "../src/record.js";
 import { evaluateRules, expandTrailers, matchCatalog, readPolicy } from "../src/policy.js";
 import { classifyCommand, relativizeCommand } from "../src/capture.js";
 import { globToRegExp, secretFilesNamed } from "../src/redact.js";
@@ -523,6 +523,96 @@ describe("artifacts and export", () => {
     expect(all).toHaveLength(4);
     expect(all[3].record).toBeNull();
     expect((await graft.log({ limit: Infinity })).length).toBe(4);
+  });
+});
+
+describe("review fixes on hook-captured changes and the scratch index", () => {
+  it("start --id and revert apply to a change a hook opened", async () => {
+    await graft.start({ task: "add greeting" });
+    await writeFile(join(dir, "hello.txt"), "hi\n");
+    await graft.evidenceNote("ok");
+    const landed = await graft.land({ all: true });
+    // A prompt hook opened a change; the explicit start names it and may give it a shared id.
+    await graft.start({ task: "captured", capturedBy: "claude-code" });
+    const id = newChangeId();
+    const named = await graft.start({ task: "same change as in repo A", id });
+    expect(named.id).toBe(id);
+    expect((await graft.status())?.capturedBy).toBe("claude-code");
+    await expect(graft.start({ task: "bad id", id: "nope" })).rejects.toThrow(/not a change id/);
+    // A revert while a captured change is open adopts it and still records what it reverts.
+    const { record } = await graft.revert(landed.commit, { reason: "greeting was wrong" });
+    expect(record.id).toBe(id);
+    expect(record.reverts).toBe(landed.record.id);
+    expect(record.plan).toBe("greeting was wrong");
+    await graft.evidenceNote("checked");
+    const { commit } = await graft.land({ all: true });
+    expect(sh(["log", "-1", "--format=%B", commit])).toContain(`Graft-Reverts: ${landed.record.id}`);
+  });
+
+  it("abandon puts attempts a hook folded into a commit that never happened back in the queue", async () => {
+    await writeFile(join(dir, "a.txt"), "a\n");
+    sh(["add", "-A"]);
+    sh(["commit", "-q", "-m", "base"]);
+    await graft.start({ task: "first try", plan: "nope" });
+    await graft.abandon({ reason: "wrong file" });
+    await graft.start({ task: "second try", plan: "also nope" });
+    await writeFile(join(dir, "a.txt"), "b\n");
+    sh(["add", "a.txt"]);
+    await graft.evidenceNote("looked");
+    const msgFile = join(dir, ".git", "MSG");
+    await writeFile(msgFile, "Title\n");
+    await graft.prepareCommitMessage(msgFile);
+    expect(await graft.attempts()).toEqual([]);
+    // The commit is aborted (empty message, rejected hook); the change is then abandoned.
+    await graft.abandon({ reason: "gave up" });
+    expect((await graft.attempts()).map((a) => [a.task, a.reason])).toEqual([
+      ["first try", "wrong file"],
+      ["second try", "gave up"],
+    ]);
+  });
+
+  it("hashing the tree for evidence leaves credential files out of the object store", async () => {
+    await mkdir(join(dir, ".graft"), { recursive: true });
+    await writeFile(join(dir, ".graft/policy.json"), JSON.stringify({ version: 1, secretFiles: ["nova.json"] }));
+    const secret = "TOKEN=hunter2-" + Date.now() + "\n";
+    const named = '{"key": "also-secret-' + Date.now() + '"}\n';
+    const plain = "plain-" + Date.now() + "\n";
+    await writeFile(join(dir, ".env"), secret);
+    await writeFile(join(dir, "nova.json"), named);
+    await writeFile(join(dir, "a.txt"), plain);
+    await graft.start({ task: "hash" });
+    const run = await graft.evidenceCommand("true", "test");
+    expect((run as { tree?: string }).tree).toMatch(/^[0-9a-f]{40}$/);
+    const blob = (content: string) => execFileSync("git", ["hash-object", "--stdin"], { cwd: dir, input: content, encoding: "utf8" }).trim();
+    const has = (sha: string) => {
+      try {
+        sh(["cat-file", "-e", sha]);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    expect(has(blob(plain))).toBe(true);
+    expect(has(blob(secret))).toBe(false);
+    expect(has(blob(named))).toBe(false);
+  });
+
+  it("compares staged files by name, not as globs", async () => {
+    const policy = { version: 1, commands: { test: "true" }, rules: [{ paths: ["src/**"], require: ["test"] }] };
+    await mkdir(join(dir, ".graft"), { recursive: true });
+    await writeFile(join(dir, ".graft/policy.json"), JSON.stringify(policy));
+    await mkdir(join(dir, "src"), { recursive: true });
+    await graft.start({ task: "route" });
+    await writeFile(join(dir, "src", "[id].ts"), "1\n");
+    await graft.evidenceNamed("test");
+    await writeFile(join(dir, "src", "[id].ts"), "2\n");
+    await expect(graft.land({ all: true })).rejects.toThrow(/last passed before src\/\[id\]\.ts changed/);
+  });
+
+  it("counts a stale run apart from passed ones in the evidence summary", () => {
+    const run = { kind: "command" as const, at: "2026-01-01T00:00:00Z", command: "npm test", exitCode: 0, durationMs: 1, output: "" };
+    expect(evidenceSummary([run])).toBe("1 command, 1 passed");
+    expect(evidenceSummary([{ ...run, stale: true as const }, run])).toBe("2 commands, 1 passed, 1 stale");
   });
 });
 

@@ -185,14 +185,17 @@ export class Graft {
 
   async start(opts: StartOptions): Promise<ChangeRecord> {
     const open = await this.store.read();
+    if (opts.id !== undefined && !isChangeId(opts.id)) throw new GraftError(`"${opts.id}" is not a change id (20 characters of Crockford base32).`);
     if (open?.capturedBy && !opts.replace) {
       // A hook opened this change from the prompt; an explicit start names the task and keeps what was captured.
       if (!opts.task?.trim()) throw new GraftError("A task is required.");
+      if (opts.id !== undefined) open.id = opts.id;
       open.task = opts.task.trim();
       if (opts.plan?.trim()) open.plan = opts.plan.trim();
       if (opts.ref?.trim()) open.ref = opts.ref.trim();
       open.ref ??= await this.defaultRef();
       if (opts.author) open.author = defaultAuthor(opts.author);
+      if (opts.reverts) open.reverts = opts.reverts;
       await this.store.write(open);
       return open;
     }
@@ -203,7 +206,6 @@ export class Graft {
       );
     }
     if (!opts.task?.trim()) throw new GraftError("A task is required.");
-    if (opts.id !== undefined && !isChangeId(opts.id)) throw new GraftError(`"${opts.id}" is not a change id (20 characters of Crockford base32).`);
     // A replaced change is an abandoned one: keep what it tried.
     if (open) await this.abandon({ reason: "replaced by a new start" });
     const record: ChangeRecord = {
@@ -252,6 +254,9 @@ export class Graft {
     const open = await this.store.read();
     if (!open) return null;
     const reason = opts.reason?.trim() || undefined;
+    // Attempts a prepare-commit-msg hook folded into this record, for a commit
+    // that then did not happen, belong to earlier changes: they go back to waiting.
+    for (const earlier of open.attempts ?? []) await this.store.addAttempt(earlier);
     const worthKeeping = Boolean(open.plan || reason || open.evidence.length);
     if (!opts.discard && worthKeeping) {
       const attempt: Attempt = {
@@ -465,8 +470,20 @@ export class Graft {
       await mkdir(dir, { recursive: true });
       const scratch = join(dir, `index.${process.pid}.${Date.now()}`);
       const env = { GIT_INDEX_FILE: scratch };
+      // Hashing the tree writes every file's content into the object store, so
+      // files that look like credentials stay out: land refuses them anyway, and
+      // a secret must not reach .git/objects on the way to an evidence record.
+      let secretGlobs: string[] = [];
       try {
-        await this.git.run(["add", "-A"], { env });
+        secretGlobs = (await readPolicy(await this.topLevel())).secretFiles ?? [];
+      } catch {
+        // No readable policy: the built-in patterns still apply.
+      }
+      const files = (await this.git.run(["ls-files", "-z", "--cached", "--others", "--exclude-standard"])).split("\0").filter(Boolean);
+      const excluded = files.filter((f) => looksLikeSecretFile(f, secretGlobs));
+      const pathspec = [".", ...excluded.map((f) => `:(exclude,literal)${f}`)].join("\0") + "\0";
+      try {
+        await this.git.run(["add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"], { env, input: pathspec });
         return await this.git.run(["write-tree"], { env });
       } finally {
         await rm(scratch, { force: true });
@@ -482,7 +499,7 @@ export class Graft {
    */
   private async changedSince(tree: string, files: string[]): Promise<string[] | null> {
     try {
-      const out = await this.git.run(["diff", "--cached", "--name-only", "--no-renames", tree, "--", ...files.map((f) => `:(top)${f}`)]);
+      const out = await this.git.run(["diff", "--cached", "--name-only", "--no-renames", tree, "--", ...files.map((f) => `:(top,literal)${f}`)]);
       return out.split("\n").filter(Boolean);
     } catch {
       return null;
@@ -868,11 +885,12 @@ export class Graft {
       if (!commit) return null;
       ref = commit;
     } else if (isSha256(ref)) {
+      // An artifact hash; when no change recorded it, the string may still name
+      // a commit (in a repository using the sha256 object format), so fall through.
       const hex = ref.replace(/^sha256:/i, "").toLowerCase();
       const raw = await this.git.run(["log", "--all", `--grep=^${TRAILER_KEYS.artifact}: sha256:${hex} `, "--format=%H"]);
       const commit = raw.split("\n")[0];
-      if (!commit) return null;
-      ref = commit;
+      if (commit) ref = commit;
     }
     let sha: string;
     try {

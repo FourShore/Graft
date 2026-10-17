@@ -50,7 +50,7 @@ export function judgeEvidence(evidence: Evidence[]): EvidenceVerdict {
   const last = testRuns.at(-1);
   return {
     testRuns,
-    testsPassed: Boolean(last && last.exitCode === 0),
+    testsPassed: Boolean(last && last.exitCode === 0 && !last.stale),
     failures: cmds.filter((c) => c.exitCode !== 0),
     notes: evidence.length - cmds.length,
   };

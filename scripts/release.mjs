@@ -70,7 +70,8 @@ await graft.start({
 console.log("running build and tests as evidence...");
 const check = await graft.evidenceCommand("npm run build && npm test", "build and tests");
 if (check.exitCode !== 0) {
-  await graft.abandon();
+  // A release that failed its checks is not an attempt worth folding into the next land.
+  await graft.abandon({ discard: true });
   console.error(check.output);
   console.error("build or tests failed; nothing committed (the version files are still modified)");
   process.exit(1);

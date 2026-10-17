@@ -162,7 +162,7 @@ Graft-Evidence: 1 command, 1 passed; 1 note
 | `Graft-Reverts` | Present when the change was opened by `graft revert`: the change id or commit it undoes. |
 | `Graft-Artifact` | One per recorded artifact: `sha256:<64 hex> <name>`. The only trailer that may repeat; readers collect every line. |
 | `Graft-Author` | `<kind>:<name>`. |
-| `Graft-Evidence` | Human-readable summary of the evidence list. |
+| `Graft-Evidence` | Human-readable summary of the evidence list: commands, how many passed, and how many of those were stale (`2 commands, 1 passed, 1 stale`), then notes. A stale run is not counted as passed. |
 
 Other trailers can be added at land time (`graft land --trailer "Co-Authored-By: ..."`,
 or `trailers` on `graft_land`); they go after Graft's own. The `Graft-` prefix

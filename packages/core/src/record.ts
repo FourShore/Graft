@@ -156,9 +156,10 @@ export function isChangeId(s: string): boolean {
 export function evidenceSummary(evidence: Evidence[]): string {
   const cmds = evidence.filter((e): e is CommandEvidence => e.kind === "command");
   const notes = evidence.length - cmds.length;
-  const passed = cmds.filter((c) => c.exitCode === 0).length;
+  const stale = cmds.filter((c) => c.stale).length;
+  const passed = cmds.filter((c) => c.exitCode === 0 && !c.stale).length;
   const parts: string[] = [];
-  if (cmds.length) parts.push(`${cmds.length} command${cmds.length === 1 ? "" : "s"}, ${passed} passed`);
+  if (cmds.length) parts.push(`${cmds.length} command${cmds.length === 1 ? "" : "s"}, ${passed} passed${stale ? `, ${stale} stale` : ""}`);
   if (notes) parts.push(`${notes} note${notes === 1 ? "" : "s"}`);
   return parts.length ? parts.join("; ") : "none";
 }

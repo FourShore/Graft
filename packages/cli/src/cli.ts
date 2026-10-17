@@ -336,7 +336,9 @@ program
   .option("--all", "include commits without a change record")
   .option("--no-diff", "leave the diff out")
   .action(async (o) => {
-    const rows = await graft().export({ limit: o.limit === undefined ? Infinity : Number(o.limit), all: Boolean(o.all), diff: o.diff });
+    const limit = o.limit === undefined ? Infinity : Number(o.limit);
+    if (limit !== Infinity && (!Number.isInteger(limit) || limit < 1)) throw new GraftError(`--limit must be a positive integer, got ${o.limit}.`);
+    const rows = await graft().export({ limit, all: Boolean(o.all), diff: o.diff });
     for (const row of rows) process.stdout.write(JSON.stringify(row) + "\n");
   });
 
