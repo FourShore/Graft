@@ -49,7 +49,18 @@ export interface ChangeRecord {
    * trailer each.
    */
   artifacts?: Artifact[];
+  /**
+   * The gate checks a caller overrode to land this change (`--allow-no-evidence`,
+   * `--allow-secrets` or their environment variables), set only when the
+   * gate would otherwise have refused. One `Graft-Override` trailer each, so
+   * a bypass is visible where the commit is read.
+   */
+  overrides?: Override[];
 }
+
+/** A landing-gate check a caller can override. */
+export type Override = "no-evidence" | "secrets";
+export const OVERRIDES: readonly Override[] = ["no-evidence", "secrets"];
 
 export interface Artifact {
   /** A file name, as a reader would see it: `nova.exe`, `app-1.4.2.tar.gz`. */
@@ -80,6 +91,8 @@ export interface ChangeAuthor {
   kind: "agent" | "human";
   /** e.g. "claude-code", "cursor", or a person's handle. */
   name: string;
+  /** The model an agent ran on, when the harness or GRAFT_AUTHOR_MODEL says. Written as `Graft-Model`. */
+  model?: string;
 }
 
 export type Evidence = CommandEvidence | NoteEvidence;
@@ -172,6 +185,8 @@ export const TRAILER_KEYS = {
   reverts: "Graft-Reverts",
   artifact: "Graft-Artifact",
   author: "Graft-Author",
+  model: "Graft-Model",
+  override: "Graft-Override",
   evidence: "Graft-Evidence",
 } as const;
 
@@ -184,6 +199,8 @@ export function trailersFor(record: ChangeRecord): Array<[string, string]> {
   if (record.reverts) t.push([TRAILER_KEYS.reverts, record.reverts]);
   for (const a of record.artifacts ?? []) t.push([TRAILER_KEYS.artifact, `sha256:${a.sha256} ${oneLine(a.name)}`]);
   t.push([TRAILER_KEYS.author, `${record.author.kind}:${record.author.name}`]);
+  if (record.author.model) t.push([TRAILER_KEYS.model, oneLine(record.author.model)]);
+  for (const o of record.overrides ?? []) t.push([TRAILER_KEYS.override, o]);
   t.push([TRAILER_KEYS.evidence, evidenceSummary(record.evidence)]);
   return t;
 }
@@ -227,7 +244,7 @@ export const TRIED_HEADER = "Tried:";
 const MESSAGE_LINE_CAP = 200;
 
 /**
- * The evidence list as commit-message lines: one per entry, so the record
+ * The evidence list as commit-message lines: one per command, so the record
  * travels with the commit even when the note does not. Output stays in the
  * note; the message carries the command, its exit code and duration. The
  * status and the optional label share the bracket, so a command or note that
@@ -236,21 +253,68 @@ const MESSAGE_LINE_CAP = 200;
  *   [pass unit tests] npm test (12.3s)
  *   [stale test] npm test (12.3s)
  *   [fail 1] npm run lint (0.4s)
+ *   [pass lint] npm run lint (3.0s; earlier: 2 runs, 1 failed)
  *   [attested go tests] go test ./...
  *   [attested fail 2 build] yarn build
  *   [note] manually verified in browser
+ *
+ * Repeated runs of one command (by catalog name, else by its label and text) keep only
+ * the last, with a count of the earlier ones; the note keeps every run. When
+ * the last run did not pass, the latest passing run stays too, so a reader of
+ * the message alone reaches the same verdict on the policy as one with the note.
  */
 export function evidenceLines(evidence: Evidence[]): string[] {
-  return evidence.map((ev) => {
+  const keep = collapseRuns(evidence);
+  return evidence.flatMap((ev, i) => {
+    const earlier = keep.get(i);
+    if (earlier === undefined) return [];
     // A catalog name is the run's identity, so it is what the message keeps; a free label rides in the note.
     const shown = ev.kind === "command" && ev.name ? ev.name : ev.label;
     const label = shown ? ` ${bracketSafe(shown)}` : "";
-    if (ev.kind === "note") return `  [note${label}] ${clip(oneLine(ev.text))}`;
+    if (ev.kind === "note") return [`  [note${label}] ${clip(oneLine(ev.text))}`];
     const failed = ev.exitCode === 0 ? "" : ` fail ${ev.exitCode}`;
-    if (ev.attested) return `  [attested${failed}${label}] ${clip(oneLine(ev.command))}`;
+    if (ev.attested) return [`  [attested${failed}${label}] ${clip(oneLine(ev.command))}`];
     const status = ev.exitCode !== 0 ? `fail ${ev.exitCode}` : ev.stale ? "stale" : "pass";
-    return `  [${status}${label}] ${clip(oneLine(ev.command))} (${(ev.durationMs / 1000).toFixed(1)}s)`;
+    const more = earlier.runs ? `; earlier: ${earlier.runs} run${earlier.runs === 1 ? "" : "s"}${earlier.failed ? `, ${earlier.failed} failed` : ""}` : "";
+    return [`  [${status}${label}] ${clip(oneLine(ev.command))} (${(ev.durationMs / 1000).toFixed(1)}s${more})`];
   });
+}
+
+/**
+ * Which evidence entries the message shows, by index, each with the runs it
+ * stands for that are not shown. Notes and attested runs are always shown;
+ * repeated Graft or harness runs of one command (same catalog name, or same
+ * label and text) collapse to the last, plus
+ * the latest passing one when the last did not pass.
+ */
+function collapseRuns(evidence: Evidence[]): Map<number, { runs: number; failed: number }> {
+  const groups = new Map<string, number[]>();
+  const keep = new Map<number, { runs: number; failed: number }>();
+  evidence.forEach((ev, i) => {
+    if (ev.kind !== "command" || ev.attested) {
+      keep.set(i, { runs: 0, failed: 0 });
+      return;
+    }
+    // Without a catalog name the label is part of the identity: a rule can be met by a run labelled with its name.
+    const key = ev.name ? `name:${ev.name}` : `command:${ev.label ?? ""}\u0000${oneLine(ev.command)}`;
+    groups.set(key, [...(groups.get(key) ?? []), i]);
+  });
+  for (const idx of groups.values()) {
+    const last = idx[idx.length - 1];
+    const lastRun = evidence[last] as CommandEvidence;
+    const shown = [last];
+    if (lastRun.exitCode !== 0 || lastRun.stale) {
+      const pass = [...idx].reverse().find((i) => {
+        const r = evidence[i] as CommandEvidence;
+        return r.exitCode === 0 && !r.stale;
+      });
+      if (pass !== undefined) shown.unshift(pass);
+    }
+    const hidden = idx.filter((i) => !shown.includes(i));
+    for (const i of shown) keep.set(i, { runs: 0, failed: 0 });
+    keep.set(last, { runs: hidden.length, failed: hidden.filter((i) => (evidence[i] as CommandEvidence).exitCode !== 0).length });
+  }
+  return keep;
 }
 
 /**
@@ -278,7 +342,7 @@ function bracketSafe(label: string): string {
 }
 
 const EVIDENCE_LINE = /^\s*\[(pass|stale|fail (-?\d+)|note|attested(?: fail (-?\d+))?)(?: ([^\]]*))?\] (.*)$/;
-const DURATION = /^(.*) \((\d+(?:\.\d+)?)s\)$/;
+const DURATION = /^(.*) \((\d+(?:\.\d+)?)s(?:; earlier: \d+ runs?(?:, \d+ failed)?)?\)$/;
 /** A bracket that carries a label, which only the current format writes. */
 const LABELLED_BRACKET = /^\s*\[(?:pass|stale|fail -?\d+|note|attested(?: fail -?\d+)?) [^\]]+\] /;
 /**
@@ -348,6 +412,7 @@ export function parseMessageRecord(message: string, authoredAt: string): ChangeR
     attempts.push({ id: m[1], task: m[2], summary: m[2], evidenceSummary: m[3], startedAt: authoredAt, abandonedAt: authoredAt, evidence: [] });
   }
   const artifacts = parseArtifactTrailers(message);
+  const overrides = parseOverrideTrailers(message);
   const [kind, ...name] = (trailers[TRAILER_KEYS.author] ?? "human:unknown").split(":");
   return {
     version: 1,
@@ -359,13 +424,25 @@ export function parseMessageRecord(message: string, authoredAt: string): ChangeR
     author: {
       kind: kind === "agent" ? "agent" : "human",
       name: name.join(":") || "unknown",
+      ...(trailers[TRAILER_KEYS.model] ? { model: trailers[TRAILER_KEYS.model] } : {}),
     },
     startedAt: authoredAt,
     landedAt: authoredAt,
     evidence,
     ...(attempts.length ? { attempts } : {}),
     ...(artifacts.length ? { artifacts } : {}),
+    ...(overrides.length ? { overrides } : {}),
   };
+}
+
+/** Every `Graft-Override` trailer in a message, known values only; `parseTrailers` keeps one value per key. */
+export function parseOverrideTrailers(message: string): Override[] {
+  const found = new Set<string>();
+  for (const line of message.split("\n")) {
+    const m = /^Graft-Override:\s*(\S+)\s*$/.exec(line);
+    if (m) found.add(m[1]);
+  }
+  return OVERRIDES.filter((o) => found.has(o));
 }
 
 /**

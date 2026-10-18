@@ -8,8 +8,9 @@ import { evidenceSummary, isChangeId, newChangeId, parseArtifactTrailers, parseT
 import { evaluateRules, expandTrailers, matchCatalog, readPolicy } from "../src/policy.js";
 import { classifyCommand, relativizeCommand } from "../src/capture.js";
 import { globToRegExp, secretFilesNamed } from "../src/redact.js";
-import { handleClaudeCodeEvent } from "../src/claude-code.js";
-import { installHooks, CLAUDE_SETTINGS_PATH } from "../src/hooks.js";
+import { handleClaudeCodeEvent, promptTask } from "../src/claude-code.js";
+import { gitHooksInstalled, installHooks, CLAUDE_SETTINGS_PATH, HOOK_COMMAND } from "../src/hooks.js";
+import { evidenceLines, parseMessageRecord, type Evidence } from "../src/record.js";
 import { existsSync } from "node:fs";
 import { chmod } from "node:fs/promises";
 
@@ -637,13 +638,13 @@ describe("stale evidence", () => {
     await writeFile(join(dir, "README.md"), "docs\n");
     const { commit } = await graft.land({ all: true });
     const body = sh(["log", "-1", "--format=%B", commit]);
-    // The first run is marked stale in the message and the note: a.ts was edited after it ran.
-    expect(body).toMatch(/Evidence:\n  \[stale test\] true \(\d+\.\ds\)\n  \[pass test\] true \(\d+\.\ds\)\n/);
+    // The message keeps the last run of "test" and counts the stale one; the note marks it stale.
+    expect(body).toMatch(/Evidence:\n  \[pass test\] true \(\d+\.\ds; earlier: 1 run\)\n/);
     const note = JSON.parse(sh(["notes", "--ref=refs/notes/graft", "show", commit]));
     expect(note.evidence.map((e: { stale?: true }) => e.stale)).toEqual([true, undefined]);
     sh(["notes", "--ref=refs/notes/graft", "remove", commit]);
     const rebuilt = (await graft.show(commit))!.record!;
-    expect(rebuilt.evidence.map((e) => e.kind === "command" && e.stale)).toEqual([true, undefined]);
+    expect(rebuilt.evidence).toMatchObject([{ kind: "command", command: "true", label: "test" }]);
     expect(evaluateRules(await readPolicy(dir), ["src/a.ts"], rebuilt.evidence)).toEqual([]);
   });
 
@@ -830,7 +831,7 @@ describe("capture", () => {
     expect(first).toMatchObject({ claudeCode: "written", git: { "prepare-commit-msg": "written", "post-commit": "foreign" } });
     const settings = JSON.parse(await readFile(join(dir, CLAUDE_SETTINGS_PATH), "utf8"));
     expect(Object.keys(settings.hooks)).toEqual(["UserPromptSubmit", "PostToolUse", "PostToolUseFailure"]);
-    expect(settings.hooks.PostToolUse[0]).toMatchObject({ matcher: "Bash", hooks: [{ type: "command", command: "graft hook claude-code" }] });
+    expect(settings.hooks.PostToolUse[0]).toMatchObject({ matcher: "Bash", hooks: [{ type: "command", command: HOOK_COMMAND }] });
     expect(await readFile(join(hooksDir, "post-commit"), "utf8")).toBe("#!/bin/sh\necho mine\n");
     expect(await readFile(join(hooksDir, "prepare-commit-msg"), "utf8")).toContain("graft hook prepare-commit-msg");
 
@@ -843,6 +844,34 @@ describe("capture", () => {
     const merged = JSON.parse(await readFile(join(dir, CLAUDE_SETTINGS_PATH), "utf8"));
     expect(merged.permissions.allow).toEqual(["Bash(npm test)"]);
     expect(merged.hooks.PostToolUse).toHaveLength(2);
+  });
+
+  it("upgrades the unguarded Claude Code hook command in place", async () => {
+    await mkdir(join(dir, ".claude"), { recursive: true });
+    const old = { hooks: [{ type: "command", command: "graft hook claude-code", timeout: 15 }] };
+    await writeFile(join(dir, CLAUDE_SETTINGS_PATH), JSON.stringify({ hooks: { UserPromptSubmit: [old], PostToolUse: [{ matcher: "Bash", ...old }], PostToolUseFailure: [{ matcher: "Bash", ...old }] } }));
+    expect((await installHooks(graft.git, dir)).claudeCode).toBe("written");
+    const settings = JSON.parse(await readFile(join(dir, CLAUDE_SETTINGS_PATH), "utf8"));
+    for (const event of ["UserPromptSubmit", "PostToolUse", "PostToolUseFailure"]) {
+      expect(settings.hooks[event]).toHaveLength(1);
+      expect(settings.hooks[event][0].hooks[0].command).toBe(HOOK_COMMAND);
+    }
+  });
+
+  it("a git commit still goes through, with a hint, when graft is not on PATH", async () => {
+    await installHooks(graft.git, dir);
+    await graft.start({ task: "no binary here" });
+    await writeFile(join(dir, "a.txt"), "a\n");
+    const gitBin = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+    const empty = join(dir, ".empty-path");
+    await mkdir(empty, { recursive: true });
+    const env = { ...process.env, PATH: empty };
+    execFileSync(gitBin, ["add", "a.txt"], { cwd: dir, env });
+    const out = execFileSync(gitBin, ["commit", "-q", "-m", "Unrecorded"], { cwd: dir, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    expect(out).toBe("");
+    expect(sh(["log", "-1", "--format=%B"])).toBe("Unrecorded");
+    // The change stays open for the next commit made with graft available.
+    expect((await graft.status())?.task).toBe("no binary here");
   });
 
   it("prepare-commit-msg adds the record and post-commit attaches the note; merges and amends are left alone", async () => {
@@ -1388,5 +1417,142 @@ describe("policy secretFiles", () => {
     await rm(join(dir, "config/db.secret"));
     const { commit } = await graft.land();
     expect(sh(["show", "--format=", "--name-only", commit]).split("\n").sort()).toEqual([".graft/policy.json", "config/db.json"]);
+  });
+});
+
+describe("overrides", () => {
+  it("writes Graft-Override only when an override let the change through, and reads it back", async () => {
+    await writeFile(join(dir, "a.txt"), "a\n");
+    await graft.start({ task: "no evidence" });
+    const forced = await graft.land({ all: true, allowNoEvidence: true });
+    expect(forced.record.overrides).toEqual(["no-evidence"]);
+    const body = sh(["log", "-1", "--format=%B", forced.commit]);
+    expect(body).toMatch(/^Graft-Override: no-evidence$/m);
+    sh(["notes", "--ref=refs/notes/graft", "remove", forced.commit]);
+    expect((await graft.show(forced.commit))?.record?.overrides).toEqual(["no-evidence"]);
+
+    // The flag alone, with nothing to override, leaves no mark.
+    await writeFile(join(dir, "a.txt"), "b\n");
+    await graft.start({ task: "has evidence" });
+    await graft.evidenceNote("looked");
+    const clean = await graft.land({ all: true, allowNoEvidence: true });
+    expect(clean.record.overrides).toBeUndefined();
+    expect(sh(["log", "-1", "--format=%B", clean.commit])).not.toContain("Graft-Override");
+
+    await writeFile(join(dir, ".env"), "KEY=1\n");
+    await graft.start({ task: "secret file" });
+    await graft.evidenceNote("looked");
+    const secret = await graft.land({ all: true, allowSecrets: true });
+    expect(secret.record.overrides).toEqual(["secrets"]);
+  });
+
+  it("marks a plain git commit that GRAFT_ALLOW_NO_EVIDENCE let through", async () => {
+    await writeFile(join(dir, "a.txt"), "a\n");
+    sh(["add", "a.txt"]);
+    await graft.start({ task: "env override" });
+    const msgFile = join(dir, ".git", "MSG");
+    await writeFile(msgFile, "Title\n");
+    process.env.GRAFT_ALLOW_NO_EVIDENCE = "1";
+    try {
+      expect((await graft.prepareCommitMessage(msgFile)).applied).toBe(true);
+    } finally {
+      delete process.env.GRAFT_ALLOW_NO_EVIDENCE;
+    }
+    expect(await readFile(msgFile, "utf8")).toMatch(/^Graft-Override: no-evidence$/m);
+  });
+});
+
+describe("prompt envelopes", () => {
+  const wake = (from: string, body: string) =>
+    `<wake reason="mention">\n  <project id="p">\n    <thread ts="t">\n      <message trigger="true" from="${from}" author="Zach">${body}</message>\n    </thread>\n  </project>\n  <system-note>x</system-note>\n</wake>`;
+
+  it("takes the person's words out of a Projects wake envelope", async () => {
+    expect(promptTask(wake("human", "Raise the cap to 40 &amp; add a test for &quot;EARLYBIRD&quot; &lt;now&gt; &#39;ok&#39;"))).toBe(`Raise the cap to 40 & add a test for "EARLYBIRD" <now> 'ok'`);
+    // A harness line is not a task, so the envelope is kept for graft start to replace.
+    const spawn = wake("system", "You are a Thread Session");
+    expect(promptTask(spawn)).toBe(spawn);
+    expect(promptTask("fix the login bug")).toBe("fix the login bug");
+    expect(promptTask(wake("human", "hex &#x27;ok&#x27; and &#99999999; kept"))).toBe("hex 'ok' and &#99999999; kept");
+    // A slash command inside an envelope is still a slash command.
+    expect(await handleClaudeCodeEvent(graft, { hook_event_name: "UserPromptSubmit", prompt: wake("human", "/compact") })).toMatchObject({ action: "ignored", reason: "slash command" });
+    expect(promptTask("<b>not an envelope</b>")).toBe("<b>not an envelope</b>");
+
+    const r = await handleClaudeCodeEvent(graft, { hook_event_name: "UserPromptSubmit", prompt: wake("human", "Ship it"), model: "example-model-1" });
+    expect(r).toMatchObject({ action: "started", task: "Ship it" });
+    expect((await graft.status())?.author).toEqual({ kind: "agent", name: "claude-code", model: "example-model-1" });
+  });
+});
+
+describe("author model", () => {
+  it("writes Graft-Model, reads it back, and keeps the hook's model when graft start names the task", async () => {
+    await handleClaudeCodeEvent(graft, { hook_event_name: "UserPromptSubmit", prompt: "do it", model: { id: "example-model-2" } });
+    await graft.start({ task: "named", author: { kind: "agent", name: "claude-code" } });
+    expect((await graft.status())?.author.model).toBe("example-model-2");
+    await writeFile(join(dir, "a.txt"), "a\n");
+    await graft.evidenceNote("looked");
+    const { commit } = await graft.land({ all: true });
+    expect(sh(["log", "-1", "--format=%B", commit])).toMatch(/^Graft-Model: example-model-2$/m);
+    sh(["notes", "--ref=refs/notes/graft", "remove", commit]);
+    expect((await graft.show(commit))?.record?.author).toEqual({ kind: "agent", name: "claude-code", model: "example-model-2" });
+  });
+
+  it("drops the hook's model when someone else takes the change over", async () => {
+    await handleClaudeCodeEvent(graft, { hook_event_name: "UserPromptSubmit", prompt: "do it", model: "example-model-2" });
+    await graft.start({ task: "mine now", author: { kind: "human", name: "zach" } });
+    expect((await graft.status())?.author).toEqual({ kind: "human", name: "zach" });
+  });
+
+  it("takes the model from GRAFT_AUTHOR_MODEL", async () => {
+    process.env.GRAFT_AUTHOR_MODEL = "example-model-3";
+    try {
+      expect((await graft.start({ task: "env model" })).author.model).toBe("example-model-3");
+    } finally {
+      delete process.env.GRAFT_AUTHOR_MODEL;
+    }
+  });
+});
+
+describe("repeated runs in the message", () => {
+  const run = (exitCode: number, extra: Partial<Evidence> = {}): Evidence =>
+    ({ kind: "command", at: "", command: "npm run lint", exitCode, durationMs: 3000, output: "", name: "lint", ...extra }) as Evidence;
+
+  it("keeps the last run per command with a count of the earlier ones", () => {
+    expect(evidenceLines([run(1), run(1), run(0), { kind: "note", at: "", text: "looked" }])).toEqual([
+      "  [pass lint] npm run lint (3.0s; earlier: 2 runs, 2 failed)",
+      "  [note] looked",
+    ]);
+    expect(evidenceLines([run(0), run(0)])).toEqual(["  [pass lint] npm run lint (3.0s; earlier: 1 run)"]);
+    // Runs without a catalog name group by their text.
+    expect(evidenceLines([run(1, { name: undefined }), run(0, { name: undefined, command: "npm  run lint" })])).toEqual([
+      "  [pass] npm run lint (3.0s; earlier: 1 run, 1 failed)",
+    ]);
+  });
+
+  it("keeps differently labelled runs of one command apart, since a rule can be met by its label", async () => {
+    const labelled = (label: string): Evidence => ({ kind: "command", at: "", command: "npx vitest run", exitCode: 0, durationMs: 1000, output: "", label });
+    const lines = evidenceLines([labelled("test"), labelled("test (captured)")]);
+    expect(lines).toEqual(["  [pass test] npx vitest run (1.0s)", "  [pass test (captured)] npx vitest run (1.0s)"]);
+    const message = ["T", "", "Evidence:", ...lines, "", "Graft-Change: m4z1gs7jgdyp3pj2za9c", "Graft-Task: t", "Graft-Author: agent:x", "Graft-Evidence: 2 commands, 2 passed"].join("\n");
+    const policy = { version: 1 as const, requireEvidence: true, commands: { test: "npm test" }, rules: [{ paths: ["src/**"], require: ["test"] }] };
+    expect(evaluateRules(policy, ["src/a.ts"], parseMessageRecord(message, "")!.evidence)).toEqual([]);
+  });
+
+  it("keeps the latest pass next to a last run that failed, so the message reaches the note's verdict", async () => {
+    const lines = evidenceLines([run(0), run(0), run(2)]);
+    expect(lines).toEqual(["  [pass lint] npm run lint (3.0s)", "  [fail 2 lint] npm run lint (3.0s; earlier: 1 run)"]);
+    const message = ["T", "", "Evidence:", ...lines, "", "Graft-Change: m4z1gs7jgdyp3pj2za9c", "Graft-Task: t", "Graft-Author: agent:x", "Graft-Evidence: 3 commands, 2 passed"].join("\n");
+    const rebuilt = parseMessageRecord(message, "")!;
+    expect(rebuilt.evidence).toMatchObject([
+      { command: "npm run lint", exitCode: 0, durationMs: 3000, label: "lint" },
+      { command: "npm run lint", exitCode: 2, durationMs: 3000, label: "lint" },
+    ]);
+    const policy = { version: 1 as const, requireEvidence: true, commands: { lint: "npm run lint" }, rules: [{ paths: ["src/**"], require: ["lint"] }] };
+    expect(evaluateRules(policy, ["src/a.ts"], rebuilt.evidence)).toEqual([]);
+  });
+
+  it("reports whether this clone has the git hooks", async () => {
+    expect(await gitHooksInstalled(graft.git)).toBe(false);
+    await installHooks(graft.git, dir);
+    expect(await gitHooksInstalled(graft.git)).toBe(true);
   });
 });

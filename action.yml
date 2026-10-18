@@ -10,6 +10,10 @@
 # recorded commands are re-run only for branches of the same repository, since
 # a fork's commit messages are text a stranger wrote and the check would
 # execute them; set `rerun: "false"` to never re-run, or `"true"` to always.
+# Set `comment: "true"` to also post the summary table as one pull request
+# comment, updated in place on each run; the calling workflow then needs
+# `permissions: pull-requests: write`, and a fork's pull request gets a
+# warning instead, since its token cannot write.
 name: Graft check
 description: Fail a pull request whose behavior changes carry no evidence that meets .graft/policy.json, re-running the recorded commands so a [pass] is a fact.
 branding:
@@ -28,6 +32,12 @@ inputs:
   node-version:
     description: Node.js version used to run Graft itself.
     default: "22"
+  comment:
+    description: Post the check's summary as a pull request comment, updated in place. Needs pull-requests write permission.
+    default: "false"
+  github-token:
+    description: Token used to post the comment.
+    default: ${{ github.token }}
 runs:
   using: composite
   steps:
@@ -47,7 +57,28 @@ runs:
         RERUN: ${{ inputs.rerun }}
         SAME_REPO: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
         BASE: ${{ inputs.base }}
+        COMMENT: ${{ inputs.comment }}
       run: |
-        flag=""
-        if [ "$RERUN" = "true" ] || { [ "$RERUN" = "auto" ] && [ "$SAME_REPO" = "true" ]; }; then flag="--rerun"; fi
-        graft check --base "origin/$BASE" --format github $flag
+        flags=()
+        if [ "$RERUN" = "true" ] || { [ "$RERUN" = "auto" ] && [ "$SAME_REPO" = "true" ]; }; then flags+=(--rerun); fi
+        # Only asked for with comment, so a pinned older version without the option keeps working.
+        if [ "$COMMENT" = "true" ]; then flags+=(--summary-file "$RUNNER_TEMP/graft-check-summary.md"); fi
+        graft check --base "origin/$BASE" --format github "${flags[@]}"
+    - name: Post the Graft summary on the pull request
+      if: always() && inputs.comment == 'true' && github.event.pull_request.number
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        PR: ${{ github.event.pull_request.number }}
+        REPO: ${{ github.repository }}
+      run: |
+        file="$RUNNER_TEMP/graft-check-summary.md"
+        [ -f "$file" ] || { echo "No Graft summary to post."; exit 0; }
+        marker="<!-- graft-check -->"
+        body="$(printf '%s\n%s' "$marker" "$(cat "$file")")"
+        id="$(gh api --paginate "repos/$REPO/issues/$PR/comments" --jq ".[] | select(.user.type == \"Bot\" and (.body | startswith(\"$marker\"))) | .id" | head -n 1 || true)"
+        if [ -n "$id" ]; then
+          gh api -X PATCH "repos/$REPO/issues/comments/$id" -f body="$body" >/dev/null
+        else
+          gh api -X POST "repos/$REPO/issues/$PR/comments" -f body="$body" >/dev/null
+        fi || echo "::warning title=Graft check::Could not post the summary comment (a fork's token, or the workflow lacks pull-requests: write)."

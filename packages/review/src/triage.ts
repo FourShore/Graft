@@ -58,15 +58,16 @@ export function judgeEvidence(evidence: Evidence[]): EvidenceVerdict {
 
 /**
  * The one word a reviewer reads first.
- *   read:       behavior changed and nothing proves it works
- *   verified:   behavior changed and a test run passed
- *   mechanical: no behavior files changed
+ *   read:       behavior or tests changed and no test run passed
+ *   tested:     behavior or tests changed and the latest test run passed;
+ *               a command exited 0, not proof that a test covered the change
+ *   mechanical: only docs, lockfiles or generated files changed
  *   partial:    the commit has Graft trailers but neither the note nor an
  *               Evidence: block in its message, so the evidence cannot be
  *               inspected (commits landed before 0.0.6 with no note here)
  *   unrecorded: commit has no change record at all
  */
-export type Risk = "read" | "verified" | "mechanical" | "partial" | "unrecorded";
+export type Risk = "read" | "tested" | "mechanical" | "partial" | "unrecorded";
 
 export interface Triage {
   risk: Risk;
@@ -89,10 +90,11 @@ export function triage(
   let risk: Risk;
   if (!record) risk = trailers["Graft-Change"] ? "partial" : "unrecorded";
   else if (summaryOnly) risk = "partial";
-  else if (groups.behavior.length === 0) risk = "mechanical";
-  else if (verdict.testsPassed) risk = "verified";
+  // A commit that only edits tests can weaken them, so it is read like behavior, not collapsed.
+  else if (groups.behavior.length === 0 && groups.tests.length === 0) risk = "mechanical";
+  else if (verdict.testsPassed) risk = "tested";
   else risk = "read";
   return { risk, groups, verdict };
 }
 
-export const RISK_ORDER: Risk[] = ["read", "partial", "unrecorded", "verified", "mechanical"];
+export const RISK_ORDER: Risk[] = ["read", "partial", "unrecorded", "tested", "mechanical"];

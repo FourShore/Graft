@@ -9,7 +9,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { createRequire } from "node:module";
-import { Graft, GraftError } from "@fourshore/graft-core";
+import { Graft, GraftError, gitHooksInstalled } from "@fourshore/graft-core";
 
 const { version } = createRequire(import.meta.url)("../package.json") as { version: string };
 
@@ -94,7 +94,7 @@ server.registerTool(
   "graft_land",
   {
     description:
-      "Commit the change with its record attached as git trailers and a git note. Commits what is already staged plus any paths you name; pass stageAll only when you mean every change in the tree. Refuses to land without evidence unless allowNoEvidence is true, and refuses staged files that look like credentials (.env, *.pem, ...) unless allowSecrets is true.",
+      "Commit the change with its record attached as git trailers and a git note. Commits what is already staged plus any paths you name; pass stageAll only when you mean every change in the tree. Refuses to land without evidence unless allowNoEvidence is true, and refuses staged files that look like credentials (.env, *.pem, ...) unless allowSecrets is true; an override that lets a change through is recorded as a Graft-Override trailer.",
     inputSchema: {
       title: z.string().optional().describe("Commit title; defaults to the task"),
       plan: z.string().optional().describe("Final plan, if it changed"),
@@ -114,8 +114,12 @@ server.registerTool(
 
 server.registerTool(
   "graft_status",
-  { description: "The open change (null if none) and the policy's named commands, which graft_evidence runs by `name`.", inputSchema: {} },
-  async () => guarded(async () => ({ open: await graft.status(), commands: await graft.catalog() })),
+  {
+    description:
+      "The open change (null if none), the policy's named commands, which graft_evidence runs by `name`, and whether this clone has the git hooks (gitHooks), in which case a plain git commit carries the record; without them, commit with graft_land.",
+    inputSchema: {},
+  },
+  async () => guarded(async () => ({ open: await graft.status(), commands: await graft.catalog(), gitHooks: await gitHooksInstalled(graft.git) })),
 );
 
 server.registerTool(

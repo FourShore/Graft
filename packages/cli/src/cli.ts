@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { Command } from "commander";
-import { Graft, GraftError, attemptLines, handleClaudeCodeEvent, shellJoin, type ClaudeCodeEvent, type LogEntry } from "@fourshore/graft-core";
+import { Graft, GraftError, attemptLines, gitHooksInstalled, handleClaudeCodeEvent, shellJoin, type ClaudeCodeEvent, type LogEntry } from "@fourshore/graft-core";
 import type { ChangeRecord } from "@fourshore/graft-core";
 import { renderCheckGithub, renderCheckText, runCheck } from "@fourshore/graft-review";
 import { createRequire } from "node:module";
@@ -183,7 +183,7 @@ program
   .option("-m, --title <title>", "commit title (default: the task)")
   .option("-a, --all", "stage all changes first")
   .option("--plan <plan>", "final plan")
-  .option("--allow-no-evidence", "land even though nothing was verified")
+  .option("--allow-no-evidence", "land even though the evidence the policy asks for is missing (recorded as Graft-Override)")
   .option("--allow-secrets", "land even though a staged file looks like a credential")
   .option("--trailer <trailer>", "extra commit trailer 'Key: value' (repeatable)", (v: string, all: string[]) => [...all, v], [])
   .action(async (paths: string[], o) => {
@@ -197,7 +197,8 @@ program
       trailers: o.trailer,
     });
     const skipped = skippedTrailers.map((t) => `\nLeft out policy trailer '${t.trailer}': $${t.missing} is not set.`).join("");
-    out({ record, commit, skippedTrailers }, `Landed ${record.id} as ${commit.slice(0, 10)}${skipped}`);
+    const overrides = record.overrides?.length ? `\nRecorded Graft-Override: ${record.overrides.join(", ")}; graft check shows it on the pull request.` : "";
+    out({ record, commit, skippedTrailers }, `Landed ${record.id} as ${commit.slice(0, 10)}${skipped}${overrides}`);
   });
 
 program
@@ -271,7 +272,11 @@ program
     const commands = names.length ? `\ncommands: ${names.map(([n, c]) => `${n} (${c})`).join(", ")}` : "";
     const waiting = await g.attempts();
     const attempts = waiting.length ? `\nattempts waiting for the next land: ${waiting.map((a) => `${a.id} (${a.reason ?? a.task})`).join(", ")}` : "";
-    out({ open: record, commands: await g.catalog(), attempts: waiting }, (record ? formatRecord(record) : "No change is open.") + commands + attempts);
+    const gitHooks = await gitHooksInstalled(g.git);
+    const hooks = gitHooks
+      ? "\ngit hooks: installed, so a plain git commit carries the record"
+      : "\ngit hooks: not installed in this clone; commit with graft land, or run graft init to install them";
+    out({ open: record, commands: await g.catalog(), attempts: waiting, gitHooks }, (record ? formatRecord(record) : "No change is open.") + commands + attempts + hooks);
   });
 
 program
@@ -302,6 +307,7 @@ program
   .option("--base <ref>", "commits in <ref>..HEAD are checked (default: origin/main, or the upstream of HEAD)")
   .option("--rerun", "re-run every recorded passing command once on this checkout and fail if any fails")
   .option("--format <fmt>", "text | github (annotations and a step summary)", "text")
+  .option("--summary-file <path>", "with --format github, also write the Markdown summary to this file (the action posts it as a PR comment)")
   .option("-n, --limit <n>", "most commits to examine", "200")
   .action(async (o) => {
     const repo = program.opts<{ C: string }>().C;
@@ -311,6 +317,7 @@ program
       const gh = renderCheckGithub(r);
       for (const a of gh.annotations) console.log(a);
       if (process.env.GITHUB_STEP_SUMMARY) await appendFile(process.env.GITHUB_STEP_SUMMARY, gh.summary);
+      if (o.summaryFile) await writeFile(o.summaryFile, gh.summary);
       console.log(renderCheckText(r));
     } else {
       out(r, renderCheckText(r));
@@ -399,7 +406,8 @@ function formatRecord(r: ChangeRecord): string {
     ...(r.ref ? [`ref:    ${r.ref}`] : []),
     ...(r.reverts ? [`reverts: ${r.reverts}`] : []),
     ...(r.artifacts ?? []).map((a) => `artifact: ${a.name} sha256:${a.sha256}`),
-    `author: ${r.author.kind}:${r.author.name}`,
+    `author: ${r.author.kind}:${r.author.name}${r.author.model ? ` (${r.author.model})` : ""}`,
+    ...(r.overrides?.length ? [`override: ${r.overrides.join(", ")} (landed past the gate)`] : []),
   ];
   if (r.plan) lines.push(`plan:   ${r.plan.split("\n").join("\n        ")}`);
   if (r.attempts?.length) lines.push(`tried:  ${attemptLines(r.attempts).map((l) => l.trim()).join("\n        ")}`);

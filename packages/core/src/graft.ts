@@ -11,6 +11,8 @@ import {
   type ChangeRecord,
   type CommandEvidence,
   type Evidence,
+  type Override,
+  OVERRIDES,
   EVIDENCE_OUTPUT_CAP,
   NOTES_REF,
   TRAILER_KEYS,
@@ -194,7 +196,13 @@ export class Graft {
       if (opts.plan?.trim()) open.plan = opts.plan.trim();
       if (opts.ref?.trim()) open.ref = opts.ref.trim();
       open.ref ??= await this.defaultRef();
-      if (opts.author) open.author = defaultAuthor(opts.author);
+      if (opts.author) {
+        const author = defaultAuthor(opts.author);
+        // The hook knew the model; keep it while the author is still that agent, not once a human or another tool takes over.
+        const same = author.kind === open.author.kind && author.name === open.author.name;
+        if (!author.model && same && open.author.model) author.model = open.author.model;
+        open.author = author;
+      }
       if (opts.reverts) open.reverts = opts.reverts;
       await this.store.write(open);
       return open;
@@ -556,56 +564,70 @@ export class Graft {
     return capOutput(redact(output));
   }
 
-  /** The landing gate: policy on evidence, then on staged files. Shared by land and the commit hook. */
+  /**
+   * The landing gate: policy on evidence, then on staged files. Shared by land
+   * and the commit hook. Returns the overrides that let through a change the
+   * gate would otherwise have refused, so the commit can say so.
+   */
   private async assertLandable(
     open: ChangeRecord,
     policy: Policy,
     staged: string[],
     opts: Pick<LandOptions, "allowNoEvidence" | "allowSecrets">,
-  ): Promise<void> {
-    if (policy.requireEvidence && !opts.allowNoEvidence) {
+  ): Promise<Override[]> {
+    const used = new Set<Override>();
+    // A refusal the caller overrode is recorded instead of thrown.
+    const refuse = (override: Override, message: string) => {
+      if (override === "no-evidence" ? opts.allowNoEvidence : opts.allowSecrets) used.add(override);
+      else throw new GraftError(message);
+    };
+    if (policy.requireEvidence) {
       if (open.evidence.length === 0) {
-        throw new GraftError(
-          "No evidence recorded. Run `graft evidence -- <command>` or pass --allow-no-evidence.",
-        );
-      }
-      const passed = open.evidence.some((e) => e.kind === "command" && e.exitCode === 0 && !e.attested);
-      if (policy.requireEvidence === "command" && !passed) {
-        throw new GraftError(
-          "Policy requires a passing command that Graft or a harness ran; notes and attested runs alone do not count. " +
-            "Run `graft evidence -- <command>` or pass --allow-no-evidence.",
-        );
+        refuse("no-evidence", "No evidence recorded. Run `graft evidence -- <command>` or pass --allow-no-evidence.");
+      } else {
+        const passed = open.evidence.some((e) => e.kind === "command" && e.exitCode === 0 && !e.attested);
+        if (policy.requireEvidence === "command" && !passed) {
+          refuse(
+            "no-evidence",
+            "Policy requires a passing command that Graft or a harness ran; notes and attested runs alone do not count. " +
+              "Run `graft evidence -- <command>` or pass --allow-no-evidence.",
+          );
+        }
       }
     }
     if (staged.length === 0) {
       throw new GraftError("Nothing staged to commit. Stage files, name paths, or pass --all.");
     }
-    const unmet = opts.allowNoEvidence ? [] : evaluateRules(policy, staged, open.evidence);
+    const unmet = evaluateRules(policy, staged, open.evidence);
     if (unmet.length) {
       const wants = unmet.map((u) => `"${u.name}" (${u.command})`).join(" and ");
       const files = [...new Set(unmet.flatMap((u) => u.files))];
-      throw new GraftError(
+      refuse(
+        "no-evidence",
         `Policy requires a passing run of ${wants} for changes to ${files.join(", ")}. ` +
           `Run graft evidence ${unmet.map((u) => u.name).join(", graft evidence ")}, or pass --allow-no-evidence.`,
       );
     }
     // Marks stale runs as a side effect, so the message is honest even when the gate is bypassed.
     const stale = await this.staleRules(policy, staged, open.evidence);
-    if (stale.length && !opts.allowNoEvidence) {
+    if (stale.length) {
       const wants = stale.map((s) => `"${s.name}" (${s.command})`).join(" and ");
       const files = [...new Set(stale.flatMap((s) => s.files))];
-      throw new GraftError(
+      refuse(
+        "no-evidence",
         `${wants} last passed before ${files.join(", ")} changed, so the run did not check what is being committed. ` +
           `Run graft evidence ${stale.map((s) => s.name).join(", graft evidence ")} again, or pass --allow-no-evidence.`,
       );
     }
     const suspicious = staged.filter((p) => looksLikeSecretFile(p, policy.secretFiles));
-    if (suspicious.length > 0 && !opts.allowSecrets) {
-      throw new GraftError(
+    if (suspicious.length > 0) {
+      refuse(
+        "secrets",
         `Refusing to land: staged files look like credentials: ${suspicious.join(", ")}. ` +
           "Unstage them (git restore --staged <file>) or pass --allow-secrets if they are not.",
       );
     }
+    return OVERRIDES.filter((o) => used.has(o));
   }
 
   /** Commit the staged changes with the record in trailers and a git note. */
@@ -616,8 +638,10 @@ export class Graft {
     if (opts.paths?.length) await this.git.run(["add", "--", ...opts.paths]);
     if (opts.all) await this.git.run(["add", "-A"]);
     const staged = await this.git.stagedFiles();
-    await this.assertLandable(open, policy, staged, opts);
+    const overrides = await this.assertLandable(open, policy, staged, opts);
 
+    if (overrides.length) open.overrides = overrides;
+    else delete open.overrides;
     open.landedAt = new Date().toISOString();
     open.ref ??= await this.defaultRef(policy);
     await this.foldAttempts(open);
@@ -669,8 +693,9 @@ export class Graft {
     if (parseTrailers(current)[TRAILER_KEYS.change]) return { applied: false, reason: "message already carries a record" };
     const policy = await readPolicy(await this.git.topLevel());
     const staged = await this.git.stagedFiles();
+    let overrides: Override[];
     try {
-      await this.assertLandable(open, policy, staged, {
+      overrides = await this.assertLandable(open, policy, staged, {
         allowNoEvidence: Boolean(process.env.GRAFT_ALLOW_NO_EVIDENCE),
         allowSecrets: Boolean(process.env.GRAFT_ALLOW_SECRETS),
       });
@@ -682,6 +707,8 @@ export class Graft {
           .replace("pass --allow-secrets if they are not", "set GRAFT_ALLOW_SECRETS=1 if they are not"),
       );
     }
+    if (overrides.length) open.overrides = overrides;
+    else delete open.overrides;
     open.landedAt = new Date().toISOString();
     open.ref ??= await this.defaultRef(policy);
     await this.foldAttempts(open);
@@ -1015,7 +1042,8 @@ function defaultAuthor(partial?: Partial<ChangeAuthor>): ChangeAuthor {
   const env = process.env;
   const name = partial?.name ?? env.GRAFT_AUTHOR ?? (env.CLAUDECODE ? "claude-code" : env.USER ?? "unknown");
   const kind = partial?.kind ?? (env.CLAUDECODE || env.GRAFT_AUTHOR ? "agent" : "human");
-  return { kind, name };
+  const model = (partial?.model ?? env.GRAFT_AUTHOR_MODEL)?.trim();
+  return { kind, name, ...(model ? { model } : {}) };
 }
 
 function capOutput(s: string): string {
