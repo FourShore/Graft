@@ -196,8 +196,13 @@ export class Graft {
       if (opts.plan?.trim()) open.plan = opts.plan.trim();
       if (opts.ref?.trim()) open.ref = opts.ref.trim();
       open.ref ??= await this.defaultRef();
-      // The hook knew the model; a start that names only the agent keeps it.
-      if (opts.author) open.author = defaultAuthor({ ...opts.author, model: opts.author.model ?? open.author.model });
+      if (opts.author) {
+        const author = defaultAuthor(opts.author);
+        // The hook knew the model; keep it while the author is still that agent, not once a human or another tool takes over.
+        const same = author.kind === open.author.kind && author.name === open.author.name;
+        if (!author.model && same && open.author.model) author.model = open.author.model;
+        open.author = author;
+      }
       if (opts.reverts) open.reverts = opts.reverts;
       await this.store.write(open);
       return open;

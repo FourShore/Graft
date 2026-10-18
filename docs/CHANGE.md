@@ -179,7 +179,7 @@ in any git tool. Attempts, if any, go under `Tried:`, one line per attempt:
 (<evidence summary>)`, and a record rebuilt from the message keeps that line
 as the attempt's `summary`. The evidence list goes under `Evidence:`, one line
 per note, attested run, and command: repeated Graft or harness runs of one
-command (by catalog name, else by its text) keep only the last, with the
+command (by catalog name, else by its label and text) keep only the last, with the
 earlier runs counted after the duration (`(3.0s; earlier: 2 runs, 1 failed)`).
 When that last run did not pass, the latest passing run is kept too, so a
 reader of the message alone reaches the same verdict on the policy as one with

@@ -258,7 +258,7 @@ const MESSAGE_LINE_CAP = 200;
  *   [attested fail 2 build] yarn build
  *   [note] manually verified in browser
  *
- * Repeated runs of one command (by catalog name, else by its text) keep only
+ * Repeated runs of one command (by catalog name, else by its label and text) keep only
  * the last, with a count of the earlier ones; the note keeps every run. When
  * the last run did not pass, the latest passing run stays too, so a reader of
  * the message alone reaches the same verdict on the policy as one with the note.
@@ -283,7 +283,8 @@ export function evidenceLines(evidence: Evidence[]): string[] {
 /**
  * Which evidence entries the message shows, by index, each with the runs it
  * stands for that are not shown. Notes and attested runs are always shown;
- * repeated Graft or harness runs of one command collapse to the last, plus
+ * repeated Graft or harness runs of one command (same catalog name, or same
+ * label and text) collapse to the last, plus
  * the latest passing one when the last did not pass.
  */
 function collapseRuns(evidence: Evidence[]): Map<number, { runs: number; failed: number }> {
@@ -294,7 +295,8 @@ function collapseRuns(evidence: Evidence[]): Map<number, { runs: number; failed:
       keep.set(i, { runs: 0, failed: 0 });
       return;
     }
-    const key = ev.name ? `name:${ev.name}` : `command:${oneLine(ev.command)}`;
+    // Without a catalog name the label is part of the identity: a rule can be met by a run labelled with its name.
+    const key = ev.name ? `name:${ev.name}` : `command:${ev.label ?? ""}\u0000${oneLine(ev.command)}`;
     groups.set(key, [...(groups.get(key) ?? []), i]);
   });
   for (const idx of groups.values()) {

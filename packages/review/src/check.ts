@@ -276,7 +276,7 @@ export function renderCheckGithub(r: CheckResult): { annotations: string[]; summ
     .map((f) => `::error title=Graft check::${describeFinding(f).split("\n")[0].replace(/\r?\n/g, " ")}`);
   for (const c of r.commits) {
     const o = c.entry.record?.overrides ?? [];
-    if (o.length) annotations.push(`::warning title=Graft override::${c.entry.commit.slice(0, 10)} "${c.entry.title}" was landed past the gate with ${o.map((x) => `--allow-${x}`).join(" and ")}.`);
+    if (o.length) annotations.push(`::warning title=Graft override::${c.entry.commit.slice(0, 10)} "${c.entry.title}" was landed past the gate with the ${o.join(" and ")} override (Graft-Override).`);
   }
   const rows = r.commits.map(
     (c) =>

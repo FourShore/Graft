@@ -1472,6 +1472,9 @@ describe("prompt envelopes", () => {
     const spawn = wake("system", "You are a Thread Session");
     expect(promptTask(spawn)).toBe(spawn);
     expect(promptTask("fix the login bug")).toBe("fix the login bug");
+    expect(promptTask(wake("human", "hex &#x27;ok&#x27; and &#99999999; kept"))).toBe("hex 'ok' and &#99999999; kept");
+    // A slash command inside an envelope is still a slash command.
+    expect(await handleClaudeCodeEvent(graft, { hook_event_name: "UserPromptSubmit", prompt: wake("human", "/compact") })).toMatchObject({ action: "ignored", reason: "slash command" });
     expect(promptTask("<b>not an envelope</b>")).toBe("<b>not an envelope</b>");
 
     const r = await handleClaudeCodeEvent(graft, { hook_event_name: "UserPromptSubmit", prompt: wake("human", "Ship it"), model: "example-model-1" });
@@ -1491,6 +1494,12 @@ describe("author model", () => {
     expect(sh(["log", "-1", "--format=%B", commit])).toMatch(/^Graft-Model: example-model-2$/m);
     sh(["notes", "--ref=refs/notes/graft", "remove", commit]);
     expect((await graft.show(commit))?.record?.author).toEqual({ kind: "agent", name: "claude-code", model: "example-model-2" });
+  });
+
+  it("drops the hook's model when someone else takes the change over", async () => {
+    await handleClaudeCodeEvent(graft, { hook_event_name: "UserPromptSubmit", prompt: "do it", model: "example-model-2" });
+    await graft.start({ task: "mine now", author: { kind: "human", name: "zach" } });
+    expect((await graft.status())?.author).toEqual({ kind: "human", name: "zach" });
   });
 
   it("takes the model from GRAFT_AUTHOR_MODEL", async () => {
@@ -1517,6 +1526,15 @@ describe("repeated runs in the message", () => {
     expect(evidenceLines([run(1, { name: undefined }), run(0, { name: undefined, command: "npm  run lint" })])).toEqual([
       "  [pass] npm run lint (3.0s; earlier: 1 run, 1 failed)",
     ]);
+  });
+
+  it("keeps differently labelled runs of one command apart, since a rule can be met by its label", async () => {
+    const labelled = (label: string): Evidence => ({ kind: "command", at: "", command: "npx vitest run", exitCode: 0, durationMs: 1000, output: "", label });
+    const lines = evidenceLines([labelled("test"), labelled("test (captured)")]);
+    expect(lines).toEqual(["  [pass test] npx vitest run (1.0s)", "  [pass test (captured)] npx vitest run (1.0s)"]);
+    const message = ["T", "", "Evidence:", ...lines, "", "Graft-Change: m4z1gs7jgdyp3pj2za9c", "Graft-Task: t", "Graft-Author: agent:x", "Graft-Evidence: 2 commands, 2 passed"].join("\n");
+    const policy = { version: 1 as const, requireEvidence: true, commands: { test: "npm test" }, rules: [{ paths: ["src/**"], require: ["test"] }] };
+    expect(evaluateRules(policy, ["src/a.ts"], parseMessageRecord(message, "")!.evidence)).toEqual([]);
   });
 
   it("keeps the latest pass next to a last run that failed, so the message reaches the note's verdict", async () => {

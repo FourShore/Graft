@@ -36,11 +36,12 @@ const TASK_CAP = 500;
  */
 export async function handleClaudeCodeEvent(graft: Graft, event: ClaudeCodeEvent): Promise<CaptureOutcome> {
   if (event.hook_event_name === "UserPromptSubmit") {
-    const task = (event.prompt ?? "").trim();
+    // Judge the person's words, not the envelope a harness may wrap them in.
+    const task = promptTask((event.prompt ?? "").trim()).trim();
     if (!task) return { action: "ignored", reason: "empty prompt" };
     if (task.startsWith("/")) return { action: "ignored", reason: "slash command" };
     if (await graft.status()) return { action: "ignored", reason: "a change is already open" };
-    const record = await graft.start({ task: clipTask(promptTask(task)), author: claudeAuthor(event), capturedBy: "claude-code" });
+    const record = await graft.start({ task: clipTask(task), author: claudeAuthor(event), capturedBy: "claude-code" });
     return { action: "started", id: record.id, task: record.task };
   }
   if (event.hook_event_name !== "PostToolUse" && event.hook_event_name !== "PostToolUseFailure") {
@@ -111,7 +112,10 @@ function unescapeXml(s: string): string {
     .replace(/&gt;/g, ">")
     .replace(/&quot;/g, '"')
     .replace(/&#39;|&apos;/g, "'")
-    .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)))
+    .replace(/&#(?:x([0-9a-f]+)|(\d+));/gi, (ref, hex, dec) => {
+      const code = hex ? parseInt(hex, 16) : Number(dec);
+      return code <= 0x10ffff ? String.fromCodePoint(code) : ref;
+    })
     .replace(/&amp;/g, "&");
 }
 
