@@ -105,13 +105,18 @@ describe("triage", () => {
   it("needs reading when behavior changed with no passing tests", () => {
     expect(triage(record([{ kind: "note", at: "", text: "looked" }]), behavior).risk).toBe("read");
   });
-  it("is verified when a test run passed", () => {
-    expect(triage(record([{ kind: "command", at: "", command: "pytest", exitCode: 0, durationMs: 1, output: "" }]), behavior).risk).toBe("verified");
+  it("is tested when a test run passed", () => {
+    expect(triage(record([{ kind: "command", at: "", command: "pytest", exitCode: 0, durationMs: 1, output: "" }]), behavior).risk).toBe("tested");
   });
   it("is mechanical when no behavior files changed", () => {
     const docsOnly = "diff --git" + SAMPLE.split("diff --git")[1];
     const docs = parseDiff(docsOnly.replaceAll("src/a.ts", "docs/a.md"));
     expect(triage(record([]), docs).risk).toBe("mechanical");
+  });
+  it("reads a tests-only change like behavior, since an edited test can be a weakened one", () => {
+    const testsOnly = parseDiff(("diff --git" + SAMPLE.split("diff --git")[1]).replaceAll("src/a.ts", "src/a.test.ts"));
+    expect(triage(record([]), testsOnly).risk).toBe("read");
+    expect(triage(record([{ kind: "command", at: "", command: "npx vitest run", exitCode: 0, durationMs: 1, output: "" }]), testsOnly).risk).toBe("tested");
   });
   it("is unrecorded without a record", () => {
     expect(triage(null, behavior).risk).toBe("unrecorded");
@@ -143,7 +148,7 @@ describe("Review over a real repo", () => {
 
     const review = new Review({ repo: dir });
     const q = await review.queue();
-    expect(q.map((i) => i.triage.risk)).toEqual(["read", "unrecorded", "verified"]);
+    expect(q.map((i) => i.triage.risk)).toEqual(["read", "unrecorded", "tested"]);
     expect(q[0].entry.commit).toBe(risky.commit);
     expect(q[2].entry.commit).toBe(safe.commit);
 
@@ -158,7 +163,7 @@ describe("Review over a real repo", () => {
 
     const review = new Review({ repo: dir });
     const [item] = await review.queue();
-    expect(item.triage.risk).toBe("verified");
+    expect(item.triage.risk).toBe("tested");
     expect(item.entry.recordSource).toBe("message");
   });
 
@@ -228,7 +233,7 @@ describe("check", () => {
     const r = await runCheck({ repo: dir, base, rerun: true });
     expect(r.commits.map((c) => [c.entry.title, c.triage.risk, c.ok])).toEqual([
       ["docs tweak", "unrecorded", true],
-      ["change a", "verified", true],
+      ["change a", "tested", true],
     ]);
     expect(r.reruns).toMatchObject([{ command: "echo verified", exitCode: 0 }]);
     expect(r.findings).toEqual([]);
@@ -280,10 +285,31 @@ describe("check", () => {
     expect(text).toContain('"old record" changed src/a.ts and its evidence lives only in the git note');
     expect(text).toMatch(/FAIL: see findings/);
     const gh = renderCheckGithub(r);
-    expect(gh.annotations).toHaveLength(6);
+    // Six findings, and a warning for each of the two commits landed past the gate.
+    expect(gh.annotations).toHaveLength(8);
     expect(gh.annotations[0]).toMatch(/^::error title=Graft check::/);
+    expect(gh.annotations.filter((a) => a.startsWith("::warning title=Graft override::"))).toHaveLength(2);
+    expect(text).toContain("override: no-evidence");
     expect(gh.summary).toContain("### Graft check: fail");
     expect(gh.summary).toContain("| ❌ |");
+  });
+
+  it("fails a tests-only commit with no record, and passes one that carries a run", async () => {
+    const base = await seed();
+    await writeFile(join(dir, "src", "a.test.ts"), "expect(a).toBe(1);\n");
+    sh(["add", "-A"]);
+    sh(["commit", "-q", "-m", "loosen the test"]);
+    let r = await runCheck({ repo: dir, base });
+    expect(r.findings).toMatchObject([{ kind: "no-record", files: ["src/a.test.ts"] }]);
+
+    const next = sh(["rev-parse", "HEAD"]);
+    await graft.start({ task: "tighten the test" });
+    await writeFile(join(dir, "src", "a.test.ts"), "expect(a).toBe(2);\n");
+    await graft.evidenceCommand("true", "smoke");
+    await graft.land({ all: true });
+    r = await runCheck({ repo: dir, base: next });
+    expect(r.ok).toBe(true);
+    expect(r.commits[0].triage.risk).toBe("read"); // "true" is not a test command
   });
 
   it("falls back to origin/<base> when the base is not a local ref, and names a base that is neither", async () => {

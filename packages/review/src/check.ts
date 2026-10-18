@@ -63,7 +63,8 @@ export const RERUN_ENV = "GRAFT_CHECK_RERUN";
  * commit that changed behavior must carry a record with evidence that meets
  * the policy, and with `rerun` every recorded passing command is run again
  * on the current checkout, turning the author's claim into a fact (or a
- * failure). Mechanical commits (docs, lockfiles, tests only) need nothing.
+ * failure). Commits that touch tests need evidence like behavior; mechanical
+ * commits (docs, lockfiles, generated files) need nothing.
  */
 export async function runCheck(opts: CheckOptions): Promise<CheckResult> {
   const graft = new Graft(opts.repo ?? process.cwd());
@@ -77,7 +78,8 @@ export async function runCheck(opts: CheckOptions): Promise<CheckResult> {
   for (const entry of entries) {
     const files = parseDiff(await graft.diff(entry.commit));
     const t = triage(entry.record, files, entry.trailers, entry.recordSource, policy.behaviorFiles);
-    const behavior = t.groups.behavior.map((f) => f.path);
+    // Tests count: weakening an assertion is the cheapest way to green, so a tests-only commit needs evidence too.
+    const behavior = [...t.groups.behavior, ...t.groups.tests].map((f) => f.path);
     // "partial" is triage's name for a record whose evidence lives only in a note this clone lacks.
     const partial = t.risk === "partial";
     const unmet = partial ? [] : evaluateRules(policy, files.map((f) => f.path), entry.record?.evidence ?? []);
@@ -213,7 +215,7 @@ export function renderCheckText(r: CheckResult): string {
     const files = `${c.triage.groups.behavior.length} behavior, ${c.triage.groups.tests.length} tests, ${c.triage.groups.mechanical.length} mechanical`;
     const ev = r0 ? `${describePassing(c.entry)}, ${r0.evidence.length} evidence` : "no record";
     lines.push(`  ${c.ok ? "ok  " : "FAIL"} ${c.entry.commit.slice(0, 10)}  ${c.entry.title}`);
-    lines.push(`       ${c.triage.risk} · ${who} · ${files} · ${ev}`);
+    lines.push(`       ${c.triage.risk} · ${who} · ${files} · ${ev}${overridden(c)}`);
   }
   if (r.nested) lines.push("", "Re-run skipped: this check is itself a command an outer graft check is re-running.");
   if (r.reruns.length) {
@@ -234,6 +236,12 @@ export function renderCheckText(r: CheckResult): string {
   }
   lines.push("", r.ok ? "PASS: every behavior change carries evidence that meets the policy." : "FAIL: see findings above.");
   return lines.join("\n");
+}
+
+/** The overrides a commit landed past the gate with, as a suffix for its line. */
+function overridden(c: CheckedCommit): string {
+  const o = c.entry.record?.overrides ?? [];
+  return o.length ? ` · override: ${o.join(", ")}` : "";
 }
 
 function describePassing(entry: LogEntry): string {
@@ -266,9 +274,13 @@ export function renderCheckGithub(r: CheckResult): { annotations: string[]; summ
   const annotations = r.findings
     .filter((f) => f.kind !== "rerun-skipped")
     .map((f) => `::error title=Graft check::${describeFinding(f).split("\n")[0].replace(/\r?\n/g, " ")}`);
+  for (const c of r.commits) {
+    const o = c.entry.record?.overrides ?? [];
+    if (o.length) annotations.push(`::warning title=Graft override::${c.entry.commit.slice(0, 10)} "${c.entry.title}" was landed past the gate with ${o.map((x) => `--allow-${x}`).join(" and ")}.`);
+  }
   const rows = r.commits.map(
     (c) =>
-      `| ${c.ok ? "✅" : "❌"} | \`${c.entry.commit.slice(0, 10)}\` | ${escapePipes(c.entry.title)} | ${c.triage.risk} | ${c.entry.record ? passingCommands(c.entry).length : 0} | ${c.triage.groups.behavior.length} |`,
+      `| ${c.ok ? "✅" : "❌"} | \`${c.entry.commit.slice(0, 10)}\` | ${escapePipes(c.entry.title)} | ${c.triage.risk}${overridden(c)} | ${c.entry.record ? passingCommands(c.entry).length : 0} | ${c.triage.groups.behavior.length} |`,
   );
   const summary = [
     `### Graft check: ${r.ok ? "pass" : "fail"}`,

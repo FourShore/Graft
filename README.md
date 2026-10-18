@@ -161,11 +161,14 @@ remembers Graft:
   `git commit` with a change open gets the Plan and Evidence blocks and the
   trailers in its message and the full record as a note, exactly like
   `graft land`, and the same policy gate applies (`GRAFT_ALLOW_NO_EVIDENCE=1`
-  or `GRAFT_ALLOW_SECRETS=1` override it for one commit). Merges, squashes and
+  or `GRAFT_ALLOW_SECRETS=1` override it for one commit, and the commit then
+  carries a `Graft-Override` trailer). Merges, squashes and
   amends are left alone, and a hook that is already there is not overwritten.
 
-The hooks run `graft`, so it has to be on PATH. `graft init --no-hooks` skips
-them. Claude Code runs project hooks only after you trust the folder.
+The hooks run `graft`. Where it is not on PATH they step aside: a commit goes
+through unrecorded with a one-line install hint, for `graft check` to catch at
+the pull request, and the Claude Code hooks do nothing. `graft status` says
+whether the clone has the git hooks. `graft init --no-hooks` skips them. Claude Code runs project hooks only after you trust the folder.
 
 ## Verify at the pull request
 
@@ -189,8 +192,10 @@ The action installs Graft, fetches the notes, and runs the check against the
 pull request's base with annotations and a step summary. It re-runs recorded
 commands only for branches of the same repository, since a fork's commit
 messages are text a stranger wrote; `rerun: "false"` never re-runs, and
-`checkCommands` in the policy can restrict what is re-run further. The same
-check runs from a shell:
+`checkCommands` in the policy can restrict what is re-run further. With
+`comment: "true"` it also posts the summary table as one pull request comment,
+updated in place on each run; the workflow then needs
+`permissions: pull-requests: write`. The same check runs from a shell:
 
 ```
 graft check --base origin/main            # every behavior change needs evidence that meets the policy
@@ -201,8 +206,12 @@ It walks `base..HEAD`, groups each commit's files into behavior, tests and
 mechanical, and fails when a commit that changed behavior has no record, no
 evidence, or (under `requireEvidence: "command"`) no passing command that
 Graft or a harness ran, and when a commit touched files a policy rule covers
-without a passing run of every command the rule names. Commits that only
-touch tests, docs or lockfiles need nothing. With `--rerun` each distinct
+without a passing run of every command the rule names. A commit that only
+touches tests needs evidence too, since a weakened assertion is the cheapest
+way to green; commits that only touch docs, lockfiles or generated files need
+nothing. A commit landed past the gate with an override carries a
+`Graft-Override` trailer, which the check shows on its line and, on GitHub,
+as a warning. With `--rerun` each distinct
 recorded passing command, attested ones included, runs once from the root of
 the current checkout, by its current catalog definition when it was recorded
 by name, and a non-zero exit fails the check with the output. A recorded
@@ -247,7 +256,7 @@ that policy exists to demand a run Graft or a harness saw. Over MCP, pass
 
 `land` commits what's staged, plus any files you name, or everything with
 `-a`. Add your own trailers with `--trailer "Co-Authored-By: ..."` (repeatable;
-`trailers` on `graft_land`). It refuses to commit without evidence (`--allow-no-evidence` overrides)
+`trailers` on `graft_land`). It refuses to commit without evidence (`--allow-no-evidence` overrides, and says so in a `Graft-Override` trailer)
 and refuses staged files that look like credentials such as `.env`, `*.pem`,
 `*.key` (`--allow-secrets` overrides). Evidence output and notes are scrubbed
 of any value held in an environment variable whose name looks secret, and the

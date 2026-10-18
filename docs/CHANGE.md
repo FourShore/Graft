@@ -57,6 +57,7 @@ change is being made.
 | `ref` | no | Where the task came from: the thread, issue or ticket that asked for it, as a URL or id. Written as the `Graft-Task-Ref` trailer. |
 | `author.kind` | yes | `agent` or `human`. |
 | `author.name` | yes | Tool or person: `claude-code`, `cursor`, `zach`. |
+| `author.model` | no | The model an agent ran on, from the harness's hook payload when it carries one or from `GRAFT_AUTHOR_MODEL`. Written as the `Graft-Model` trailer. |
 | `startedAt`, `landedAt` | yes / on land | ISO 8601. |
 | `commit` | on land | The SHA the record was first landed on. Informational; the trailer is the durable link. After an amend or rebase the note moves with the commit but this field keeps the original SHA, so readers take the commit from where the note is attached, never from this field. |
 | `evidence[]` | yes (may be empty) | Ordered list of what was done to verify the change. |
@@ -64,6 +65,7 @@ change is being made.
 | `attempts[]` | no | Changes abandoned in this worktree since the last land, each with its `id`, `task`, `plan`, `reason`, `startedAt`, `abandonedAt` and `evidence`: the plans that did not work and why. Written as the `Tried:` block. |
 | `reverts` | no | The change id or commit this change undoes, when it was opened by `graft revert`. Written as the `Graft-Reverts` trailer. |
 | `artifacts[]` | no | Files the change produced, each `{ "name", "sha256" }` (lower-case hex), recorded with `graft artifact`. One `Graft-Artifact` trailer each, so a build found in the field resolves to its change with `graft show <sha256>`. |
+| `overrides[]` | no | The landing-gate checks a caller overrode to land the change: `no-evidence` (`--allow-no-evidence`, `GRAFT_ALLOW_NO_EVIDENCE`) or `secrets` (`--allow-secrets`, `GRAFT_ALLOW_SECRETS`). Set only when the gate would otherwise have refused. One `Graft-Override` trailer each. |
 
 ### Evidence
 
@@ -160,8 +162,10 @@ Graft-Evidence: 1 command, 1 passed; 1 note
 | `Graft-Task` | The task, collapsed to one line. |
 | `Graft-Task-Ref` | Present when the change has a `ref`: the URL or id of what asked for it. |
 | `Graft-Reverts` | Present when the change was opened by `graft revert`: the change id or commit it undoes. |
-| `Graft-Artifact` | One per recorded artifact: `sha256:<64 hex> <name>`. The only trailer that may repeat; readers collect every line. |
+| `Graft-Artifact` | One per recorded artifact: `sha256:<64 hex> <name>`. May repeat; readers collect every line. |
 | `Graft-Author` | `<kind>:<name>`. |
+| `Graft-Model` | Present when `author.model` is set. |
+| `Graft-Override` | One per override that let the change past the gate: `no-evidence` or `secrets`. May repeat. `graft check` shows it on the commit and, on GitHub, as a warning. |
 | `Graft-Evidence` | Human-readable summary of the evidence list: commands, how many passed, and how many of those were stale (`2 commands, 1 passed, 1 stale`), then notes. A stale run is not counted as passed. |
 
 Other trailers can be added at land time (`graft land --trailer "Co-Authored-By: ..."`,
@@ -173,7 +177,13 @@ a better one. The plan, if any, goes in the body under `Plan:` so it reads well
 in any git tool. Attempts, if any, go under `Tried:`, one line per attempt:
 `[<change id>] <task>: <reason, or the plan when no reason was given>
 (<evidence summary>)`, and a record rebuilt from the message keeps that line
-as the attempt's `summary`. The evidence list goes under `Evidence:`, one line per entry.
+as the attempt's `summary`. The evidence list goes under `Evidence:`, one line
+per note, attested run, and command: repeated Graft or harness runs of one
+command (by catalog name, else by its text) keep only the last, with the
+earlier runs counted after the duration (`(3.0s; earlier: 2 runs, 1 failed)`).
+When that last run did not pass, the latest passing run is kept too, so a
+reader of the message alone reaches the same verdict on the policy as one with
+the note, which keeps every run. `Graft-Evidence` counts every run.
 The bracket holds the status, `pass`, `stale`, `fail <exit code>` or `note`,
 and then the label if there is one (`[pass unit tests]`, `[note manual]`); after it
 come the command and its duration, or the note text. Keeping the label inside

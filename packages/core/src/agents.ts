@@ -13,7 +13,7 @@ export const AGENTS_SECTION = `## Version control
 
 This repo uses Graft (https://github.com/FourShore/Graft): every commit carries
 the task it was given, the checks that ran and whether they passed, and a commit
-without them is refused. The hooks do most of the work; three things are yours.
+without them is refused. The hooks record the work; two things are yours.
 
 - \`graft start "<the task, in the words you were given>"\` names the change.
   With the capture hooks installed your prompt already opened one and this only
@@ -23,8 +23,11 @@ without them is refused. The hooks do most of the work; three things are yours.
   runs you make are recorded by the hooks; \`graft evidence <name>\` runs one by
   name and records it; \`graft evidence --note "<what you checked by hand>"\`
   records a manual check. A check that ran before your last edit does not count.
-- Commit with \`graft land <paths> -m "<title>"\`, or a plain \`git commit\` where
-  the git hooks are installed; either refuses a change whose checks are missing.
+
+Then commit. \`graft status\` says whether this clone has the git hooks: with
+them, a plain \`git commit\` carries the record; without them, use
+\`graft land <paths> -m "<title>"\`. Either refuses a change whose checks are
+missing.
 
 Before editing a file, \`graft context <paths>\` shows the changes that touched
 it. Over MCP the same steps are \`graft_start\`, \`graft_evidence\`, \`graft_land\`
