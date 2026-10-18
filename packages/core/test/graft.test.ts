@@ -1483,7 +1483,7 @@ describe("prompt envelopes", () => {
 describe("author model", () => {
   it("writes Graft-Model, reads it back, and keeps the hook's model when graft start names the task", async () => {
     await handleClaudeCodeEvent(graft, { hook_event_name: "UserPromptSubmit", prompt: "do it", model: { id: "example-model-2" } });
-    await graft.start({ task: "named", author: { name: undefined as unknown as string } });
+    await graft.start({ task: "named", author: { kind: "agent", name: "claude-code" } });
     expect((await graft.status())?.author.model).toBe("example-model-2");
     await writeFile(join(dir, "a.txt"), "a\n");
     await graft.evidenceNote("looked");
