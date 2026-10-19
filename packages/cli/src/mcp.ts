@@ -9,12 +9,18 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { createRequire } from "node:module";
+import { existsSync } from "node:fs";
 import { Graft, GraftError, gitHooksInstalled } from "@fourshore/graft-core";
 
 const { version } = createRequire(import.meta.url)("../package.json") as { version: string };
 
 const repoFlag = process.argv.indexOf("--repo");
 const repo = repoFlag !== -1 ? process.argv[repoFlag + 1] : process.cwd();
+if (!repo || !existsSync(repo)) {
+  // Fail where the person configuring the server sees it, not on every tool call.
+  process.stderr.write(`graft-mcp: --repo ${repo ?? "(missing)"} is not a directory\n`);
+  process.exit(2);
+}
 const graft = new Graft(repo);
 
 const server = new McpServer({ name: "graft", version });
@@ -116,10 +122,11 @@ server.registerTool(
   "graft_status",
   {
     description:
-      "The open change (null if none), the policy's named commands, which graft_evidence runs by `name`, and whether this clone has the git hooks (gitHooks), in which case a plain git commit carries the record; without them, commit with graft_land.",
+      "The open change (null if none), the policy's named commands, which graft_evidence runs by `name`, abandoned attempts waiting to land with the next change, and whether this clone has the git hooks (gitHooks), in which case a plain git commit carries the record; without them, commit with graft_land.",
     inputSchema: {},
   },
-  async () => guarded(async () => ({ open: await graft.status(), commands: await graft.catalog(), gitHooks: await gitHooksInstalled(graft.git) })),
+  async () =>
+    guarded(async () => ({ open: await graft.status(), commands: await graft.catalog(), attempts: await graft.attempts(), gitHooks: await gitHooksInstalled(graft.git) })),
 );
 
 server.registerTool(
@@ -137,7 +144,12 @@ server.registerTool(
 server.registerTool(
   "graft_show",
   { description: "Show one change by change id or commit SHA.", inputSchema: { ref: z.string() } },
-  async ({ ref }) => guarded(() => graft.show(ref)),
+  async ({ ref }) =>
+    guarded(async () => {
+      const shown = await graft.show(ref);
+      if (!shown) throw new GraftError(`No change or commit found for ${ref}.`);
+      return shown;
+    }),
 );
 
 server.registerTool(
@@ -146,7 +158,7 @@ server.registerTool(
     description:
       "Read before editing: the changes that touched the given files or directories, newest first, with task, plan and evidence, trimmed to fit a prompt. Use the `text` field as-is.",
     inputSchema: {
-      paths: z.array(z.string()).describe("Files or directories, relative to the repo root; empty for the whole repository"),
+      paths: z.array(z.string()).optional().default([]).describe("Files or directories, relative to the repo root; omit or leave empty for the whole repository"),
       limit: z.number().int().positive().optional().default(50).describe("Commits to scan"),
       budget: z.number().int().positive().optional().default(8000).describe("Characters of text to stay within"),
       includeUnrecorded: z.boolean().optional().default(false).describe("Include commits that have no change record"),

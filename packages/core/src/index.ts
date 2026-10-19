@@ -5,6 +5,7 @@ export * from "./record.js";
 export * from "./redact.js";
 export * from "./agents.js";
 export * from "./capture.js";
+export * from "./detect.js";
 export * from "./claude-code.js";
 export * from "./hooks.js";
 export * from "./context.js";

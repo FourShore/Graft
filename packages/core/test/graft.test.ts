@@ -2,13 +2,14 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { beforeEach, describe, expect, it } from "vitest";
-import { Graft, GraftError } from "../src/graft.js";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { Graft, GraftError, runShell, SHELL_OUTPUT_KEEP } from "../src/graft.js";
 import { evidenceSummary, isChangeId, newChangeId, parseArtifactTrailers, parseTrailers, shellJoin } from "../src/record.js";
-import { evaluateRules, expandTrailers, matchCatalog, readPolicy } from "../src/policy.js";
-import { classifyCommand, relativizeCommand } from "../src/capture.js";
-import { globToRegExp, secretFilesNamed } from "../src/redact.js";
+import { evaluateRules, expandTrailers, matchCatalog, parsePolicy, readPolicy } from "../src/policy.js";
+import { analyzeCommand, classifyCommand, relativizeCommand } from "../src/capture.js";
+import { globToRegExp, looksLikeSecretFile, redact, secretFilesNamed } from "../src/redact.js";
 import { handleClaudeCodeEvent, promptTask } from "../src/claude-code.js";
+import { detectPolicy } from "../src/detect.js";
 import { gitHooksInstalled, installHooks, CLAUDE_SETTINGS_PATH, HOOK_COMMAND } from "../src/hooks.js";
 import { evidenceLines, parseMessageRecord, type Evidence } from "../src/record.js";
 import { existsSync } from "node:fs";
@@ -721,6 +722,52 @@ describe("capture", () => {
     expect(classifyCommand("./scripts/verify.sh", ["("])).toBeNull();
   });
 
+  it("judges each piece of a command from its first word, past wrappers and flags", () => {
+    const kinds: [string, string | null][] = [
+      ["mvn -q test", "test"],
+      ["npm run tests", "test"],
+      ["pnpm -r test", "test"],
+      ["pnpm --filter core test", "test"],
+      ["yarn workspace web test", "test"],
+      ["node --test", "test"],
+      ["bazel test //...", "test"],
+      ["cargo t", "test"],
+      ["rake spec", "test"],
+      ["./gradlew :app:test", "test"],
+      ["nx run-many -t test", "test"],
+      ["python -m pytest -q", "test"],
+      ["uv run pytest", "test"],
+      ["bundle exec rspec", "test"],
+      ["CI=1 timeout 600 npm test", "test"],
+      ["(cd pkg && npm test)", "test"],
+      ["make -j8", "build"],
+      ["turbo run build", "build"],
+      ["tsc --noEmit", "typecheck"],
+      ["ruff check .", "lint"],
+      ["npm run format:check", "lint"],
+      // Mentioned, not run; or run to rewrite files, or to ask about the tool.
+      ["echo 'npm test'", null],
+      ['git commit -m "npm test"', null],
+      ["graft evidence test", null],
+      ["npx vitest --version", null],
+      ["eslint --fix .", null],
+      ["ruff format .", null],
+      ["prettier --write .", null],
+      ["npm run lint:fix", null],
+      ["npm install vitest", null],
+    ];
+    for (const [command, kind] of kinds) expect([command, classifyCommand(command)]).toEqual([command, kind]);
+  });
+
+  it("says when the shell's exit code is not the check's", () => {
+    for (const c of ["npm test | tail -20", "npm test 2>&1 | tail", "npm test || true", "npm test; echo done", "npm test &"]) {
+      expect([c, analyzeCommand(c).masked]).toEqual([c, true]);
+    }
+    for (const c of ["npm test", "npm test 2>&1", "npm test && echo ok", "npm test || exit 1", "set -o pipefail; npm test | tail", "set -euo pipefail; npm test; echo done", "echo hi | grep h; npm test"]) {
+      expect([c, analyzeCommand(c).masked]).toEqual([c, false]);
+    }
+  });
+
   it("rewrites absolute paths under the repository root so a captured command re-runs elsewhere", () => {
     const top = "/home/me/repo";
     expect(relativizeCommand("cd /home/me/repo && go test ./...", top)).toBe("go test ./...");
@@ -735,6 +782,36 @@ describe("capture", () => {
     expect(relativizeCommand("npm test", top)).toBe("npm test");
     expect(relativizeCommand("cd C:\\Users\\z\\repo\\pkg && go test ./...", "C:/Users/z/repo")).toBe("cd ./pkg && go test ./...");
     expect(relativizeCommand("cd c:/users/z/repo && go test ./...", "C:/Users/z/repo")).toBe("go test ./...");
+  });
+
+  it("redacts well-known credential formats wherever a record keeps text", async () => {
+    const env = {};
+    expect(redact("curl -H 'x' https://bob:s3cretpass@example.com/api", env)).toBe("curl -H 'x' https://bob:[redacted]@example.com/api");
+    expect(redact("deploy --password=hunter2 now", env)).toBe("deploy --password=[redacted] now");
+    expect(redact("use ghp_" + "a".repeat(36) + " for it", env)).toBe("use [redacted GitHub token] for it");
+    expect(redact("key AKIA" + "A".repeat(16), env)).toBe("key [redacted AWS key]");
+    expect(redact("sk-ant-" + "x".repeat(40), env)).toBe("[redacted Anthropic key]");
+    expect(redact("npm test -- --grep token", env)).toBe("npm test -- --grep token");
+    const record = await graft.start({ task: "rotate the key ghp_" + "b".repeat(36), plan: "PASSWORD=hunter2 ./deploy" });
+    expect(record.task).toBe("rotate the key [redacted GitHub token]");
+    expect(record.plan).toBe("PASSWORD=[redacted] ./deploy");
+    await graft.evidenceAttested("API_TOKEN=abc123 ./verify", 0);
+    expect((await graft.status())!.evidence[0]).toMatchObject({ command: "API_TOKEN=[redacted] ./verify" });
+  });
+
+  it("keeps every run when hooks record in parallel, and says what is wrong with a damaged open change", async () => {
+    await graft.start({ task: "parallel" });
+    await Promise.all(Array.from({ length: 12 }, (_, i) => graft.evidenceNote(`note ${i}`)));
+    expect((await graft.status())!.evidence).toHaveLength(12);
+    await writeFile(join(dir, ".git", "graft", "open.json"), "{ half a fi");
+    await expect(graft.status()).rejects.toThrow(/not valid JSON.*\.broken/);
+  });
+
+  it("does not let a free label stand in for a catalog name on a live record", () => {
+    const policy = { version: 1 as const, requireEvidence: true, commands: { test: "npm test" }, rules: [{ paths: ["src/**"], require: ["test"] }] };
+    const fake: Evidence = { kind: "command", at: "", command: "true", exitCode: 0, durationMs: 1, output: "", label: "test" };
+    expect(evaluateRules(policy, ["src/a.ts"], [fake], { labelIsName: false })).toHaveLength(1);
+    expect(evaluateRules(policy, ["src/a.ts"], [fake])).toEqual([]);
   });
 
   it("finds the credential files a command names", () => {
@@ -821,6 +898,40 @@ describe("capture", () => {
     const orphan = await handleClaudeCodeEvent(graft, { hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: { command: "npm run build" }, tool_response: { stdout: "" } });
     expect(orphan).toMatchObject({ action: "recorded", opened: true });
     expect((await graft.status())?.task).toMatch(/prompt not captured/);
+  });
+
+  it("does not record a run whose exit code is masked, a background run, or another session's run, and tells the agent why", async () => {
+    const bash = (command: string, extra: object = {}) =>
+      handleClaudeCodeEvent(graft, { hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: { command }, tool_response: { stdout: "" }, session_id: "s1", ...extra });
+    await handleClaudeCodeEvent(graft, { hook_event_name: "UserPromptSubmit", prompt: "Fix the parser", session_id: "s1" });
+    const masked = await bash("npm test | tail -5");
+    expect(masked).toMatchObject({ action: "ignored", context: expect.stringMatching(/not recorded.*pipefail/) });
+    expect(await bash("npm test", { tool_input: { command: "npm test", run_in_background: true } })).toMatchObject({ action: "ignored", reason: "run in the background" });
+    const other = await bash("npm test", { session_id: "s2" });
+    expect(other).toMatchObject({ action: "ignored", context: expect.stringMatching(/another Claude Code session/) });
+    expect((await graft.status())?.evidence).toEqual([]);
+    expect(await bash("npm test")).toMatchObject({ action: "recorded" });
+  });
+
+  it("records a run from a subdirectory as it would run from the root", async () => {
+    await mkdir(join(dir, "packages", "core"), { recursive: true });
+    const r = await handleClaudeCodeEvent(graft, { hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: { command: "npm test" }, tool_response: { stdout: "" }, cwd: join(dir, "packages", "core") });
+    expect(r).toMatchObject({ action: "recorded", command: "cd packages/core && npm test" });
+    const root = await handleClaudeCodeEvent(graft, { hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: { command: "npm test" }, tool_response: { stdout: "" }, cwd: dir });
+    expect(root).toMatchObject({ action: "recorded", command: "npm test" });
+  });
+
+  it("keeps the session's task across a short reply and a second change, and treats only /word as a slash command", async () => {
+    const prompt = (p: string) => handleClaudeCodeEvent(graft, { hook_event_name: "UserPromptSubmit", prompt: p, session_id: "s1" });
+    expect(await prompt("ok")).toMatchObject({ action: "ignored", reason: "a short reply, not a task" });
+    expect(await prompt("/home/me/notes.md lists what to fix")).toMatchObject({ action: "started", task: "/home/me/notes.md lists what to fix" });
+    await graft.abandon();
+    expect(await prompt("continue")).toMatchObject({ action: "started", task: "/home/me/notes.md lists what to fix" });
+    await graft.abandon();
+    // A run after a land, still in the same session, belongs to the same task.
+    const run = await handleClaudeCodeEvent(graft, { hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: { command: "npm test" }, tool_response: { stdout: "" }, session_id: "s1" });
+    expect(run).toMatchObject({ action: "recorded", opened: true });
+    expect((await graft.status())?.task).toBe("/home/me/notes.md lists what to fix");
   });
 
   it("installs Claude Code and git hooks idempotently and leaves foreign hooks alone", async () => {
@@ -1301,6 +1412,37 @@ describe("init", () => {
   });
 });
 
+describe("detected policy", () => {
+  it("names the commands the build files define and requires the test run for source changes", async () => {
+    await writeFile(join(dir, "package.json"), JSON.stringify({ scripts: { test: "vitest run", lint: "eslint .", typecheck: "tsc --noEmit", build: "tsc -b" } }));
+    await writeFile(join(dir, "pnpm-lock.yaml"), "");
+    await writeFile(join(dir, "go.mod"), "module x\n");
+    const { policy, from } = await detectPolicy(dir);
+    expect(from).toEqual(["package.json", "go.mod"]);
+    expect(policy.commands).toEqual({
+      test: "pnpm test",
+      typecheck: "pnpm run typecheck",
+      lint: "pnpm run lint",
+      build: "pnpm run build",
+      "go-test": "go test ./...",
+      "go-lint": "go vet ./...",
+      "go-build": "go build ./...",
+    });
+    expect(policy.rules).toEqual([
+      { paths: ["*.ts", "*.tsx", "*.js", "*.jsx", "*.mjs", "*.cjs", "*.vue", "*.svelte"], require: ["test"] },
+      { paths: ["*.go"], require: ["go-test"] },
+    ]);
+    const r = await graft.init({ hooks: false, agents: false });
+    expect(r.policyFrom).toEqual(["package.json", "go.mod"]);
+    expect(await readPolicy(dir)).toMatchObject({ commands: { test: "pnpm test" } });
+  });
+
+  it("skips npm's placeholder test script and writes the bare policy when nothing is found", async () => {
+    await writeFile(join(dir, "package.json"), JSON.stringify({ scripts: { test: 'echo "Error: no test specified" && exit 1' } }));
+    expect((await detectPolicy(dir)).policy).toEqual({ version: 1, requireEvidence: true });
+  });
+});
+
 describe("policy", () => {
   it("requireEvidence: false lets a change land without evidence", async () => {
     await mkdir(join(dir, ".graft"), { recursive: true });
@@ -1324,6 +1466,12 @@ describe("policy", () => {
     expect((await graft.land({ all: true })).commit).toHaveLength(40);
   });
 
+  it("parses a policy read from a commit with the same defaults and validation as the file", () => {
+    expect(parsePolicy('{"requireEvidence":"command"}')).toEqual({ version: 1, requireEvidence: "command" });
+    expect(() => parsePolicy('{"version":2}')).toThrow(/Unsupported policy version/);
+    expect(() => parsePolicy('{"rules":[{"paths":["src/**"],"require":["test"]}]}')).toThrow(/does not define/);
+  });
+
   it("rejects an unknown policy version", async () => {
     await mkdir(join(dir, ".graft"), { recursive: true });
     await writeFile(join(dir, ".graft/policy.json"), JSON.stringify({ version: 2 }));
@@ -1331,6 +1479,28 @@ describe("policy", () => {
     await graft.evidenceNote("ok");
     await writeFile(join(dir, "a.txt"), "a\n");
     await expect(graft.land({ all: true })).rejects.toThrow(/Unsupported policy version/);
+  });
+});
+
+describe("diff", () => {
+  it("keeps the a/ and b/ prefixes and leaves non-ASCII paths unquoted, whatever the diff config says", async () => {
+    sh(["config", "diff.noprefix", "true"]);
+    sh(["config", "core.quotePath", "true"]);
+    await writeFile(join(dir, "café.ts"), "x\n");
+    sh(["add", "-A"]);
+    sh(["commit", "-q", "-m", "c"]);
+    const diff = await graft.diff("HEAD");
+    expect(diff).toContain("diff --git a/café.ts b/café.ts");
+    expect(diff).toContain("+++ b/café.ts");
+  });
+});
+
+describe("the reusable action", () => {
+  it("installs the version this checkout releases, so pinning the action pins Graft", async () => {
+    const root = process.cwd();
+    const { version } = JSON.parse(await readFile(join(root, "package.json"), "utf8")) as { version: string };
+    const action = await readFile(join(root, "action.yml"), "utf8");
+    expect(action).toMatch(new RegExp(`\\n  version:\\n    description: [^\\n]*\\n    default: "${version.replace(/\./g, "\\.")}"\\n`));
   });
 });
 
@@ -1508,7 +1678,7 @@ describe("prompt envelopes", () => {
 
 describe("author model", () => {
   it("writes Graft-Model, reads it back, and keeps the hook's model when graft start names the task", async () => {
-    await handleClaudeCodeEvent(graft, { hook_event_name: "UserPromptSubmit", prompt: "do it", model: { id: "example-model-2" } });
+    await handleClaudeCodeEvent(graft, { hook_event_name: "UserPromptSubmit", prompt: "fix the parser", model: { id: "example-model-2" } });
     await graft.start({ task: "named", author: { kind: "agent", name: "claude-code" } });
     expect((await graft.status())?.author.model).toBe("example-model-2");
     await writeFile(join(dir, "a.txt"), "a\n");
@@ -1520,7 +1690,7 @@ describe("author model", () => {
   });
 
   it("drops the hook's model when someone else takes the change over", async () => {
-    await handleClaudeCodeEvent(graft, { hook_event_name: "UserPromptSubmit", prompt: "do it", model: "example-model-2" });
+    await handleClaudeCodeEvent(graft, { hook_event_name: "UserPromptSubmit", prompt: "fix the parser", model: "example-model-2" });
     await graft.start({ task: "mine now", author: { kind: "human", name: "zach" } });
     expect((await graft.status())?.author).toEqual({ kind: "human", name: "zach" });
   });
@@ -1560,7 +1730,7 @@ describe("repeated runs in the message", () => {
     expect(evaluateRules(policy, ["src/a.ts"], parseMessageRecord(message, "")!.evidence)).toEqual([]);
   });
 
-  it("keeps the latest pass next to a last run that failed, so the message reaches the note's verdict", async () => {
+  it("keeps the latest pass next to a last run that failed, and the failure still holds when rebuilt from the message", async () => {
     const lines = evidenceLines([run(0), run(0), run(2)]);
     expect(lines).toEqual(["  [pass lint] npm run lint (3.0s)", "  [fail 2 lint] npm run lint (3.0s; earlier: 1 run)"]);
     const message = ["T", "", "Evidence:", ...lines, "", "Graft-Change: m4z1gs7jgdyp3pj2za9c", "Graft-Task: t", "Graft-Author: agent:x", "Graft-Evidence: 3 commands, 2 passed"].join("\n");
@@ -1570,12 +1740,372 @@ describe("repeated runs in the message", () => {
       { command: "npm run lint", exitCode: 2, durationMs: 3000, label: "lint" },
     ]);
     const policy = { version: 1 as const, requireEvidence: true, commands: { lint: "npm run lint" }, rules: [{ paths: ["src/**"], require: ["lint"] }] };
-    expect(evaluateRules(policy, ["src/a.ts"], rebuilt.evidence)).toEqual([]);
+    // The latest run is the verdict: a pass before a failure of the same command does not meet the rule, in the note or the message.
+    expect(evaluateRules(policy, ["src/a.ts"], rebuilt.evidence)).toEqual([{ name: "lint", command: "npm run lint", files: ["src/a.ts"] }]);
+    expect(evaluateRules(policy, ["src/a.ts"], [run(0), run(0), run(2)])).toEqual([{ name: "lint", command: "npm run lint", files: ["src/a.ts"] }]);
+    expect(evaluateRules(policy, ["src/a.ts"], [run(2), run(0)])).toEqual([]);
   });
 
   it("reports whether this clone has the git hooks", async () => {
     expect(await gitHooksInstalled(graft.git)).toBe(false);
     await installHooks(graft.git, dir);
     expect(await gitHooksInstalled(graft.git)).toBe(true);
+  });
+});
+
+describe("paths git would quote", () => {
+  const policy = { version: 1, commands: { test: "true" }, rules: [{ paths: ["src/**"], require: ["test"] }] };
+
+  it("reads staged and changed paths unquoted, so rules, staleness, the credential guard and context see them", async () => {
+    await mkdir(join(dir, ".graft"), { recursive: true });
+    await writeFile(join(dir, ".graft/policy.json"), JSON.stringify(policy));
+    await mkdir(join(dir, "src"), { recursive: true });
+    await graft.start({ task: "accents" });
+    await graft.evidenceNote("looked");
+    await writeFile(join(dir, "src", "café.go"), "package main\n");
+    await expect(graft.land({ paths: ["src/café.go"] })).rejects.toThrow(/"test" \(true\) for changes to src\/café\.go\./);
+    await graft.evidenceNamed("test");
+    await writeFile(join(dir, "src", "café.go"), "package main // edited\n");
+    await expect(graft.land({ paths: ["src/café.go"] })).rejects.toThrow(/last passed before src\/café\.go changed/);
+    await graft.evidenceNamed("test");
+    sh(["reset", "-q"]);
+
+    await mkdir(join(dir, "conf", "über"), { recursive: true });
+    await writeFile(join(dir, "conf", "über", ".env"), "KEY=1\n");
+    await expect(graft.land({ paths: ["conf/über/.env"] })).rejects.toThrow(/look like credentials: conf\/über\/\.env\./);
+    sh(["reset", "-q"]);
+
+    const { commit } = await graft.land({ paths: ["src/café.go"] });
+    const ctx = await graft.context(["src"]);
+    expect(ctx.entries.map((e) => [e.commit, e.files])).toEqual([[commit, ["src/café.go"]]]);
+  });
+});
+
+describe("git hooks during history rewrites", () => {
+  it("leave the open change off commits made by amend -m, cherry-pick, revert and rebase", async () => {
+    const cli = join(process.cwd(), "packages", "cli", "dist", "cli.js");
+    if (!existsSync(cli)) return; // needs a build; npm test runs after npm run build
+    const bin = join(dir, ".bin");
+    await mkdir(bin, { recursive: true });
+    await writeFile(join(bin, "graft"), `#!/bin/sh\nexec node ${JSON.stringify(cli)} "$@"\n`);
+    await chmod(join(bin, "graft"), 0o755);
+    await writeFile(join(dir, ".gitignore"), ".bin/\n");
+    await installHooks(graft.git, dir);
+    const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, GRAFT_ALLOW_NO_EVIDENCE: "" };
+    const git = (args: string[]) => execFileSync("git", args, { cwd: dir, encoding: "utf8", env, stdio: ["ignore", "pipe", "pipe"] }).trim();
+    const body = (rev = "HEAD") => git(["log", "-1", "--format=%B", rev]);
+
+    await writeFile(join(dir, "a.txt"), "a\n");
+    git(["add", "-A"]);
+    git(["commit", "-q", "-m", "base"]);
+    git(["checkout", "-q", "-b", "side"]);
+    await writeFile(join(dir, "s.txt"), "s\n");
+    git(["add", "s.txt"]);
+    git(["commit", "-q", "-m", "side work"]);
+    await writeFile(join(dir, "t.txt"), "t\n");
+    git(["add", "t.txt"]);
+    git(["commit", "-q", "-m", "more side work"]);
+    git(["checkout", "-q", "main"]);
+
+    await graft.start({ task: "recorded" });
+    await graft.evidenceNote("ok");
+    await writeFile(join(dir, "r.txt"), "r\n");
+    const recorded = await graft.land({ paths: ["r.txt"] });
+
+    const open = await graft.start({ task: "open work" });
+    await graft.evidenceNote("checked");
+
+    git(["commit", "-q", "--amend", "-m", "Reworded"]);
+    expect(body()).toBe("Reworded");
+    git(["cherry-pick", "side~1"]);
+    expect(body()).toBe("side work");
+    git(["revert", "--no-edit", "HEAD"]);
+    expect(body()).not.toContain("Graft-Change");
+    git(["checkout", "-q", "side"]);
+    git(["rebase", "-q", "main"]);
+    expect(git(["log", "--format=%B", "main..side"])).not.toContain("Graft-Change");
+    git(["checkout", "-q", "main"]);
+    expect((await graft.status())?.id).toBe(open.id);
+    expect(recorded.record.id).not.toBe(open.id);
+
+    // The next commit of the author's own work carries the change, a "#" subject and all.
+    await writeFile(join(dir, "w.txt"), "w\n");
+    git(["add", "w.txt"]);
+    git(["commit", "-q", "-m", "#42 fix the crash"]);
+    expect(body()).toMatch(new RegExp(`^#42 fix the crash\\n\\nEvidence:\\n  \\[note\\] checked\\n\\nGraft-Change: ${open.id}\\n`));
+    expect(await graft.status()).toBeNull();
+    expect((await graft.show("HEAD"))?.recordSource).toBe("note");
+  });
+
+  it("keeps a # subject given with -m and strips only git's own comment lines in the editor flow", async () => {
+    await writeFile(join(dir, "a.txt"), "a\n");
+    sh(["add", "-A"]);
+    sh(["commit", "-q", "-m", "base"]);
+    const msgFile = join(dir, ".git", "MSG");
+    await graft.start({ task: "hash subject" });
+    await graft.evidenceNote("ok");
+    await writeFile(join(dir, "a.txt"), "b\n");
+    sh(["add", "a.txt"]);
+
+    await writeFile(msgFile, "#42 fix the crash\n");
+    expect((await graft.prepareCommitMessage(msgFile, "message")).applied).toBe(true);
+    expect(await readFile(msgFile, "utf8")).toMatch(/^#42 fix the crash\n\nEvidence:\n  \[note\] ok\n\nGraft-Change: /);
+    sh(["commit", "-q", "-F", msgFile]);
+    expect(sh(["log", "-1", "--format=%s"])).toBe("#42 fix the crash");
+    await graft.finishCommit();
+
+    // Editor flow with a custom comment character: only its lines are git's.
+    sh(["config", "core.commentChar", ";"]);
+    await graft.start({ task: "comment char" });
+    await graft.evidenceNote("ok");
+    await writeFile(join(dir, "a.txt"), "c\n");
+    sh(["add", "a.txt"]);
+    await writeFile(msgFile, "#7 title\n\n; Please enter the commit message\n");
+    expect((await graft.prepareCommitMessage(msgFile, "template")).applied).toBe(true);
+    const prepared = await readFile(msgFile, "utf8");
+    expect(prepared).toMatch(/^#7 title\n\nEvidence:/);
+    expect(prepared.indexOf("; Please enter")).toBeGreaterThan(prepared.indexOf("Graft-Evidence:"));
+  });
+
+  it("never replaces a note on a commit whose message names another change", async () => {
+    await graft.start({ task: "first" });
+    await graft.evidenceNote("ok");
+    await writeFile(join(dir, "a.txt"), "a\n");
+    const first = await graft.land({ all: true });
+    const open = await graft.start({ task: "second" });
+    // A message that names both changes, the open one last, on a commit that already has the first's note.
+    sh(["commit", "-q", "--amend", "-m", `${sh(["log", "-1", "--format=%B"])}\n\nGraft-Change: ${open.id}\n`]);
+    sh(["notes", "--ref=refs/notes/graft", "add", "-f", "-m", JSON.stringify(first.record), "HEAD"]);
+    expect(await graft.finishCommit()).toMatchObject({ attached: false });
+    expect(JSON.parse(sh(["notes", "--ref=refs/notes/graft", "show", "HEAD"])).id).toBe(first.record.id);
+    expect((await graft.status())?.id).toBe(open.id);
+  });
+
+  it("treats only 1, true or yes as setting GRAFT_ALLOW_NO_EVIDENCE and GRAFT_ALLOW_SECRETS", async () => {
+    await writeFile(join(dir, "a.txt"), "a\n");
+    sh(["add", "-A"]);
+    sh(["commit", "-q", "-m", "base"]);
+    const msgFile = join(dir, ".git", "MSG");
+    const saved = { e: process.env.GRAFT_ALLOW_NO_EVIDENCE, s: process.env.GRAFT_ALLOW_SECRETS };
+    try {
+      await graft.start({ task: "flags" });
+      await writeFile(join(dir, ".env"), "KEY=1\n");
+      sh(["add", ".env"]);
+      for (const off of ["0", "false", "no", ""]) {
+        process.env.GRAFT_ALLOW_NO_EVIDENCE = off;
+        await writeFile(msgFile, "t\n");
+        await expect(graft.prepareCommitMessage(msgFile, "message")).rejects.toThrow(/No evidence recorded/);
+      }
+      process.env.GRAFT_ALLOW_NO_EVIDENCE = "yes";
+      process.env.GRAFT_ALLOW_SECRETS = "0";
+      await expect(graft.prepareCommitMessage(msgFile, "message")).rejects.toThrow(/look like credentials/);
+      process.env.GRAFT_ALLOW_SECRETS = "TRUE";
+      expect((await graft.prepareCommitMessage(msgFile, "message")).applied).toBe(true);
+      expect(await readFile(msgFile, "utf8")).toMatch(/Graft-Override: no-evidence\nGraft-Override: secrets\n/);
+    } finally {
+      for (const [k, v] of [["GRAFT_ALLOW_NO_EVIDENCE", saved.e], ["GRAFT_ALLOW_SECRETS", saved.s]] as const) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+  });
+});
+
+describe("partly staged changes", () => {
+  it("refuses a run whose tree had an unstaged edit to a covered file the commit leaves out", async () => {
+    const policy = { version: 1, commands: { test: "true" }, rules: [{ paths: ["src/**"], require: ["test"] }] };
+    await mkdir(join(dir, ".graft"), { recursive: true });
+    await writeFile(join(dir, ".graft/policy.json"), JSON.stringify(policy));
+    await mkdir(join(dir, "src"), { recursive: true });
+    await writeFile(join(dir, "src", "a.go"), "a1\n");
+    await writeFile(join(dir, "src", "b.go"), "b1\n");
+    sh(["add", "-A"]);
+    sh(["commit", "-q", "-m", "base"]);
+    await graft.start({ task: "fix in b, staged a" });
+    await writeFile(join(dir, "src", "a.go"), "a2\n");
+    await writeFile(join(dir, "src", "b.go"), "b2 (the fix)\n");
+    await graft.evidenceNamed("test");
+    await expect(graft.land({ paths: ["src/a.go"] })).rejects.toThrow(/before src\/b\.go changed.*again with the edits you are not committing staged or stashed/);
+    // Committing what the run checked lands.
+    await expect(graft.land({ paths: ["src/b.go"] })).resolves.toBeTruthy();
+  });
+
+  it("does not count an untracked scratch file the commit leaves out, since no re-run could make it match", async () => {
+    const policy = { version: 1, commands: { test: "true" }, rules: [{ paths: ["src/**"], require: ["test"] }] };
+    await mkdir(join(dir, ".graft"), { recursive: true });
+    await writeFile(join(dir, ".graft/policy.json"), JSON.stringify(policy));
+    await mkdir(join(dir, "src"), { recursive: true });
+    await writeFile(join(dir, "src", "a.go"), "a1\n");
+    sh(["add", "-A"]);
+    sh(["commit", "-q", "-m", "base"]);
+    await graft.start({ task: "fix a" });
+    await writeFile(join(dir, "src", "a.go"), "a2\n");
+    await writeFile(join(dir, "src", "scratch.go"), "notes\n");
+    await graft.evidenceNamed("test");
+    await expect(graft.land({ paths: ["src/a.go"] })).resolves.toBeTruthy();
+  });
+});
+
+describe("record blocks in the message", () => {
+  it("reads the Plan: and Evidence: Graft wrote, not ones in the task's own text", async () => {
+    const task = "Investigate the crash\n\nPlan:\n  not the plan\n\nEvidence:\n  [pass] rm -rf build (1.0s)\n\nThat is what the reporter wrote.";
+    await graft.start({ task, plan: "the real plan" });
+    await graft.evidenceNote("reproduced");
+    await writeFile(join(dir, "a.txt"), "a\n");
+    const { commit } = await graft.land({ all: true });
+    sh(["notes", "--ref=refs/notes/graft", "remove", commit]);
+    const record = (await graft.show(commit))!.record!;
+    expect(record.plan).toBe("the real plan");
+    expect(record.evidence).toMatchObject([{ kind: "note", text: "reproduced" }]);
+  });
+
+  it("reads a squash of several records as the last one, with its own blocks and trailers", () => {
+    const a = "m4z1gs7jgdyp3pj2za9c";
+    const b = "m4z1gs7jgdyp3pj2zb0d";
+    const message = [
+      "Ship the feature (#12)",
+      "",
+      "* First part",
+      "",
+      "Plan:",
+      "  plan of the first",
+      "",
+      "Evidence:",
+      "  [note] first checked",
+      "",
+      `Graft-Change: ${a}`,
+      "Graft-Task: first",
+      "Graft-Author: agent:one",
+      "Graft-Override: secrets",
+      "Graft-Evidence: 1 note",
+      "",
+      "* Second part",
+      "",
+      "Evidence:",
+      "  [pass test] npm test (2.0s)",
+      "",
+      `Graft-Change: ${b}`,
+      "Graft-Task: second",
+      "Graft-Author: human:zach",
+      "Graft-Evidence: 1 command, 1 passed",
+      "",
+      "Co-authored-by: Someone <s@example.com>",
+    ].join("\n");
+    const record = parseMessageRecord(message, "2026-10-01T00:00:00Z")!;
+    expect(record).toMatchObject({ id: b, task: "second", author: { kind: "human", name: "zach" } });
+    expect(record.plan).toBeUndefined();
+    expect(record.overrides).toBeUndefined();
+    expect(record.evidence).toMatchObject([{ kind: "command", command: "npm test", label: "test", exitCode: 0 }]);
+  });
+});
+
+describe("tree hashing for evidence", () => {
+  const policy = { version: 1, commands: { test: "true", gen: "echo generated > src/gen.ts" }, rules: [{ paths: ["src/**"], require: ["test"] }] };
+
+  it("leaves large untracked files out of the object store", async () => {
+    await mkdir(join(dir, ".graft"), { recursive: true });
+    await writeFile(join(dir, ".graft/policy.json"), JSON.stringify(policy));
+    await mkdir(join(dir, "src"), { recursive: true });
+    await writeFile(join(dir, "src", "a.ts"), "1\n");
+    await writeFile(join(dir, "data.bin"), Buffer.alloc(2 * 1024 * 1024, 7));
+    await writeFile(join(dir, "small.txt"), "small\n");
+    await graft.start({ task: "big file" });
+    await graft.evidenceNamed("test");
+    const has = (file: string) => {
+      try {
+        sh(["cat-file", "-e", sh(["hash-object", file])]);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    expect(has("data.bin")).toBe(false);
+    expect(has("small.txt")).toBe(true);
+    await expect(graft.land({ paths: ["src", "small.txt"] })).resolves.toBeTruthy();
+  });
+
+  it("hashes the tree before the command runs, since that is what it checked", async () => {
+    await mkdir(join(dir, ".graft"), { recursive: true });
+    await writeFile(join(dir, ".graft/policy.json"), JSON.stringify(policy));
+    await mkdir(join(dir, "src"), { recursive: true });
+    await writeFile(join(dir, "src", "a.ts"), "1\n");
+    await graft.start({ task: "generated" });
+    await graft.evidenceNamed("test");
+    await graft.evidenceNamed("gen");
+    // The test run predates the file the gen run wrote.
+    await expect(graft.land({ all: true })).rejects.toThrow(/before src\/gen\.ts changed/);
+  });
+});
+
+describe("notes from two clones", () => {
+  it("merges divergent notes for one commit into one record, and falls back to the message on a broken note", async () => {
+    const remote = await mkdtemp(join(tmpdir(), "graft-remote-"));
+    execFileSync("git", ["init", "-q", "--bare", "-b", "main", remote]);
+    sh(["remote", "add", "origin", remote]);
+    await graft.start({ task: "shared" });
+    await graft.evidenceNote("ok");
+    await writeFile(join(dir, "a.txt"), "a\n");
+    const landed = await graft.land({ all: true });
+    sh(["push", "-q", "origin", "main"]);
+
+    const clone = await mkdtemp(join(tmpdir(), "graft-clone-"));
+    execFileSync("git", ["clone", "-q", remote, clone]);
+    const other = new Graft(clone);
+    // The other clone records the same commit with more evidence and pushes it first.
+    const richer = { ...landed.record, evidence: [...landed.record.evidence, { kind: "note", at: landed.record.landedAt, text: "also checked on staging" }] };
+    execFileSync("git", ["notes", "--ref=refs/notes/graft", "add", "-f", "-m", JSON.stringify(richer), landed.commit], { cwd: clone });
+    await other.sync();
+
+    expect(await graft.sync()).toMatchObject({ fetched: true, merged: true, pushed: true });
+    const note = sh(["notes", "--ref=refs/notes/graft", "show", landed.commit]);
+    expect(JSON.parse(note).evidence).toHaveLength(2);
+    expect((await graft.show(landed.commit))?.recordSource).toBe("note");
+    await other.sync();
+    expect(JSON.parse(execFileSync("git", ["notes", "--ref=refs/notes/graft", "show", landed.commit], { cwd: clone, encoding: "utf8" })).evidence).toHaveLength(2);
+
+    // A note that is not a record: read the message instead, and say so once.
+    sh(["notes", "--ref=refs/notes/graft", "add", "-f", "-m", '{"id": "x"}\n{"id": "y"}', landed.commit]);
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const fresh = new Graft(dir);
+      expect((await fresh.show(landed.commit))?.recordSource).toBe("message");
+      expect((await fresh.log())[0].recordSource).toBe("message");
+      expect(stderr).toHaveBeenCalledTimes(1);
+      expect(String(stderr.mock.calls[0][0])).toMatch(/not a valid change record/);
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+});
+
+describe("command output", () => {
+  it("keeps a bounded tail of a command's output, cut on a character boundary", async () => {
+    const { output } = await runShell(`node -e "process.stdout.write('€'.repeat(100000))"`, dir);
+    expect(output.startsWith("[... truncated ...]\n")).toBe(true);
+    expect(Buffer.byteLength(output)).toBeLessThanOrEqual(SHELL_OUTPUT_KEEP + 32);
+    expect(output).not.toContain("�");
+    await graft.start({ task: "euros" });
+    const ev = await graft.evidenceCommand(`node -e "process.stdout.write('€'.repeat(100000))"`);
+    expect(ev.kind === "command" && ev.output).toMatch(/^\[\.\.\. truncated \.\.\.\]\n€+$/);
+  });
+
+  it("names the command when git fails, even when git says nothing", async () => {
+    await writeFile(join(dir, "a.txt"), "a\n".repeat(1000));
+    sh(["add", "-A"]);
+    sh(["commit", "-q", "-m", "base"]);
+    await expect(graft.git.run(["show", "HEAD"], { maxBuffer: 100 })).rejects.toThrow(/^git show HEAD failed: its output exceeded/);
+    await writeFile(join(dir, "a.txt"), "b\n");
+    await expect(graft.git.run(["diff", "--quiet"])).rejects.toThrow(/^git diff --quiet failed: exit code 1 with no message$/);
+  });
+});
+
+describe("built-in credential files", () => {
+  it("covers cloud, git, kube and terraform credentials", () => {
+    for (const p of [".aws/credentials", "home/.aws/credentials", ".git-credentials", ".kube/config", "deploy/kubeconfig", "kubeconfig.yaml", "prod.tfvars", "infra/terraform.tfvars", "x.auto.tfvars.json"]) {
+      expect([p, looksLikeSecretFile(p)]).toEqual([p, true]);
+    }
+    for (const p of ["prod.tfvars.example", "src/config.go", "docs/kube/config.md", "aws/credentials.md"]) {
+      expect([p, looksLikeSecretFile(p)]).toEqual([p, false]);
+    }
   });
 });

@@ -41,8 +41,12 @@ export async function installHooks(git: Git, topLevel: string): Promise<HooksRes
 async function writeClaudeSettings(topLevel: string): Promise<HooksResult["claudeCode"]> {
   const file = join(topLevel, CLAUDE_SETTINGS_PATH);
   let settings: Record<string, unknown> = {};
+  let indent: string | number = 2;
   try {
-    settings = JSON.parse(await readFile(file, "utf8")) as Record<string, unknown>;
+    const raw = await readFile(file, "utf8");
+    settings = JSON.parse(raw) as Record<string, unknown>;
+    // Keep the file's own indentation, so the diff is only the hooks.
+    indent = /^[{[]\s*\n([ \t]+)\S/.exec(raw)?.[1] ?? 2;
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") return "unreadable";
   }
@@ -71,7 +75,7 @@ async function writeClaudeSettings(topLevel: string): Promise<HooksResult["claud
   }
   if (!changed) return "present";
   await mkdir(join(topLevel, ".claude"), { recursive: true });
-  await writeFile(file, JSON.stringify(settings, null, 2) + "\n");
+  await writeFile(file, JSON.stringify(settings, null, indent) + "\n");
   return "written";
 }
 

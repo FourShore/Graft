@@ -5,6 +5,7 @@ import { Graft, GraftError, attemptLines, gitHooksInstalled, handleClaudeCodeEve
 import type { ChangeRecord } from "@fourshore/graft-core";
 import { renderCheckGithub, renderCheckText, runCheck } from "@fourshore/graft-review";
 import { createRequire } from "node:module";
+import { randomBytes } from "node:crypto";
 import { appendFile } from "node:fs/promises";
 
 const { version } = createRequire(import.meta.url)("../package.json") as { version: string };
@@ -34,7 +35,11 @@ program
     const r = await graft().init({ remote: o.remote, force: o.force, agents: o.agents, hooks: o.hooks, ci: o.ci });
     const lines = [
       r.configured.length ? `Set ${r.configured.join(", ")}` : "Git config already set",
-      r.policyWritten ? `Wrote .graft/policy.json` : ".graft/policy.json already exists",
+      r.policyWritten
+        ? r.policyFrom.length
+          ? `Wrote .graft/policy.json with the commands ${r.policyFrom.join(" and ")} define${r.policyFrom.length === 1 ? "s" : ""}; review it and commit it`
+          : "Wrote .graft/policy.json; add your test command to its commands and rules (see the README)"
+        : ".graft/policy.json already exists",
     ];
     if (r.agents) {
       lines.push(r.agents.written ? "Added a Version control section to AGENTS.md; commit it" : `${r.agents.coveredBy} already covers Graft`);
@@ -157,6 +162,14 @@ program
       }
       return;
     }
+    // One bare word is meant as a policy name far more often than as a program (a typo such as `graft evidence tset` should not run tset).
+    if (command.length === 1 && /^[\w:.-]+$/.test(command[0]) && !process.argv.includes("--")) {
+      const names = Object.keys(await g.catalog());
+      throw new GraftError(
+        `No policy command is named ${command[0]}${names.length ? ` (the policy names ${names.join(", ")})` : ""}. ` +
+          `To run ${command[0]} as a command, put -- before it: graft evidence -- ${command[0]}`,
+      );
+    }
     const cmd = shellJoin(command);
     if (o.attach) {
       const exitCode = o.exit === undefined ? 0 : Number(o.exit);
@@ -214,6 +227,10 @@ program
         const event = JSON.parse(raw) as ClaudeCodeEvent;
         const outcome = await handleClaudeCodeEvent(graft(), event);
         if (json()) console.log(JSON.stringify(outcome));
+        else if (outcome.context) {
+          // Claude Code reads this from stdout and adds it to the agent's context.
+          console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: event.hook_event_name, additionalContext: outcome.context } }));
+        }
       } catch (err) {
         process.stderr.write(`graft hook: ${err instanceof Error ? err.message : String(err)}\n`);
       }
@@ -224,6 +241,9 @@ program
       if (!file) throw new GraftError("prepare-commit-msg needs the message file git passes it.");
       const r = await graft().prepareCommitMessage(file, source);
       if (r.applied) process.stderr.write(`graft: added change ${r.id} to the commit message\n`);
+      else if (r.reason === "no change is open") {
+        process.stderr.write('graft: no change is open, so this commit carries no record (graft check fails a behavior change without one). Run graft start "<task>" first.\n');
+      }
       return;
     }
     if (kind === "post-commit") {
@@ -285,7 +305,7 @@ program
   .option("-n, --limit <n>", "number of commits", "20")
   .option("--all", "include commits without a change record")
   .action(async (o) => {
-    const entries = await graft().log({ limit: Number(o.limit), onlyGraft: !o.all });
+    const entries = await graft().log({ limit: positiveInt(o.limit, "--limit"), onlyGraft: !o.all });
     out(entries, entries.map(formatEntry).join("\n\n") || "No changes yet.");
   });
 
@@ -297,15 +317,15 @@ program
   .option("--budget <chars>", "characters of text to stay within", "8000")
   .option("--all", "include commits without a change record")
   .action(async (paths: string[], o) => {
-    const result = await graft().context(paths, { limit: Number(o.limit), budget: Number(o.budget), all: Boolean(o.all) });
+    const result = await graft().context(paths, { limit: positiveInt(o.limit, "--limit"), budget: positiveInt(o.budget, "--budget"), all: Boolean(o.all) });
     out(result, result.text);
   });
 
 program
   .command("check")
   .description("verify a branch's records like a reviewer at merge time: every behavior change needs evidence that meets the policy; --rerun runs the recorded commands again here")
-  .option("--base <ref>", "commits in <ref>..HEAD are checked (default: origin/main, or the upstream of HEAD)")
-  .option("--rerun", "re-run every recorded passing command once on this checkout and fail if any fails")
+  .option("--base <ref>", "commits in <ref>..HEAD are checked (default: origin/main, else origin/master)")
+  .option("--rerun", "re-run the recorded passing commands the policy allows once on this checkout and fail if any fails")
   .option("--format <fmt>", "text | github (annotations and a step summary)", "text")
   .option("--summary-file <path>", "with --format github, also write the Markdown summary to this file (the action posts it as a PR comment)")
   .option("-n, --limit <n>", "most commits to examine", "200")
@@ -318,7 +338,11 @@ program
       for (const a of gh.annotations) console.log(a);
       if (process.env.GITHUB_STEP_SUMMARY) await appendFile(process.env.GITHUB_STEP_SUMMARY, gh.summary);
       if (o.summaryFile) await writeFile(o.summaryFile, gh.summary);
+      // The text carries re-run output and commit titles, which are not ours: stop the runner reading workflow commands in it.
+      const token = randomBytes(16).toString("hex");
+      console.log(`::stop-commands::${token}`);
       console.log(renderCheckText(r));
+      console.log(`::${token}::`);
     } else {
       out(r, renderCheckText(r));
     }
@@ -361,7 +385,8 @@ program
 
 async function defaultBase(repo: string): Promise<string> {
   const g = new Graft(repo);
-  for (const candidate of ["origin/main", "origin/master", "@{upstream}"]) {
+  // Not @{upstream}: for a pushed feature branch that is the branch itself, and the check would see no commits.
+  for (const candidate of ["origin/main", "origin/master"]) {
     try {
       await g.git.run(["rev-parse", "--verify", "-q", `${candidate}^{commit}`]);
       return candidate;
@@ -369,7 +394,7 @@ async function defaultBase(repo: string): Promise<string> {
       // try the next one
     }
   }
-  throw new GraftError("No base found: pass --base <ref> (the branch this one will merge into).");
+  throw new GraftError("No base found (neither origin/main nor origin/master exists): pass --base <ref>, the branch this one will merge into.");
 }
 
 function readStdin(): Promise<string> {
@@ -380,6 +405,12 @@ function readStdin(): Promise<string> {
     process.stdin.on("end", () => resolve(data));
     process.stdin.on("error", reject);
   });
+}
+
+function positiveInt(value: string, flag: string): number {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1) throw new GraftError(`${flag} must be a positive integer, got ${value}.`);
+  return n;
 }
 
 function out(data: unknown, text: string, textAlways = false): void {

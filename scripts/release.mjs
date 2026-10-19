@@ -12,6 +12,9 @@
 // Besides the exact tag (v0.1.1) the script moves the major tag (v0) to the
 // same commit, so `uses: FourShore/Graft@v0` in other repos' workflows follows
 // each release. A moved tag needs a forced push; --follow-tags does not move it.
+// It also sets the default of action.yml's `version` input to the new version,
+// so a workflow that pins the action to a release tag or its SHA installs that
+// exact Graft rather than whatever npm calls latest.
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 
@@ -56,6 +59,13 @@ for (const file of ["package.json", ...workspaces.map((w) => `${w}/package.json`
   writeFileSync(file, JSON.stringify(pkg, null, 2) + "\n");
 }
 run("npm", ["install", "--package-lock-only", "--no-audit", "--no-fund"]);
+const action = readFileSync("action.yml", "utf8");
+const pinned = action.replace(/(\n  version:\n    description: [^\n]*\n    default: )[^\n]*/, `$1"${version}"`);
+if (pinned === action) {
+  console.error("could not find the version input's default in action.yml");
+  process.exit(1);
+}
+writeFileSync("action.yml", pinned);
 
 const graft = new Graft(process.cwd());
 if (await graft.status()) {
@@ -78,7 +88,7 @@ if (check.exitCode !== 0) {
 }
 await graft.land({
   title: `v${version}`,
-  paths: ["package.json", "package-lock.json", ...workspaces.map((w) => `${w}/package.json`)],
+  paths: ["package.json", "package-lock.json", "action.yml", ...workspaces.map((w) => `${w}/package.json`)],
 });
 run("git", ["tag", "-a", `v${version}`, "-m", `v${version}`]);
 const major = `v${version.split(".")[0]}`;
@@ -87,8 +97,13 @@ console.log(`v${version} committed and tagged; ${major} now points at it.`);
 console.log(`Now: git push --follow-tags && git push -f origin ${major}`);
 
 function next(current, how) {
-  if (/^\d+\.\d+\.\d+$/.test(how)) return how;
   const [major, minor, patch] = current.split(".").map(Number);
+  if (/^\d+\.\d+\.\d+$/.test(how)) {
+    const [a, b, c] = how.split(".").map(Number);
+    if (a > major || (a === major && (b > minor || (b === minor && c > patch)))) return how;
+    console.error(`${how} is not newer than the current version ${current}`);
+    process.exit(1);
+  }
   if (how === "major") return `${major + 1}.0.0`;
   if (how === "minor") return `${major}.${minor + 1}.0`;
   if (how === "patch") return `${major}.${minor}.${patch + 1}`;

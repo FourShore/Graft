@@ -87,12 +87,19 @@ Two kinds in version 1.
   place of any free label, so a record rebuilt from the message still
   satisfies the rules that ask for that name and `graft check --rerun` can
   run the name's current definition without the note. `tree` is the hash of
-  the working tree (tracked and untracked files, ignored ones left out) when
-  the run finished, hashed from an empty scratch index so it reflects
-  content, not a stat cache; it stays in the note. At land, a passing run
-  that a rule relies on is compared with what is being committed: when a
-  file the rule covers differs from the run's tree, the run is `stale`, it
-  does not satisfy the rule, and `land` refuses unless another run of the
+  the working tree (tracked and untracked files, ignored ones left out) that
+  the run checked: taken just before Graft runs the command, or when a
+  harness reports a run it made. It is hashed in a scratch copy of the index,
+  whose timestamp is kept so git re-reads any file whose stat cache could be
+  wrong, and it stays in the note. Untracked files over 1 MB are left out of
+  it, so a large data file or build output that will not be committed is not
+  copied into the object store on every run; changes to such a file do not
+  make a run stale. At land, a passing run that a rule relies on is compared
+  with what is being committed: when a file the rule covers differs between
+  the run's tree and the index, whether or not the file is staged, the run is
+  `stale` (an unstaged edit the run saw is not in the commit; a file that is
+  still untracked is left out of this, since no re-run could make it match), it does not
+  satisfy the rule, and `land` refuses unless another run of the
   same name is fresh (or `--allow-no-evidence` is passed). A stale run that
   lands is written as `[stale name]` in the message, so a record rebuilt
   from the message still reads it as not covering the rule. A run with no
@@ -195,7 +202,12 @@ Readers build the record from the message: the trailers give the id, task,
 ref, reverts and author, the blocks give the plan, attempts and evidence, timestamps fall back
 to the commit date, and command output is empty unless the note is in the
 clone. `recordSource` says which was read, for tools that want to show
-output when they have it.
+output when they have it. Only the record Graft wrote is read: the trailer
+paragraph that holds the last `Graft-Change` line, and the `Plan:`, `Tried:`
+and `Evidence:` blocks in the paragraphs immediately before it, in that
+order. A header in the task's own text, or the records of other commits in a
+squash message, is not part of the record; a squash of several landed
+changes reads as the last of them, with its own blocks and trailers.
 
 **2. The full record as a git note** on `refs/notes/graft`, keyed by commit SHA,
 holding the JSON above verbatim. The note is a cache: it carries what does not
@@ -213,9 +225,13 @@ git push origin refs/notes/graft
 git fetch origin refs/notes/graft:refs/notes/graft
 ```
 
-`graft sync` does this: it fetches the remote's notes, merges them with
-`cat_sort_uniq` (so two clones' records combine rather than overwrite), and
-pushes. `graft init` does not add the notes ref to the remote's fetch
+`graft sync` does this: it fetches the remote's notes, merges them into
+the clone's, and pushes. Notes on different commits combine; when both
+clones hold a different record for the same commit, one record is kept, the
+one with more evidence, then the later `landedAt`, then the clone's own, so
+every note stays one JSON document. A note that does not parse (as an
+earlier `graft sync` could leave by concatenating two records) is reported
+once on stderr, and readers build the record from the message instead. `graft init` does not add the notes ref to the remote's fetch
 refspec: an exact refspec makes every `git fetch` fail while the remote has no
 notes, and a forced one overwrites notes the clone has not pushed. It removes
 the one earlier versions added. A repo that wants a plain `git fetch` to bring
@@ -253,7 +269,7 @@ run by Graft or reported by a harness hook: a note or an attested run does
 not satisfy the gate, since each is only a claim. `secretFiles`, optional, is a
 list of globs relative to the root (`"nova.json"`, `"config/*.secret"`,
 `"keys/**"`) that `land` refuses to commit without `--allow-secrets`, on top
-of the built-in list (`.env`, `*.pem`, `*.key`, ...). A glob without a slash
+of the built-in list (`.env`, `*.pem`, `*.key`, `.aws/credentials`, `*.tfvars`, ...). A glob without a slash
 matches a file name anywhere in the tree. The same list decides whose output
 is withheld: a command that names one of these files keeps its command line,
 exit code and duration in the record, and its output is replaced with a
@@ -272,9 +288,11 @@ is a list of regular expressions (as strings) for commands the capture hooks
 record as evidence on top of the built-in test, build, lint and type-check
 patterns.
 `checkCommands`, optional, is a list of regular
-expressions (as strings); when set, `graft check --rerun` re-runs only the
-recorded commands that match one of them, plus any command the catalog
-defines. `commands`, optional, is a map of name to shell command: the repo's
+expressions (as strings), each matched against the whole command: `graft
+check --rerun` re-runs a run recorded under a catalog name, or whose text is
+a catalog command, by the catalog's definition, and any other recorded
+command only when it matches one of these. Unset, only catalog commands are
+re-run. `commands`, optional, is a map of name to shell command: the repo's
 checks, named once, run by `graft evidence <name>`, recognised by the
 capture hooks, and re-run by `graft check --rerun` under their current
 definition. `rules`, optional, is a list of `{ "paths": [globs], "require":
@@ -284,7 +302,9 @@ committed (see `tree` under Evidence), or `land` refuses and `check` fails
 the commit. A rule naming a command that `commands` does not
 define makes the policy unreadable, so the mistake surfaces at once. Readers
 reject unknown policy versions. The file is committed, so changing policy is a
-reviewed change like any other.
+reviewed change like any other; `graft check` reads it from the base of the
+range it checks, so a branch is held to the policy it is merging into, not
+one it brings along.
 
 ## Reading records
 
