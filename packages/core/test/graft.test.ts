@@ -2050,6 +2050,9 @@ describe("notes from two clones", () => {
 
     const clone = await mkdtemp(join(tmpdir(), "graft-clone-"));
     execFileSync("git", ["clone", "-q", remote, clone]);
+    // A runner has no global identity; the clone needs its own to write notes.
+    execFileSync("git", ["config", "user.name", "Other"], { cwd: clone });
+    execFileSync("git", ["config", "user.email", "other@example.com"], { cwd: clone });
     const other = new Graft(clone);
     // The other clone records the same commit with more evidence and pushes it first.
     const richer = { ...landed.record, evidence: [...landed.record.evidence, { kind: "note", at: landed.record.landedAt, text: "also checked on staging" }] };
