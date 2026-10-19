@@ -215,8 +215,11 @@ git fetch origin refs/notes/graft:refs/notes/graft
 
 `graft sync` does this: it fetches the remote's notes, merges them with
 `cat_sort_uniq` (so two clones' records combine rather than overwrite), and
-pushes. `graft init` adds the notes ref to the remote's fetch refspec so a
-plain `git fetch` brings the output along too. A clone that cannot push the
+pushes. `graft init` does not add the notes ref to the remote's fetch
+refspec: an exact refspec makes every `git fetch` fail while the remote has no
+notes, and a forced one overwrites notes the clone has not pushed. It removes
+the one earlier versions added. A repo that wants a plain `git fetch` to bring
+notes can add `+refs/notes/*:refs/notes/*` itself. A clone that cannot push the
 ref (some hosted agent sessions) loses nothing but the output.
 
 ### What survives what

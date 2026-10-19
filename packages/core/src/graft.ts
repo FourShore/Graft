@@ -749,7 +749,7 @@ export class Graft {
 
   /**
    * Prepare a repository: make git carry notes through amend and rebase,
-   * fetch the notes ref alongside branches, write a starter policy file, and
+   * write a starter policy file, and
    * tell agents how to use Graft in AGENTS.md. Safe to run more than once.
    */
   async init(opts: { remote?: string; force?: boolean; agents?: boolean; hooks?: boolean; ci?: boolean } = {}): Promise<InitResult> {
@@ -768,13 +768,18 @@ export class Graft {
       }
     }
 
+    // Graft no longer adds the notes ref to the remote's fetch refspec: an exact
+    // refspec makes every `git fetch` fail while the remote has no notes, and a
+    // forced one overwrites notes this clone has not pushed. `graft sync` fetches
+    // and merges them on purpose. Remove the one earlier versions wrote; any
+    // other notes refspec (a wildcard the repo chose) is the repo's to keep.
     const remote = opts.remote ?? (await this.defaultRemote());
     if (remote) {
-      const refspec = `+${NOTES_REF}:${NOTES_REF}`;
-      const existing = await this.configGetAll(`remote.${remote}.fetch`);
-      if (!existing.includes(refspec)) {
-        await this.git.run(["config", "--add", `remote.${remote}.fetch`, refspec]);
-        configured.push(`remote.${remote}.fetch`);
+      const ours = `+${NOTES_REF}:${NOTES_REF}`;
+      if ((await this.configGetAll(`remote.${remote}.fetch`)).includes(ours)) {
+        // A value pattern rather than --fixed-value, which needs git 2.30.
+        await this.git.run(["config", "--unset-all", `remote.${remote}.fetch`, `^${ours.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}$`]);
+        configured.push(`remote.${remote}.fetch (removed ${ours}; graft sync fetches notes)`);
       }
     }
 

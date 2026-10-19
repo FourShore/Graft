@@ -846,6 +846,15 @@ describe("capture", () => {
     expect(merged.hooks.PostToolUse).toHaveLength(2);
   });
 
+  it("keeps a capture hook the repo guarded its own way instead of adding another", async () => {
+    await mkdir(join(dir, ".claude"), { recursive: true });
+    const custom = { hooks: [{ type: "command", command: "command -v graft >/dev/null && graft hook claude-code || true" }] };
+    await writeFile(join(dir, CLAUDE_SETTINGS_PATH), JSON.stringify({ hooks: { UserPromptSubmit: [custom], PostToolUse: [{ matcher: "Bash", ...custom }], PostToolUseFailure: [{ matcher: "Bash", ...custom }] } }));
+    expect((await installHooks(graft.git, dir)).claudeCode).toBe("present");
+    const settings = JSON.parse(await readFile(join(dir, CLAUDE_SETTINGS_PATH), "utf8"));
+    expect(settings.hooks.UserPromptSubmit).toEqual([custom]);
+  });
+
   it("upgrades the unguarded Claude Code hook command in place", async () => {
     await mkdir(join(dir, ".claude"), { recursive: true });
     const old = { hooks: [{ type: "command", command: "graft hook claude-code", timeout: 15 }] };
@@ -1214,7 +1223,20 @@ describe("evidence lines from Graft 0.0.6", () => {
 });
 
 describe("init", () => {
-  it("sets notes config, adds the fetch refspec, writes a policy file, and is idempotent", async () => {
+  it("removes the notes refspec earlier versions wrote and keeps one the repo chose", async () => {
+    const remote = await mkdtemp(join(tmpdir(), "graft-remote-"));
+    execFileSync("git", ["init", "-q", "--bare", remote]);
+    sh(["remote", "add", "origin", remote]);
+    sh(["config", "--add", "remote.origin.fetch", "+refs/notes/graft:refs/notes/graft"]);
+    sh(["config", "--add", "remote.origin.fetch", "+refs/notes/*:refs/notes/*"]);
+    const r = await graft.init({ agents: false, hooks: false });
+    expect(r.configured.some((c) => c.startsWith("remote.origin.fetch (removed"))).toBe(true);
+    expect(sh(["config", "--get-all", "remote.origin.fetch"]).split("\n")).toEqual(["+refs/heads/*:refs/remotes/origin/*", "+refs/notes/*:refs/notes/*"]);
+    expect((await graft.init({ agents: false, hooks: false })).configured).toEqual([]);
+  });
+
+
+  it("sets notes config, leaves the fetch refspec alone, writes a policy file, and is idempotent", async () => {
     const remote = await mkdtemp(join(tmpdir(), "graft-remote-"));
     execFileSync("git", ["init", "-q", "--bare", remote]);
     sh(["remote", "add", "origin", remote]);
@@ -1222,9 +1244,10 @@ describe("init", () => {
     const first = await graft.init();
     expect(first.policyWritten).toBe(true);
     expect(first.configured).toContain("notes.rewriteRef");
-    expect(first.configured).toContain("remote.origin.fetch");
     expect(sh(["config", "--get", "notes.rewriteRef"])).toBe("refs/notes/graft");
-    expect(sh(["config", "--get-all", "remote.origin.fetch"])).toContain("+refs/notes/graft:refs/notes/graft");
+    expect(sh(["config", "--get-all", "remote.origin.fetch"])).not.toContain("refs/notes");
+    // A remote with no notes yet must not break a plain fetch.
+    sh(["fetch", "-q", "origin"]);
     const policy = JSON.parse(await readFile(join(dir, ".graft/policy.json"), "utf8"));
     expect(policy).toEqual({ version: 1, requireEvidence: true });
 
