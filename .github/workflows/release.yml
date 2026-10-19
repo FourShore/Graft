@@ -10,7 +10,8 @@ name: Release
 
 on:
   push:
-    tags: ["v*"]
+    # Exact versions only: the moving major tag (v0) is pushed on every release too.
+    tags: ["v*.*.*"]
 
 jobs:
   publish:
@@ -20,12 +21,19 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v4
+      - name: Check the tag names the version being published
+        run: |
+          want="v$(node -p 'require("./package.json").version')"
+          if [ "$GITHUB_REF_NAME" != "$want" ]; then
+            echo "::error title=Release::Tag $GITHUB_REF_NAME does not match package.json version ($want)."
+            exit 1
+          fi
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
       # Trusted publishing needs npm 11.5 or newer; Node 22 ships an older one.
-      - run: npm install -g npm@latest
+      - run: npm install -g npm@11
       - run: npm ci
       # Build first: the review tests import @fourshore/graft-core, which
       # resolves to packages/core/dist.

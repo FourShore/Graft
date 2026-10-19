@@ -11,8 +11,8 @@ tools keep working as they are. Three things make it more than a convention:
 - **The landing gate.** `graft land` refuses a change with no evidence, and a
   policy names the commands each kind of file needs before it may land.
 - **The check in CI.** `graft check` fails a pull request whose behavior
-  changes carry no evidence that meets the policy, and re-runs the recorded
-  commands so a `[pass]` is a fact, not a claim.
+  changes carry no evidence that meets the policy, and re-runs the policy's
+  recorded commands so a `[pass]` is a fact, not a claim.
 - **Capture without ritual.** Hooks record the prompt as the task and every
   test, build or lint run as evidence, so the record exists whether or not the
   agent remembers Graft.
@@ -63,7 +63,12 @@ that change is committed.
 
 ## Policy: the definition of done
 
-`.graft/policy.json`, written by `graft init`:
+`.graft/policy.json`, written by `graft init`. When the repo has a
+`package.json`, `go.mod`, `Cargo.toml`, `pyproject.toml`, Maven or Gradle
+build, or `Gemfile`, init fills in the test, lint, type-check and build
+commands those files already define and a rule that source changes need a
+passing test run, so the gate means something from the first commit. With
+none of them it writes the bare form:
 
 ```json
 { "version": 1, "requireEvidence": true, "secretFiles": ["nova.json", "config/*.secret"] }
@@ -97,8 +102,9 @@ file matching `paths` must carry a passing run, by Graft or a harness and
 not attested, of every name in `require`. `land` refuses otherwise and
 says which name to run; `check` fails the commit. The run must also be of
 the files being committed: every run records a hash of the working tree it
-checked, and a run that predates an edit to a file the rule covers is
-`stale`, which `land` refuses the same way (`graft evidence test` again) and
+checked, and a run whose tree differs from what is being committed in a
+file the rule covers (an edit after the run, or an unstaged edit the run
+saw and the commit leaves out) is `stale`, which `land` refuses the same way (`graft evidence test` again) and
 which the message records as `[stale test]` if it lands anyway. A rule that
 names a command the catalog does not define is a policy error. This is how the
 command list in a repo's CLAUDE.md becomes something the gate enforces
@@ -136,8 +142,11 @@ The capture hook's change gets it when the prompt opens one, an explicit
 than given a half-filled one when the variable is unset.
 `captureCommands` lists extra regular expressions for commands the capture
 hooks record on top of the built-in test, build, lint and type-check patterns.
-`checkCommands` lists regular expressions for the commands `graft check
---rerun` may run again; unset means every recorded passing command.
+`checkCommands` lists regular expressions for recorded commands outside the
+catalog that `graft check --rerun` may run again; each must match the whole
+command. Unset, only catalog commands are re-run (a run recorded under a
+name, or whose text is a catalog command), since anything else is text from a
+commit message.
 [docs/CHANGE.md](docs/CHANGE.md#where-it-lives) covers what survives rebases,
 amends, and squashes.
 
@@ -154,7 +163,14 @@ remembers Graft:
   `captureCommands` in the policy. An explicit `graft start` afterwards just
   names the task and keeps what was captured. A captured command that `cd`s
   to an absolute path inside the repository is recorded relative to the root
-  (`cd ./pkg && go test ./...`), so it re-runs on another machine. The
+  (`cd ./pkg && go test ./...`), and one typed in a subdirectory gets that
+  `cd` in front, so it re-runs on another machine. A run whose exit code is
+  not the check's (`npm test | tail`, `npm test || true`, `npm test; echo`,
+  a background run) is not recorded; the hook tells the agent so, and to run
+  it on its own or with `set -o pipefail`. A change opened by one Claude Code
+  session does not take runs from another session in the same worktree. A
+  short reply such as "continue" does not open a change with "continue" as
+  its task: the session's last real prompt is used. The
   settings file is tracked: `init` edits it in place, and the edit is meant
   to be committed, so a per-session `init` leaves a diff until it is.
 - **Git hooks** (`prepare-commit-msg` and `post-commit`). A plain
@@ -162,8 +178,12 @@ remembers Graft:
   trailers in its message and the full record as a note, exactly like
   `graft land`, and the same policy gate applies (`GRAFT_ALLOW_NO_EVIDENCE=1`
   or `GRAFT_ALLOW_SECRETS=1` override it for one commit, and the commit then
-  carries a `Graft-Override` trailer). Merges, squashes and
-  amends are left alone, and a hook that is already there is not overwritten.
+  carries a `Graft-Override` trailer; `0`, `false` or empty do not).
+  Merges, squashes, amends of a commit that already carries a record, and
+  the commits git makes for a rebase, cherry-pick or revert are left alone,
+  and a hook that is already there is not overwritten. A message given with
+  `-m` or `-F` is kept as written, so `git commit -m "#42 fix the crash"`
+  keeps its subject.
 
 The hooks run `graft`. Where it is not on PATH they step aside: a commit goes
 through unrecorded with a one-line install hint, for `graft check` to catch at
@@ -185,41 +205,68 @@ jobs:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
       # your install step (npm ci, go mod download, ...), so recorded commands can run
-      - uses: FourShore/Graft@v0   # v0 moves with each 0.x release; pin @v0.1.0 or a SHA for one exact version
+      - uses: FourShore/Graft@v0   # v0 moves with each 0.x release; @v0.1.0 or that tag's SHA stays on one
 ```
 
-The action installs Graft, fetches the notes, and runs the check against the
-pull request's base with annotations and a step summary. It re-runs recorded
-commands only for branches of the same repository, since a fork's commit
-messages are text a stranger wrote; `rerun: "false"` never re-runs, and
-`checkCommands` in the policy can restrict what is re-run further. With
+Each release sets the action's `version` input to its own version, so pinning
+a release tag, or its commit SHA, also pins the Graft it installs; a SHA
+between releases installs the version the last release set, and `version:`
+overrides it. The action installs Graft, fetches the notes, and runs the
+check against the pull request's base with annotations and a step summary.
+On `merge_group` it checks from the queue's base commit and on `push` from the
+commit before the push (a push that creates a branch is skipped); other events
+need the `base` input. It re-runs recorded commands only for branches of the
+same repository, since a fork's commit messages are text a stranger wrote;
+`rerun: "false"` never re-runs, and even when it re-runs, only the policy's
+catalog commands and those matching `checkCommands` are run. With
 `comment: "true"` it also posts the summary table as one pull request comment,
 updated in place on each run; the workflow then needs
 `permissions: pull-requests: write`. The same check runs from a shell:
 
 ```
 graft check --base origin/main            # every behavior change needs evidence that meets the policy
-graft check --base origin/main --rerun    # and every recorded passing command is run again, here
+graft check --base origin/main --rerun    # and the recorded commands the policy allows are run again, here
 ```
 
-It walks `base..HEAD`, groups each commit's files into behavior, tests and
-mechanical, and fails when a commit that changed behavior has no record, no
-evidence, or (under `requireEvidence: "command"`) no passing command that
+It walks `base..HEAD` against the policy as the base has it, so a pull request
+cannot relax the rules it is checked against (a branch that changes
+`.graft/policy.json` gets a note saying so; only when the base has no policy,
+the pull request that adopts Graft, is the branch's own used). It groups each
+commit's files into behavior, tests and mechanical (a renamed file by the
+stricter of its old and new path), and fails when a commit that changed
+behavior has no record, no evidence, or (under `requireEvidence: "command"`)
+no passing command that
 Graft or a harness ran, and when a commit touched files a policy rule covers
 without a passing run of every command the rule names. A commit that only
 touches tests needs evidence too, since a weakened assertion is the cheapest
 way to green; commits that only touch docs, lockfiles or generated files need
 nothing. A commit landed past the gate with an override carries a
 `Graft-Override` trailer, which the check shows on its line and, on GitHub,
-as a warning. With `--rerun` each distinct
+as a warning. A merge commit is checked by what it changed beyond merging
+its parents (`git show --remerge-diff`, git 2.36 or newer; older git skips
+merges with a note), so an edit slipped into a merge needs a record like any
+other. A range with no commits fails, since the base or the checkout is wrong,
+and so does one with more commits than `--limit` (200) rather than being cut
+short; a shallow clone is refused (check out with `fetch-depth: 0`).
+
+Without `--rerun` the output says that the recorded evidence was not re-run,
+so every pass in it is the author's claim. With `--rerun` each distinct
 recorded passing command, attested ones included, runs once from the root of
-the current checkout, by its current catalog definition when it was recorded
-by name, and a non-zero exit fails the check with the output. A recorded
+the current checkout and each commit's line says whether its commands passed
+again, failed or were not run; a non-zero exit fails the check with the
+output. Only the catalog's commands are run by default, by the base policy's
+current definition when recorded by name or as the catalog's text; any other
+recorded command runs only when it fully matches a `checkCommands` pattern,
+and is otherwise listed as not re-run without failing the check. A recorded
 `graft check --rerun` is run but does not re-run anything itself. A commit
 whose trailers promise evidence that only the git note holds fails as "note
 missing" and says to fetch `refs/notes/graft`, rather than as a commit with
 none. `--base main` resolves to `origin/main` in a clone that has no local
-`main`, which is every CI runner.
+`main`, which is every CI runner; with no `--base` the check uses
+`origin/main`, else `origin/master`, and otherwise asks for one. With
+`--format github` the step summary has each commit's task, and the text log,
+which carries re-run output, is fenced off with `::stop-commands::` so
+nothing in it is read as a workflow command.
 
 ## Use it from the shell
 
@@ -366,7 +413,7 @@ claude mcp add graft -- graft-mcp --repo /path/to/your/repo
 
 Tools: `graft_start`, `graft_plan`, `graft_evidence`, `graft_note`,
 `graft_land`, `graft_sync`, `graft_status`, `graft_context`, `graft_log`, `graft_show`,
-`graft_abandon`. `graft_land` commits what's staged plus any `paths` you give
+`graft_abandon`, `graft_revert`. `graft_land` commits what's staged plus any `paths` you give
 it; `stageAll` is off by default.
 
 ## Command output and notes

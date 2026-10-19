@@ -9,6 +9,8 @@ export const CLAUDE_SETTINGS_PATH = ".claude/settings.json";
  * not log a hook error on every prompt and every Bash call.
  */
 export const HOOK_COMMAND = "command -v graft >/dev/null 2>&1 || exit 0; graft hook claude-code";
+/** The part of any command that runs the capture hook. */
+const HOOK_INVOCATION = "graft hook claude-code";
 /** What `graft init` wrote before the guard; recognized and upgraded in place. */
 const OLD_HOOK_COMMANDS = ["graft hook claude-code"];
 const MARK = "# graft-hook";
@@ -39,8 +41,12 @@ export async function installHooks(git: Git, topLevel: string): Promise<HooksRes
 async function writeClaudeSettings(topLevel: string): Promise<HooksResult["claudeCode"]> {
   const file = join(topLevel, CLAUDE_SETTINGS_PATH);
   let settings: Record<string, unknown> = {};
+  let indent: string | number = 2;
   try {
-    settings = JSON.parse(await readFile(file, "utf8")) as Record<string, unknown>;
+    const raw = await readFile(file, "utf8");
+    settings = JSON.parse(raw) as Record<string, unknown>;
+    // Keep the file's own indentation, so the diff is only the hooks.
+    indent = /^[{[]\s*\n([ \t]+)\S/.exec(raw)?.[1] ?? 2;
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") return "unreadable";
   }
@@ -62,13 +68,14 @@ async function writeClaudeSettings(topLevel: string): Promise<HooksResult["claud
         }
       }
     }
-    if (list.some((e) => e.hooks?.some((h) => h.command === HOOK_COMMAND))) continue;
+    // Any command that runs the capture hook counts, so a repo that wrapped or guarded it its own way keeps its version.
+    if (list.some((e) => e.hooks?.some((h) => h.command?.includes(HOOK_INVOCATION)))) continue;
     list.push(entry(matcher));
     changed = true;
   }
   if (!changed) return "present";
   await mkdir(join(topLevel, ".claude"), { recursive: true });
-  await writeFile(file, JSON.stringify(settings, null, 2) + "\n");
+  await writeFile(file, JSON.stringify(settings, null, indent) + "\n");
   return "written";
 }
 

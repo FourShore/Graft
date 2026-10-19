@@ -1,4 +1,4 @@
-import { Graft, GraftError, evaluateRules, normalizeCommand, readPolicy, runShell, type CommandEvidence, type LogEntry, type Policy } from "@fourshore/graft-core";
+import { DEFAULT_POLICY, Graft, GraftError, POLICY_PATH, evaluateRules, matchCatalog, parsePolicy, runShell, type CommandEvidence, type LogEntry, type Policy } from "@fourshore/graft-core";
 import { parseDiff } from "./diff.js";
 import { triage, type Triage } from "./triage.js";
 
@@ -6,9 +6,9 @@ export interface CheckOptions {
   repo?: string;
   /** Commits in `base..HEAD` are checked. */
   base: string;
-  /** Re-run every recorded passing command once on the current checkout. */
+  /** Re-run the recorded passing commands the policy allows once on the current checkout. */
   rerun?: boolean;
-  /** Upper bound on commits examined. */
+  /** Upper bound on commits examined; a range with more fails rather than being cut short silently. */
   limit?: number;
 }
 
@@ -19,13 +19,19 @@ export type Finding =
   | { kind: "no-passing-command"; commit: string; title: string; files: string[] }
   | { kind: "rule-unmet"; commit: string; title: string; files: string[]; names: { name: string; command: string }[] }
   | { kind: "rerun-failed"; command: string; commits: string[]; exitCode: number; output: string }
-  | { kind: "rerun-skipped"; command: string; commits: string[]; reason: string };
+  | { kind: "rerun-skipped"; command: string; commits: string[]; reason: string }
+  | { kind: "no-commits"; base: string }
+  | { kind: "limit-reached"; base: string; limit: number };
 
 export interface CheckedCommit {
   entry: LogEntry;
   triage: Triage;
-  /** Whether this commit alone satisfies the policy. */
+  /** Whether this commit alone satisfies the policy, and its recorded commands passed again when re-run. */
   ok: boolean;
+  /** A merge commit, checked by what it changed beyond merging its parents (git's remerge diff). */
+  merge?: boolean;
+  /** With re-runs: whether this commit's recorded commands passed again, failed, or none of them was run. */
+  rerun?: "pass" | "fail" | "not run";
 }
 
 export interface Rerun {
@@ -48,6 +54,10 @@ export interface CheckResult {
   findings: Finding[];
   /** False when any finding blocks. */
   ok: boolean;
+  /** True when recorded commands were re-run; otherwise every recorded pass is the author's claim. */
+  rerun: boolean;
+  /** Things a reviewer should know that do not fail the check, such as a branch that changes the policy. */
+  notes: string[];
   /** Set when `rerun` was asked for but this check is itself a re-run command of an outer check, so it ran nothing. */
   nested?: boolean;
 }
@@ -69,20 +79,41 @@ export const RERUN_ENV = "GRAFT_CHECK_RERUN";
 export async function runCheck(opts: CheckOptions): Promise<CheckResult> {
   const graft = new Graft(opts.repo ?? process.cwd());
   const topLevel = await graft.git.topLevel();
-  const policy = await readPolicy(topLevel);
+  if ((await graft.git.run(["rev-parse", "--is-shallow-repository"])) === "true") {
+    throw new GraftError("This clone is shallow, so base..HEAD may be cut short or missing. Fetch the whole history (actions/checkout with fetch-depth: 0, or git fetch --unshallow) and check again.");
+  }
   const head = (await graft.git.head()) ?? "";
   const base = await resolveBase(graft, opts.base);
-  const entries = await graft.log({ range: `${base}..HEAD`, limit: opts.limit ?? 200, noMerges: true });
+  const notes: string[] = [];
+  // The policy comes from the base: a pull request must not be able to relax the rules it is checked against.
+  const policy = await checkPolicy(graft, base, notes);
+  const limit = opts.limit ?? 200;
+  // One past the limit, to tell a range that fits from one that was cut short.
+  const all = await graft.log({ range: `${base}..HEAD`, limit: limit + 1 });
+  const entries = all.slice(0, limit);
   const findings: Finding[] = [];
+  if (all.length === 0) findings.push({ kind: "no-commits", base });
+  if (all.length > limit) findings.push({ kind: "limit-reached", base, limit });
+  const merges = new Set((await graft.git.run(["rev-list", "--merges", `${base}..HEAD`])).split("\n").filter(Boolean));
+  const remerge = merges.size > 0 && (await supportsRemergeDiff(graft));
+  if (merges.size && !remerge) {
+    notes.push(`${merges.size} merge commit${merges.size === 1 ? " was" : "s were"} not inspected: this git has no --remerge-diff (2.36 or newer), so an edit made inside a merge is not checked.`);
+  }
   const commits: CheckedCommit[] = [];
   for (const entry of entries) {
-    const files = parseDiff(await graft.diff(entry.commit));
+    const merge = merges.has(entry.commit);
+    if (merge && !remerge) continue;
+    const files = parseDiff(await graft.diff(entry.commit, { remerge: merge }));
+    // A clean merge changes nothing beyond merging; only one with its own edits (or conflict resolutions) needs a record.
+    if (merge && !files.length) continue;
     const t = triage(entry.record, files, entry.trailers, entry.recordSource, policy.behaviorFiles);
     // Tests count: weakening an assertion is the cheapest way to green, so a tests-only commit needs evidence too.
     const behavior = [...t.groups.behavior, ...t.groups.tests].map((f) => f.path);
     // "partial" is triage's name for a record whose evidence lives only in a note this clone lacks.
     const partial = t.risk === "partial";
-    const unmet = partial ? [] : evaluateRules(policy, files.map((f) => f.path), entry.record?.evidence ?? []);
+    // A rename is covered by the rules for where the file came from as well as where it went.
+    const paths = [...new Set(files.flatMap((f) => (f.oldPath ? [f.path, f.oldPath] : [f.path])))];
+    const unmet = partial ? [] : evaluateRules(policy, paths, entry.record?.evidence ?? []);
     let ok = true;
     if (behavior.length && policy.requireEvidence) {
       const base = { commit: entry.commit, title: entry.title, files: behavior };
@@ -117,29 +148,33 @@ export async function runCheck(opts: CheckOptions): Promise<CheckResult> {
       }
       ok = false;
     }
-    commits.push({ entry, triage: t, ok });
+    commits.push({ entry, triage: t, ok, ...(merge ? { merge: true } : {}) });
   }
 
   const reruns: Rerun[] = [];
   const nested = Boolean(opts.rerun && process.env[RERUN_ENV]);
-  if (opts.rerun && !nested) {
-    // A run recorded under a catalog name re-runs the name's current definition.
+  const rerun = Boolean(opts.rerun && !nested);
+  if (rerun) {
+    // A run recorded under a catalog name, or as a catalog command's text, re-runs the name's current definition.
     const byCommand = new Map<string, { shas: string[]; name?: string }>();
     for (const c of commits) {
       for (const ev of passingCommands(c.entry, true)) {
         // A record read from the commit message carries the name as the label.
         const named = ev.name ?? ev.label;
-        const name = named && policy.commands?.[named] ? named : undefined;
+        const name = named && policy.commands?.[named] ? named : matchCatalog(policy, ev.command) ?? undefined;
         const command = name ? policy.commands![name] : ev.command;
         const slot = byCommand.get(command) ?? { shas: [], ...(name ? { name } : {}) };
         if (!slot.shas.includes(c.entry.commit)) slot.shas.push(c.entry.commit);
         byCommand.set(command, slot);
       }
     }
-    const inCatalog = new Set(Object.values(policy.commands ?? {}).map(normalizeCommand));
     for (const [command, { shas, name }] of byCommand) {
-      if (policy.checkCommands && !inCatalog.has(normalizeCommand(command)) && !policy.checkCommands.some((p) => safeTest(p, command))) {
-        findings.push({ kind: "rerun-skipped", command, commits: shas, reason: "not in policy checkCommands" });
+      // Anything else is text from a commit message: run it only when the policy allows it in full.
+      if (!name && !policy.checkCommands?.some((p) => fullMatch(p, command))) {
+        const reason = policy.checkCommands
+          ? "not a policy command, and it matches no checkCommands pattern in full"
+          : "not a policy command, and the policy sets no checkCommands to allow other commands";
+        findings.push({ kind: "rerun-skipped", command, commits: shas, reason });
         continue;
       }
       if (command.endsWith(CLIPPED)) {
@@ -161,9 +196,50 @@ export async function runCheck(opts: CheckOptions): Promise<CheckResult> {
       reruns.push({ command, ...(name ? { name } : {}), commits: shas, exitCode, durationMs: Date.now() - started, output });
       if (exitCode !== 0) findings.push({ kind: "rerun-failed", command, commits: shas, exitCode, output });
     }
+    for (const c of commits) {
+      const mine = reruns.filter((x) => x.commits.includes(c.entry.commit));
+      c.rerun = mine.some((x) => x.exitCode !== 0) ? "fail" : mine.length ? "pass" : "not run";
+      if (c.rerun === "fail") c.ok = false;
+    }
   }
   const ok = findings.every((f) => f.kind === "rerun-skipped");
-  return { base, head, policy, commits, reruns, findings, ok, ...(nested ? { nested: true } : {}) };
+  return { base, head, policy, commits, reruns, findings, ok, rerun, notes, ...(nested ? { nested: true } : {}) };
+}
+
+/**
+ * The policy a branch is checked against: the base's, so the branch cannot
+ * relax it. Only when the base has no policy file (the pull request that
+ * adopts Graft) is the branch's own used. Either way a branch that changes
+ * the file gets a note saying so.
+ */
+async function checkPolicy(graft: Graft, base: string, notes: string[]): Promise<Policy> {
+  const atBase = await policyAt(graft, base);
+  const atHead = await policyAt(graft, "HEAD");
+  if (atBase !== null) {
+    if (atHead !== atBase) notes.push(`This branch changes ${POLICY_PATH}; it was checked against the base's policy, and the change applies once it merges.`);
+    return parsePolicy(atBase);
+  }
+  if (atHead !== null) {
+    notes.push(`The base has no ${POLICY_PATH}, so this branch was checked against the policy it adds.`);
+    return parsePolicy(atHead);
+  }
+  return DEFAULT_POLICY;
+}
+
+/** The policy file's text at a commit, or null when it has none. */
+async function policyAt(graft: Graft, commit: string): Promise<string | null> {
+  try {
+    await graft.git.run(["cat-file", "-e", `${commit}:${POLICY_PATH}`]);
+  } catch {
+    return null;
+  }
+  return graft.git.run(["show", `${commit}:${POLICY_PATH}`]);
+}
+
+/** `git show --remerge-diff` arrived in git 2.36. */
+async function supportsRemergeDiff(graft: Graft): Promise<boolean> {
+  const m = /(\d+)\.(\d+)/.exec(await graft.git.run(["version"]));
+  return Boolean(m && (Number(m[1]) > 2 || (Number(m[1]) === 2 && Number(m[2]) >= 36)));
 }
 
 /**
@@ -196,9 +272,10 @@ function passingCommands(entry: LogEntry, withAttested = false): CommandEvidence
   );
 }
 
-function safeTest(pattern: string, s: string): boolean {
+/** Whether a checkCommands pattern matches the whole command, not just part of it. */
+function fullMatch(pattern: string, s: string): boolean {
   try {
-    return new RegExp(pattern).test(s);
+    return new RegExp(`^(?:${pattern})$`).test(s);
   } catch {
     return false;
   }
@@ -215,9 +292,14 @@ export function renderCheckText(r: CheckResult): string {
     const files = `${c.triage.groups.behavior.length} behavior, ${c.triage.groups.tests.length} tests, ${c.triage.groups.mechanical.length} mechanical`;
     const ev = r0 ? `${describePassing(c.entry)}, ${r0.evidence.length} evidence` : "no record";
     lines.push(`  ${c.ok ? "ok  " : "FAIL"} ${c.entry.commit.slice(0, 10)}  ${c.entry.title}`);
-    lines.push(`       ${c.triage.risk} · ${who} · ${files} · ${ev}${overridden(c)}`);
+    lines.push(`       ${c.merge ? "merge · " : ""}${c.triage.risk} · ${who} · ${files} · ${ev}${overridden(c)}${c.rerun ? ` · re-run: ${c.rerun}` : ""}`);
+  }
+  if (r.notes.length) {
+    lines.push("", "Notes:");
+    for (const n of r.notes) lines.push(`  - ${n}`);
   }
   if (r.nested) lines.push("", "Re-run skipped: this check is itself a command an outer graft check is re-running.");
+  else if (!r.rerun && r.commits.length) lines.push("", NOT_RERUN);
   if (r.reruns.length) {
     lines.push("", `Re-ran ${r.reruns.length} recorded command${r.reruns.length === 1 ? "" : "s"} on this checkout:`);
     for (const x of r.reruns) {
@@ -237,6 +319,8 @@ export function renderCheckText(r: CheckResult): string {
   lines.push("", r.ok ? "PASS: every behavior change carries evidence that meets the policy." : "FAIL: see findings above.");
   return lines.join("\n");
 }
+
+const NOT_RERUN = "Recorded evidence was not re-run: every pass above is the author's claim. Run with --rerun to make it a fact.";
 
 /** The overrides a commit landed past the gate with, as a suffix for its line. */
 function overridden(c: CheckedCommit): string {
@@ -266,30 +350,37 @@ export function describeFinding(f: Finding): string {
       return `"${f.command}" was recorded as passing on ${f.commits.map((s) => s.slice(0, 10)).join(", ")} but exits ${f.exitCode} on this checkout.\n${indent(tail(f.output, 20))}`;
     case "rerun-skipped":
       return `"${f.command}" was not re-run: ${f.reason}.`;
+    case "no-commits":
+      return `No commits to check in ${f.base}..HEAD. Is the base right, and was the pull request's head checked out with fetch-depth: 0?`;
+    case "limit-reached":
+      return `${f.base}..HEAD has more than ${f.limit} commits and only the newest ${f.limit} were checked. Raise --limit to check them all.`;
   }
 }
 
-/** GitHub Actions workflow commands: one annotation per finding, plus a step summary in Markdown. */
+/** GitHub Actions workflow commands: one annotation per finding and note, plus a step summary in Markdown. */
 export function renderCheckGithub(r: CheckResult): { annotations: string[]; summary: string } {
   const annotations = r.findings
     .filter((f) => f.kind !== "rerun-skipped")
-    .map((f) => `::error title=Graft check::${describeFinding(f).split("\n")[0].replace(/\r?\n/g, " ")}`);
+    .map((f) => annotation("error", "Graft check", describeFinding(f).split("\n")[0]));
+  for (const n of r.notes) annotations.push(annotation("warning", "Graft check", n));
   for (const c of r.commits) {
     const o = c.entry.record?.overrides ?? [];
-    if (o.length) annotations.push(`::warning title=Graft override::${c.entry.commit.slice(0, 10)} "${c.entry.title}" was landed past the gate with the ${o.join(" and ")} override (Graft-Override).`);
+    if (o.length) annotations.push(annotation("warning", "Graft override", `${c.entry.commit.slice(0, 10)} "${c.entry.title}" was landed past the gate with the ${o.join(" and ")} override (Graft-Override).`));
   }
   const rows = r.commits.map(
     (c) =>
-      `| ${c.ok ? "✅" : "❌"} | \`${c.entry.commit.slice(0, 10)}\` | ${escapePipes(c.entry.title)} | ${c.triage.risk}${overridden(c)} | ${c.entry.record ? passingCommands(c.entry).length : 0} | ${c.triage.groups.behavior.length} |`,
+      `| ${c.ok ? "✅" : "❌"} | \`${c.entry.commit.slice(0, 10)}\` | ${escapePipes(c.entry.title)} | ${escapePipes(taskCell(c))} | ${c.merge ? "merge, " : ""}${c.triage.risk}${overridden(c)} | ${c.entry.record ? passingCommands(c.entry).length : 0} |${r.rerun ? ` ${c.rerun ?? ""} |` : ""} ${c.triage.groups.behavior.length} |`,
   );
   const summary = [
     `### Graft check: ${r.ok ? "pass" : "fail"}`,
     "",
     `${r.commits.length} commit(s) in \`${r.base}..${r.head.slice(0, 10)}\`, policy \`requireEvidence: ${JSON.stringify(r.policy.requireEvidence)}\`.`,
+    ...(!r.rerun && r.commits.length ? ["", `**${NOT_RERUN}**`] : []),
     "",
-    "| | Commit | Title | Risk | Passing commands | Behavior files |",
-    "| --- | --- | --- | --- | --- | --- |",
+    `| | Commit | Title | Task | Risk | Passing commands |${r.rerun ? " Re-run |" : ""} Behavior files |`,
+    `| --- | --- | --- | --- | --- | --- |${r.rerun ? " --- |" : ""} --- |`,
     ...rows,
+    ...(r.notes.length ? ["", "#### Notes", "", ...r.notes.map((n) => `- ${n}`)] : []),
     ...(r.reruns.length
       ? ["", "#### Re-run on this checkout", "", "| | Command | Recorded on |", "| --- | --- | --- |", ...r.reruns.map((x) => `| ${x.exitCode === 0 ? "✅" : `❌ exit ${x.exitCode}`} | \`${escapePipes(x.command)}\` | ${x.commits.map((s) => `\`${s.slice(0, 10)}\``).join(", ")} |`)]
       : []),
@@ -302,6 +393,27 @@ export function renderCheckGithub(r: CheckResult): { annotations: string[]; summ
     "",
   ].join("\n");
   return { annotations, summary };
+}
+
+/** The record's task for a table cell: one line, cut at about 80 characters. */
+function taskCell(c: CheckedCommit): string {
+  const task = (c.entry.record?.task ?? "").replace(/\s+/g, " ").trim();
+  return task.length > 80 ? `${task.slice(0, 79)}\u2026` : task;
+}
+
+/** A workflow command for one annotation, with its message and title escaped so neither can end it early or start another. */
+function annotation(level: "error" | "warning", title: string, message: string): string {
+  return `::${level} title=${escapeGithubProperty(title)}::${escapeGithubData(message)}`;
+}
+
+/** Escape a workflow command's message, as the Actions toolkit does. */
+export function escapeGithubData(s: string): string {
+  return s.replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
+}
+
+/** Escape a workflow command's property value (such as title), as the Actions toolkit does. */
+export function escapeGithubProperty(s: string): string {
+  return escapeGithubData(s).replace(/:/g, "%3A").replace(/,/g, "%2C");
 }
 
 function escapePipes(s: string): string {

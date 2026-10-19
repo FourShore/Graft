@@ -6,7 +6,10 @@ export const CI_WORKFLOW_PATH = ".github/workflows/graft-check.yml";
 /**
  * Where the Graft check action lives. `v0` moves with every 0.x release, so a
  * workflow follows fixes without tracking an unreleased branch; a repo that
- * wants one exact version pins `@v0.1.0` or a commit SHA instead.
+ * wants one exact version pins a release tag (`@v0.1.0`) or that tag's commit
+ * SHA. Each release sets the action's `version` input to its own version, so
+ * that pins the Graft it installs too; a SHA between releases installs the
+ * version the last release set.
  */
 export const CHECK_ACTION = "FourShore/Graft@v0";
 
@@ -21,7 +24,8 @@ export interface CiResult {
  * repo add its own install step, then run the reusable check action. The
  * action installs Graft, fetches the notes, and runs `graft check` against
  * the pull request's base with the GitHub renderer; it re-runs recorded
- * commands only for branches of the same repository.
+ * commands only for branches of the same repository, and of those only the
+ * policy's catalog commands and ones matching its checkCommands.
  */
 export const CI_WORKFLOW = `# Verifies the Graft records on every pull request: each commit that changed
 # behavior must carry evidence that meets .graft/policy.json, and the recorded

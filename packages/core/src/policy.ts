@@ -51,10 +51,12 @@ export interface Policy {
    */
   captureCommands?: string[];
   /**
-   * When `graft check --rerun` re-runs recorded commands, only commands
-   * matching one of these regular expressions (as strings) are run. Unset
-   * means every recorded passing command. Set it where a PR from a stranger
-   * could record a command you would not want CI to execute.
+   * Recorded commands `graft check --rerun` may run besides the catalog's:
+   * regular expressions (as strings), each matched against the whole command
+   * (`^(?:pattern)$`). A run recorded under a catalog name, or whose text is
+   * a catalog command, is always re-run (by the base policy's definition);
+   * any other recorded command is re-run only when it fully matches one of
+   * these, so unset means only catalog commands are re-run.
    */
   checkCommands?: string[];
   /**
@@ -88,19 +90,25 @@ export const DEFAULT_POLICY: Policy = { version: 1, requireEvidence: true };
 export const POLICY_PATH = ".graft/policy.json";
 
 export async function readPolicy(topLevel: string): Promise<Policy> {
+  let raw: string;
   try {
-    const raw = await readFile(join(topLevel, POLICY_PATH), "utf8");
-    const parsed = JSON.parse(raw) as Partial<Policy>;
-    if (parsed.version !== undefined && parsed.version !== 1) {
-      throw new Error(`Unsupported policy version ${String(parsed.version)} in ${POLICY_PATH}`);
-    }
-    const policy: Policy = { ...DEFAULT_POLICY, ...parsed, version: 1 };
-    validatePolicy(policy);
-    return policy;
+    raw = await readFile(join(topLevel, POLICY_PATH), "utf8");
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return DEFAULT_POLICY;
     throw err;
   }
+  return parsePolicy(raw);
+}
+
+/** A policy file's text, parsed and validated the way `readPolicy` does, for a policy read from a commit rather than the working tree. */
+export function parsePolicy(raw: string): Policy {
+  const parsed = JSON.parse(raw) as Partial<Policy>;
+  if (parsed.version !== undefined && parsed.version !== 1) {
+    throw new Error(`Unsupported policy version ${String(parsed.version)} in ${POLICY_PATH}`);
+  }
+  const policy: Policy = { ...DEFAULT_POLICY, ...parsed, version: 1 };
+  validatePolicy(policy);
+  return policy;
 }
 
 const COMMAND_NAME = /^[A-Za-z0-9][A-Za-z0-9_.:-]*$/;
@@ -142,17 +150,19 @@ export interface UnmetRule {
 
 /**
  * Which named commands the rules demand for these files that the evidence
- * does not cover. A run covers a name when it exited 0, was run by Graft or
- * a harness (not attested), and carries the name, or the name as its label
- * (a record rebuilt from a commit message keeps only the label), or the
- * catalog's command for that name.
+ * does not cover. A run covers a name when it was run by Graft or a harness
+ * (not attested), carries the name or the catalog's command for it, passed,
+ * and no later run of the same name failed. `labelIsName` also accepts a run
+ * whose label is the name: a record rebuilt from a commit message keeps the
+ * name only as the label. A live record has the real name, so there a free
+ * `--label test` on some other command does not count.
  */
-export function evaluateRules(policy: Policy, files: string[], evidence: Evidence[]): UnmetRule[] {
+export function evaluateRules(policy: Policy, files: string[], evidence: Evidence[], opts: { labelIsName?: boolean } = {}): UnmetRule[] {
   const commands = policy.commands ?? {};
   const unmet = new Map<string, Set<string>>();
   for (const { rule, files: hit } of rulesHit(policy, files)) {
     for (const name of rule.require) {
-      if (commands[name] && coveringRuns(evidence, name, commands[name]).length) continue;
+      if (commands[name] && coveringRuns(evidence, name, commands[name], opts).length) continue;
       const set = unmet.get(name) ?? new Set<string>();
       for (const f of hit) set.add(f);
       unmet.set(name, set);
@@ -172,20 +182,22 @@ export function rulesHit(policy: Policy, files: string[]): { rule: CoverageRule;
 }
 
 /**
- * The runs that count for a named command: exited 0, run by Graft or a
- * harness (not attested), not marked stale, and carrying the name, the name
- * as label (a record rebuilt from a commit message), or the catalog's text.
+ * The runs that count for a named command: run by Graft or a harness (not
+ * attested), carrying the name (or, with `labelIsName`, the name as label) or
+ * the catalog's text, exited 0, not marked stale, and not followed by a later
+ * run of the same command that failed: the latest result is the one that holds.
  */
-export function coveringRuns(evidence: Evidence[], name: string, command: string): CommandEvidence[] {
+export function coveringRuns(evidence: Evidence[], name: string, command: string, opts: { labelIsName?: boolean } = {}): CommandEvidence[] {
   const want = normalizeCommand(command);
-  return evidence.filter(
+  const labelIsName = opts.labelIsName ?? true;
+  const runs = evidence.filter(
     (e): e is CommandEvidence =>
       e.kind === "command" &&
-      e.exitCode === 0 &&
       !e.attested &&
-      !e.stale &&
-      (e.name === name || e.label === name || normalizeCommand(e.command) === want),
+      (e.name === name || (labelIsName && !e.name && e.label === name) || normalizeCommand(e.command) === want),
   );
+  const lastFail = runs.map((r) => r.exitCode !== 0).lastIndexOf(true);
+  return runs.slice(lastFail + 1).filter((r) => r.exitCode === 0 && !r.stale);
 }
 
 /**

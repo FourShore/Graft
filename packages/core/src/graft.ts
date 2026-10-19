@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { DEFAULT_CONTEXT_BUDGET, DEFAULT_CONTEXT_LIMIT, fitContext, type ContextEntry, type ContextOptions, type ContextResult } from "./context.js";
-import { Git } from "./git.js";
+import { Git, invokingGitArgs, splitNul } from "./git.js";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { basename } from "node:path";
@@ -28,13 +28,14 @@ import {
   trailersFor,
 } from "./record.js";
 import { OpenChangeStore } from "./store.js";
-import { DEFAULT_POLICY, POLICY_PATH, readPolicy, expandTemplate, expandTrailers, evaluateRules, rulesHit, coveringRuns, type Policy } from "./policy.js";
-import { looksLikeSecretFile, redact, secretFilesNamed } from "./redact.js";
+import { detectPolicy } from "./detect.js";
+import { POLICY_PATH, readPolicy, expandTemplate, expandTrailers, evaluateRules, rulesHit, coveringRuns, type Policy } from "./policy.js";
+import { globToRegExp, looksLikeSecretFile, redact, secretFilesNamed } from "./redact.js";
 import { writeCiWorkflow, type CiResult } from "./ci.js";
 import { writeAgentsSection, type AgentsResult } from "./agents.js";
 import { installHooks, type HooksResult } from "./hooks.js";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { copyFile, mkdir, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
 
 export class GraftError extends Error {
   constructor(message: string) {
@@ -53,6 +54,8 @@ export interface StartOptions {
   replace?: boolean;
   /** Set by the capture hooks: which harness opened the change. */
   capturedBy?: string;
+  /** Set by the capture hooks: the harness session that opened it. */
+  sessionId?: string;
   /** Reuse an existing change id, so one change lands in several repositories. */
   id?: string;
   /** What this change undoes; set by `revert`. */
@@ -97,6 +100,8 @@ export interface InitResult {
   configured: string[];
   /** True if .graft/policy.json was written. */
   policyWritten: boolean;
+  /** The build files the written policy's commands came from (package.json, go.mod, ...); empty when none were found. */
+  policyFrom: string[];
   remote?: string;
   /** What happened to AGENTS.md; absent when `agents: false`. */
   agents?: AgentsResult;
@@ -185,6 +190,17 @@ export class Graft {
     return this.store.read();
   }
 
+  /** The last task a capture hook recorded for a harness session, if it was this one. */
+  async sessionTask(sessionId: string | undefined): Promise<string | null> {
+    if (!sessionId) return null;
+    const s = await this.store.readSession();
+    return s?.sessionId === sessionId ? s.task : null;
+  }
+
+  async rememberSessionTask(sessionId: string | undefined, task: string): Promise<void> {
+    if (sessionId) await this.store.writeSession({ sessionId, task: redact(task) });
+  }
+
   async start(opts: StartOptions): Promise<ChangeRecord> {
     const open = await this.store.read();
     if (opts.id !== undefined && !isChangeId(opts.id)) throw new GraftError(`"${opts.id}" is not a change id (20 characters of Crockford base32).`);
@@ -192,8 +208,8 @@ export class Graft {
       // A hook opened this change from the prompt; an explicit start names the task and keeps what was captured.
       if (!opts.task?.trim()) throw new GraftError("A task is required.");
       if (opts.id !== undefined) open.id = opts.id;
-      open.task = opts.task.trim();
-      if (opts.plan?.trim()) open.plan = opts.plan.trim();
+      open.task = redact(opts.task.trim());
+      if (opts.plan?.trim()) open.plan = redact(opts.plan.trim());
       if (opts.ref?.trim()) open.ref = opts.ref.trim();
       open.ref ??= await this.defaultRef();
       if (opts.author) {
@@ -219,14 +235,15 @@ export class Graft {
     const record: ChangeRecord = {
       version: 1,
       id: opts.id ?? newChangeId(),
-      task: opts.task.trim(),
-      plan: opts.plan?.trim() || undefined,
+      task: redact(opts.task.trim()),
+      plan: opts.plan?.trim() ? redact(opts.plan.trim()) : undefined,
       ref: opts.ref?.trim() || (await this.defaultRef()),
       ...(opts.reverts ? { reverts: opts.reverts } : {}),
       author: defaultAuthor(opts.author),
       startedAt: new Date().toISOString(),
       evidence: [],
       ...(opts.capturedBy ? { capturedBy: opts.capturedBy } : {}),
+      ...(opts.sessionId ? { sessionId: opts.sessionId } : {}),
     };
     await this.store.write(record);
     return record;
@@ -261,7 +278,7 @@ export class Graft {
   async abandon(opts: AbandonOptions = {}): Promise<ChangeRecord | null> {
     const open = await this.store.read();
     if (!open) return null;
-    const reason = opts.reason?.trim() || undefined;
+    const reason = opts.reason?.trim() ? redact(opts.reason.trim()) : undefined;
     // Attempts a prepare-commit-msg hook folded into this record, for a commit
     // that then did not happen, belong to earlier changes: they go back to waiting.
     for (const earlier of open.attempts ?? []) await this.store.addAttempt(earlier);
@@ -314,7 +331,7 @@ export class Graft {
 
   async setPlan(plan: string): Promise<ChangeRecord> {
     const open = await this.requireOpen();
-    open.plan = plan.trim();
+    open.plan = redact(plan.trim());
     await this.store.write(open);
     return open;
   }
@@ -334,21 +351,21 @@ export class Graft {
   async evidenceCommand(command: string, label?: string, name?: string): Promise<Evidence> {
     const open = await this.requireOpen();
     const cwd = await this.topLevel();
+    const tree = await this.treeField(); // the tree the run checks, taken before it can change
     const started = Date.now();
     const { exitCode, output } = await runShell(command, cwd);
     const ev: Evidence = {
       kind: "command",
       at: new Date().toISOString(),
-      command,
+      command: redact(command),
       exitCode,
       durationMs: Date.now() - started,
       output: await this.keepOutput(command, output),
-      label,
+      label: label === undefined ? undefined : redact(label),
       ...(name ? { name } : {}),
-      ...(await this.treeField()),
+      ...tree,
     };
-    open.evidence.push(ev);
-    await this.store.write(open);
+    await this.appendEvidence(open, ev);
     return ev;
   }
 
@@ -388,17 +405,16 @@ export class Graft {
     const ev: Evidence = {
       kind: "command",
       at: new Date().toISOString(),
-      command: command.trim(),
+      command: redact(command.trim()),
       exitCode,
       durationMs: 0,
       output: await this.keepOutput(command, output),
-      label,
+      label: label === undefined ? undefined : redact(label),
       ...(name ? { name } : {}),
       attested: true,
       ...(await this.treeField()),
     };
-    open.evidence.push(ev);
-    await this.store.write(open);
+    await this.appendEvidence(open, ev);
     return ev;
   }
 
@@ -427,8 +443,7 @@ export class Graft {
     const open = await this.requireOpen();
     if (!text.trim()) throw new GraftError("Evidence text is required.");
     const ev: Evidence = { kind: "note", at: new Date().toISOString(), text: redact(text.trim()), label };
-    open.evidence.push(ev);
-    await this.store.write(open);
+    await this.appendEvidence(open, ev);
     return ev;
   }
 
@@ -443,18 +458,28 @@ export class Graft {
     const ev: Evidence = {
       kind: "command",
       at: new Date().toISOString(),
-      command: run.command.trim(),
+      command: redact(run.command.trim()),
       exitCode: run.exitCode,
       durationMs: run.durationMs ?? 0,
       output: await this.keepOutput(run.command, run.output ?? ""),
-      label: run.label,
+      label: run.label === undefined ? undefined : redact(run.label),
       ...(run.name ? { name: run.name } : {}),
       via: run.via,
       ...(await this.treeField()),
     };
-    open.evidence.push(ev);
-    await this.store.write(open);
+    await this.appendEvidence(open, ev);
     return ev;
+  }
+
+  /**
+   * Add evidence to the open change under the store's lock, so runs recorded
+   * at the same time (parallel hooks, a note during a long run) all survive.
+   */
+  private async appendEvidence(open: ChangeRecord, ev: Evidence): Promise<void> {
+    if (!(await this.store.appendEvidence(open.id, ev))) {
+      throw new GraftError(`Change ${open.id} was landed or abandoned while this ran, so the result was not recorded.`);
+    }
+    open.evidence.push(ev);
   }
 
   /** `{ tree }` for a new evidence entry, or nothing when the tree cannot be hashed. */
@@ -465,11 +490,15 @@ export class Graft {
 
   /**
    * A hash of the working tree as it stands: tracked and untracked files,
-   * ignored ones left out, whatever is or is not staged. Built in an empty
-   * scratch index so the real one is untouched and every file is read, not
-   * trusted from a stat cache: a file rewritten within the same second at the
-   * same size would otherwise hash as its old content. The tree object stays
-   * in the object store, unreferenced, long enough for the change to land.
+   * ignored ones left out, whatever is or is not staged. Built in a scratch
+   * index seeded from a copy of the real one (its timestamp kept, so git's
+   * racy-entry check still re-reads a file rewritten within the same second),
+   * so the real index is untouched and only files whose stat changed are read
+   * again. Untracked files over UNTRACKED_HASH_CAP are left out: hashing writes
+   * each file into the object store, and a large build output or data file
+   * nobody will commit would cost seconds and its size on every run. The tree
+   * object stays in the object store, unreferenced, long enough for the change
+   * to land.
    */
   private async worktreeHash(): Promise<string | undefined> {
     try {
@@ -487,10 +516,23 @@ export class Graft {
       } catch {
         // No readable policy: the built-in patterns still apply.
       }
-      const files = (await this.git.run(["ls-files", "-z", "--cached", "--others", "--exclude-standard"])).split("\0").filter(Boolean);
-      const excluded = files.filter((f) => looksLikeSecretFile(f, secretGlobs));
+      const top = await this.topLevel();
+      const tracked = splitNul(await this.git.run(["ls-files", "-z", "--cached"]));
+      const untracked = splitNul(await this.git.run(["ls-files", "-z", "--others", "--exclude-standard"]));
+      const large = await filesLargerThan(top, untracked, UNTRACKED_HASH_CAP);
+      const excluded = [...new Set([...tracked, ...untracked].filter((f) => looksLikeSecretFile(f, secretGlobs)).concat(large))];
       const pathspec = [".", ...excluded.map((f) => `:(exclude,literal)${f}`)].join("\0") + "\0";
       try {
+        const index = resolve(this.git.cwd, await this.git.run(["rev-parse", "--git-path", "index"]));
+        try {
+          await copyFile(index, scratch);
+          const { atime, mtime } = await stat(index);
+          await utimes(scratch, atime, mtime);
+        } catch (err) {
+          // No index yet (nothing staged in a new repository): start empty.
+          if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+          await rm(scratch, { force: true });
+        }
         await this.git.run(["add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"], { env, input: pathspec });
         return await this.git.run(["write-tree"], { env });
       } finally {
@@ -502,13 +544,12 @@ export class Graft {
   }
 
   /**
-   * The files among `files` whose staged content differs from `tree`, or null
-   * when the tree is not in this repository (recorded elsewhere, or pruned).
+   * The paths whose staged (index) content differs from `tree`, or null when
+   * the tree is not in this repository (recorded elsewhere, or pruned).
    */
-  private async changedSince(tree: string, files: string[]): Promise<string[] | null> {
+  private async changedSince(tree: string): Promise<string[] | null> {
     try {
-      const out = await this.git.run(["diff", "--cached", "--name-only", "--no-renames", tree, "--", ...files.map((f) => `:(top,literal)${f}`)]);
-      return out.split("\n").filter(Boolean);
+      return splitNul(await this.git.run(["diff", "--cached", "--name-only", "-z", "--no-renames", tree]));
     } catch {
       return null;
     }
@@ -516,26 +557,46 @@ export class Graft {
 
   /**
    * For each rule the staged files hit, the required commands whose every
-   * covering run predates an edit to a file the rule covers. A run with no
-   * recorded tree, or a tree this clone no longer has, is taken as fresh:
-   * staleness is refused only when it is certain. Runs that are stale for a
-   * rule are marked so, so the commit message says `stale` where a reader
-   * would otherwise see `pass`.
+   * covering run checked content other than what is being committed: a file
+   * the rule covers differs between the run's tree and the index, whether it
+   * is staged or not (an unstaged edit the run saw is not in the commit). A
+   * run with no recorded tree, or a tree this clone no longer has, is taken
+   * as fresh: staleness is refused only when it is certain. Runs that are
+   * stale for a rule are marked so, so the commit message says `stale` where
+   * a reader would otherwise see `pass`.
    */
   private async staleRules(policy: Policy, staged: string[], evidence: Evidence[]): Promise<{ name: string; command: string; files: string[] }[]> {
     const commands = policy.commands ?? {};
     const stale = new Map<string, Set<string>>();
     const staleRuns = new Set<CommandEvidence>();
-    for (const { rule, files } of rulesHit(policy, staged)) {
+    const diffs = new Map<string, string[] | null>();
+    const diffFor = async (tree: string) => {
+      if (!diffs.has(tree)) diffs.set(tree, await this.changedSince(tree));
+      return diffs.get(tree)!;
+    };
+    // A file that is untracked now is not being committed, and re-running cannot change that it differs:
+    // counting it would leave every run stale until the file is added, deleted or ignored.
+    let untracked: Set<string> | undefined;
+    const isUntracked = async (f: string) => {
+      untracked ??= new Set(splitNul(await this.git.run(["ls-files", "--others", "--exclude-standard", "-z"]).catch(() => "")));
+      return untracked.has(f);
+    };
+    for (const { rule } of rulesHit(policy, staged)) {
+      const covered = (f: string) =>
+        rule.paths.some((g) => globToRegExp(g).test(f)) &&
+        // Credential files are never hashed into a run's tree; the secrets check speaks for them.
+        !looksLikeSecretFile(f, policy.secretFiles);
       for (const name of rule.require) {
         const command = commands[name];
         if (!command) continue;
-        const runs = coveringRuns(evidence, name, command);
+        const runs = coveringRuns(evidence, name, command, { labelIsName: false });
         if (!runs.length) continue; // unmet, which the caller reports first
         let fresh = false;
         const changed = new Set<string>();
         for (const run of runs) {
-          const diff = run.tree ? await this.changedSince(run.tree, files) : null;
+          const all = run.tree ? await diffFor(run.tree) : null;
+          let diff = all?.filter(covered) ?? null;
+          if (diff) diff = (await Promise.all(diff.map(async (f) => ((await isUntracked(f)) ? null : f)))).filter((f): f is string => f !== null);
           if (diff === null || diff.length === 0) {
             fresh = true;
             continue;
@@ -598,7 +659,7 @@ export class Graft {
     if (staged.length === 0) {
       throw new GraftError("Nothing staged to commit. Stage files, name paths, or pass --all.");
     }
-    const unmet = evaluateRules(policy, staged, open.evidence);
+    const unmet = evaluateRules(policy, staged, open.evidence, { labelIsName: false });
     if (unmet.length) {
       const wants = unmet.map((u) => `"${u.name}" (${u.command})`).join(" and ");
       const files = [...new Set(unmet.flatMap((u) => u.files))];
@@ -613,10 +674,11 @@ export class Graft {
     if (stale.length) {
       const wants = stale.map((s) => `"${s.name}" (${s.command})`).join(" and ");
       const files = [...new Set(stale.flatMap((s) => s.files))];
+      const unstaged = files.some((f) => !staged.includes(f)) ? " with the edits you are not committing staged or stashed" : "";
       refuse(
         "no-evidence",
         `${wants} last passed before ${files.join(", ")} changed, so the run did not check what is being committed. ` +
-          `Run graft evidence ${stale.map((s) => s.name).join(", graft evidence ")} again, or pass --allow-no-evidence.`,
+          `Run graft evidence ${stale.map((s) => s.name).join(", graft evidence ")} again${unstaged}, or pass --allow-no-evidence.`,
       );
     }
     const suspicious = staged.filter((p) => looksLikeSecretFile(p, policy.secretFiles));
@@ -633,7 +695,7 @@ export class Graft {
   /** Commit the staged changes with the record in trailers and a git note. */
   async land(opts: LandOptions = {}): Promise<LandedChange> {
     const open = await this.requireOpen();
-    if (opts.plan) open.plan = opts.plan.trim();
+    if (opts.plan) open.plan = redact(opts.plan.trim());
     const policy = await readPolicy(await this.git.topLevel());
     if (opts.paths?.length) await this.git.run(["add", "--", ...opts.paths]);
     if (opts.all) await this.git.run(["add", "-A"]);
@@ -681,7 +743,9 @@ export class Graft {
    * The prepare-commit-msg hook: when a change is open and the message does
    * not already carry a record, run the landing gate and append the record
    * (plan, evidence, trailers) to the message file, so a plain `git commit`
-   * lands like `graft land`. Merges, squashes and amends are left alone.
+   * lands like `graft land`. Merges, squashes and amends are left alone, and
+   * so are the commits git makes for a rebase, cherry-pick or revert: they
+   * copy commits that already exist, not the work of the open change.
    */
   async prepareCommitMessage(messageFile: string, source?: string): Promise<PrepareResult> {
     if (source === "merge" || source === "squash" || source === "commit") {
@@ -690,14 +754,20 @@ export class Graft {
     const open = await this.store.read();
     if (!open) return { applied: false, reason: "no change is open" };
     const current = await readFile(messageFile, "utf8");
+    const sequencer = await this.sequencerRunning(open, current);
+    if (sequencer) return { applied: false, reason: `${sequencer} in progress` };
     if (parseTrailers(current)[TRAILER_KEYS.change]) return { applied: false, reason: "message already carries a record" };
+    const head = await this.git.head();
+    if (head && parseTrailers(await this.git.run(["log", "-1", "--format=%B", head]))[TRAILER_KEYS.change] && (await this.amending(head))) {
+      return { applied: false, reason: "amending a commit that already carries a record" };
+    }
     const policy = await readPolicy(await this.git.topLevel());
     const staged = await this.git.stagedFiles();
     let overrides: Override[];
     try {
       overrides = await this.assertLandable(open, policy, staged, {
-        allowNoEvidence: Boolean(process.env.GRAFT_ALLOW_NO_EVIDENCE),
-        allowSecrets: Boolean(process.env.GRAFT_ALLOW_SECRETS),
+        allowNoEvidence: envFlag("GRAFT_ALLOW_NO_EVIDENCE"),
+        allowSecrets: envFlag("GRAFT_ALLOW_SECRETS"),
       });
     } catch (err) {
       if (!(err instanceof GraftError)) throw err;
@@ -715,19 +785,76 @@ export class Graft {
     await this.store.write(open);
     await this.store.clearAttempts();
     const block = recordBlock(open, expandTrailers(policy.trailers ?? []).trailers).join("\n");
-    // Keep git's own comment lines (the editor template) after the record.
+    // In the editor flow git strips its comment lines (the status template)
+    // after this hook; keep them after the record. A message given with -m or
+    // -F is kept as written, so a subject like "#42 fix the crash" is the
+    // subject, not a comment.
     const lines = current.split("\n");
-    const firstComment = lines.findIndex((l) => l.startsWith("#"));
+    const comment = source === "message" ? null : await this.commentPrefix();
+    const firstComment = comment === null ? -1 : lines.findIndex((l) => l.startsWith(comment));
     const body = (firstComment === -1 ? lines : lines.slice(0, firstComment)).join("\n").replace(/\s+$/, "");
     const comments = firstComment === -1 ? "" : "\n" + lines.slice(firstComment).join("\n");
-    const head = body ? body + "\n\n" : "\n\n";
-    await writeFile(messageFile, head + block + "\n" + comments);
+    const prefix = body ? body + "\n\n" : "\n\n";
+    await writeFile(messageFile, prefix + block + "\n" + comments);
     return { applied: true, id: open.id };
   }
 
   /**
+   * The git operation that is making this commit on the user's behalf, when
+   * one is: a rebase (or `git am`), cherry-pick or revert. Their commits copy
+   * existing ones, so the open change does not belong on them. A revert the
+   * open change itself is about (opened by `graft revert`) is not one.
+   */
+  private async sequencerRunning(open: ChangeRecord, message: string): Promise<string | null> {
+    const action = process.env.GIT_REFLOG_ACTION ?? "";
+    for (const op of ["rebase", "cherry-pick", "revert"]) if (action.startsWith(op)) return op;
+    const exists = async (name: string) => {
+      try {
+        await stat(resolve(this.git.cwd, await this.git.run(["rev-parse", "--git-path", name])));
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    if ((await exists("rebase-merge")) || (await exists("rebase-apply"))) return "rebase";
+    if (await exists("CHERRY_PICK_HEAD")) return "cherry-pick";
+    if (!open.reverts) {
+      if (await exists("REVERT_HEAD")) return "revert";
+      // A revert that applies cleanly leaves no REVERT_HEAD; its message is git's own template.
+      if (/^This reverts commit [0-9a-f]{40,64}\.$/m.test(message)) return "revert";
+    }
+    return null;
+  }
+
+  /**
+   * Whether the commit being prepared amends `head`. Git tells a hook only
+   * the message source, and `--amend -m` reports "message" like any commit,
+   * so this asks the git process that ran the hook for its arguments, and
+   * where that cannot be told (Windows, an alias) takes an author date equal
+   * to HEAD's, which git reuses on amend, as the sign.
+   */
+  private async amending(head: string): Promise<boolean> {
+    if (/amend/.test(process.env.GIT_REFLOG_ACTION ?? "")) return true;
+    const argv = await invokingGitArgs();
+    const sub = argv ? gitSubcommand(argv) : null;
+    if (argv && sub === "commit") return argv.some((a) => /^--am(e(nd?)?)?$/.test(a));
+    const date = /^@?(\d+) ([+-]\d{4})$/.exec(process.env.GIT_AUTHOR_DATE ?? "");
+    if (!date) return false;
+    const headDate = await this.git.run(["log", "-1", "--format=%ad", "--date=raw", head]);
+    // A commit made in the same second as HEAD would match too; only an older date is a sign.
+    return headDate === `${date[1]} ${date[2]}` && Date.now() / 1000 - Number(date[1]) > 2;
+  }
+
+  /** The prefix git strips as a comment in the editor flow: core.commentChar (or commentString), `#` by default and for `auto`. */
+  private async commentPrefix(): Promise<string> {
+    const configured = (await this.configGet("core.commentString")) ?? (await this.configGet("core.commentChar"));
+    return !configured || configured === "auto" ? "#" : configured;
+  }
+
+  /**
    * The post-commit hook: when HEAD carries the open change's id, attach the
-   * full record as the note and close the change.
+   * full record as the note and close the change. A note already on HEAD for
+   * another change the message names is never replaced.
    */
   async finishCommit(): Promise<FinishResult> {
     const open = await this.store.read();
@@ -737,6 +864,12 @@ export class Graft {
     const message = await this.git.run(["log", "-1", "--format=%B", commit]);
     if (parseTrailers(message)[TRAILER_KEYS.change] !== open.id) {
       return { attached: false, reason: "HEAD does not carry the open change" };
+    }
+    if (changeIds(message).some((id) => id !== open.id)) {
+      const existing = await this.rawNote(commit);
+      if (existing !== null && parseRecord(existing)?.id !== open.id) {
+        return { attached: false, reason: "HEAD already has a note for another change its message names" };
+      }
     }
     open.landedAt ??= new Date().toISOString();
     open.commit = commit;
@@ -749,7 +882,7 @@ export class Graft {
 
   /**
    * Prepare a repository: make git carry notes through amend and rebase,
-   * fetch the notes ref alongside branches, write a starter policy file, and
+   * write a starter policy file, and
    * tell agents how to use Graft in AGENTS.md. Safe to run more than once.
    */
   async init(opts: { remote?: string; force?: boolean; agents?: boolean; hooks?: boolean; ci?: boolean } = {}): Promise<InitResult> {
@@ -768,17 +901,23 @@ export class Graft {
       }
     }
 
+    // Graft no longer adds the notes ref to the remote's fetch refspec: an exact
+    // refspec makes every `git fetch` fail while the remote has no notes, and a
+    // forced one overwrites notes this clone has not pushed. `graft sync` fetches
+    // and merges them on purpose. Remove the one earlier versions wrote; any
+    // other notes refspec (a wildcard the repo chose) is the repo's to keep.
     const remote = opts.remote ?? (await this.defaultRemote());
     if (remote) {
-      const refspec = `+${NOTES_REF}:${NOTES_REF}`;
-      const existing = await this.configGetAll(`remote.${remote}.fetch`);
-      if (!existing.includes(refspec)) {
-        await this.git.run(["config", "--add", `remote.${remote}.fetch`, refspec]);
-        configured.push(`remote.${remote}.fetch`);
+      const ours = `+${NOTES_REF}:${NOTES_REF}`;
+      if ((await this.configGetAll(`remote.${remote}.fetch`)).includes(ours)) {
+        // A value pattern rather than --fixed-value, which needs git 2.30.
+        await this.git.run(["config", "--unset-all", `remote.${remote}.fetch`, `^${ours.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}$`]);
+        configured.push(`remote.${remote}.fetch (removed ${ours}; graft sync fetches notes)`);
       }
     }
 
     let policyWritten = false;
+    let policyFrom: string[] = [];
     const policyFile = join(topLevel, POLICY_PATH);
     try {
       await readFile(policyFile, "utf8");
@@ -786,13 +925,15 @@ export class Graft {
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
       await mkdir(join(topLevel, ".graft"), { recursive: true });
-      await writeFile(policyFile, JSON.stringify(DEFAULT_POLICY, null, 2) + "\n");
+      const detected = await detectPolicy(topLevel);
+      await writeFile(policyFile, JSON.stringify(detected.policy, null, 2) + "\n");
       policyWritten = true;
+      policyFrom = detected.from;
     }
     const agents = opts.agents === false ? undefined : await writeAgentsSection(topLevel);
     const hooks = opts.hooks === false ? undefined : await installHooks(this.git, topLevel);
     const ci = opts.ci ? await writeCiWorkflow(topLevel) : undefined;
-    return { topLevel, configured, policyWritten, remote: remote ?? undefined, agents, hooks, ci };
+    return { topLevel, configured, policyWritten, policyFrom, remote: remote ?? undefined, agents, hooks, ci };
   }
 
   /**
@@ -817,7 +958,7 @@ export class Graft {
       if (!haveLocal) {
         await this.git.run(["update-ref", NOTES_REF, theirs]);
       } else {
-        await this.git.run(["notes", `--ref=${NOTES_REF}`, "merge", "-q", "-s", "cat_sort_uniq", theirs]);
+        await this.mergeNotes(theirs);
       }
       merged = true;
     }
@@ -834,6 +975,41 @@ export class Graft {
       }
     }
     return { remote, fetched, merged, pushed, pushError };
+  }
+
+  /**
+   * Merge another clone's notes into ours, leaving one record per commit.
+   * Git's own strategies either pick a side blindly or concatenate the two
+   * JSON documents into a note nothing can parse, so conflicts are resolved
+   * here: the record with more evidence wins, then the later landing, then
+   * ours. A note that is not a record loses to one that is.
+   */
+  private async mergeNotes(theirs: string): Promise<void> {
+    try {
+      await this.git.run(["notes", `--ref=${NOTES_REF}`, "merge", "-q", "-s", "manual", theirs]);
+      return;
+    } catch (err) {
+      const worktree = resolve(this.git.cwd, await this.git.run(["rev-parse", "--git-path", "NOTES_MERGE_WORKTREE"]));
+      let conflicts: string[];
+      try {
+        conflicts = (await readdir(worktree)).filter((f) => /^[0-9a-f]{40,64}$/.test(f));
+      } catch {
+        throw err; // not a conflict: the merge itself failed
+      }
+      try {
+        for (const commit of conflicts) {
+          const ours = await this.rawNote(commit, NOTES_REF);
+          const other = await this.rawNote(commit, theirs);
+          const keep = betterNote(ours, other);
+          if (keep === null) await rm(join(worktree, commit), { force: true });
+          else await writeFile(join(worktree, commit), keep.endsWith("\n") ? keep : keep + "\n");
+        }
+        await this.git.run(["notes", `--ref=${NOTES_REF}`, "merge", "--commit", "-q"]);
+      } catch (inner) {
+        await this.git.run(["notes", `--ref=${NOTES_REF}`, "merge", "--abort"]).catch(() => undefined);
+        throw inner;
+      }
+    }
   }
 
   /** History as changes. Commits without a Graft record are included with record: null. */
@@ -871,6 +1047,7 @@ export class Graft {
       "log",
       `--max-count=${opts.limit ?? DEFAULT_CONTEXT_LIMIT}`,
       "--name-only",
+      "-z",
       "--format=%x1e%H%x1f%s%x1f%an%x1f%aI%x1f%B%x1d",
       "--",
       ...paths,
@@ -881,7 +1058,8 @@ export class Graft {
       if (!chunk.trim()) continue;
       const [meta, named = ""] = chunk.split("\x1d");
       const [commit, title, authorName, authoredAt, body] = meta.split("\x1f");
-      const files = named.split("\n").map((l) => l.trim()).filter(Boolean);
+      // With -z the names follow the format as NUL-terminated paths, never C-quoted.
+      const files = splitNul(named.replace(/^\0?\n/, ""));
       const trailers = parseTrailers(body ?? "");
       const read = await this.readRecord(commit, body ?? "", authoredAt);
       if (!read.record) unrecorded++;
@@ -900,7 +1078,13 @@ export class Graft {
     const entries = await this.log({ limit: opts.limit ?? Infinity, onlyGraft: !opts.all });
     if (opts.diff === false) return entries;
     const out: ExportEntry[] = [];
-    for (const e of entries) out.push({ ...e, diff: await this.diff(e.commit) });
+    for (const e of entries) {
+      try {
+        out.push({ ...e, diff: await this.diff(e.commit) });
+      } catch (err) {
+        throw new GraftError(`Could not export the diff of ${e.commit.slice(0, 10)}: ${(err as Error).message || "git gave no reason"}`);
+      }
+    }
     return out;
   }
 
@@ -932,9 +1116,32 @@ export class Graft {
     return { commit: sha, title, authorName, authoredAt, trailers, ...(await this.readRecord(sha, body ?? "", authoredAt)) };
   }
 
-  /** The unified diff a commit introduced against its first parent (empty for a root commit's parent side). */
-  async diff(commit: string): Promise<string> {
-    return this.git.run(["show", "--format=", "--no-color", "--no-ext-diff", "-M", "--root", commit]);
+  /**
+   * The unified diff a commit introduced against its first parent (empty for a
+   * root commit's parent side). Paths are left unescaped where git allows
+   * (core.quotePath=false) and always carry the a/ and b/ prefixes, whatever
+   * diff.noprefix or diff.mnemonicPrefix say, so a parser can read them. With
+   * `remerge`, a merge commit's diff is against git's own re-merge of its
+   * parents (git 2.36 or newer): what the merge changed beyond merging.
+   */
+  async diff(commit: string, opts: { remerge?: boolean } = {}): Promise<string> {
+    // A generated file or a vendored dependency can make one diff far larger than git's usual output.
+    return this.git.run(
+      [
+        "-c",
+        "core.quotePath=false",
+        "show",
+        "--format=",
+        "--no-color",
+        "--no-ext-diff",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
+        "-M",
+        ...(opts.remerge ? ["--remerge-diff"] : ["--root"]),
+        commit,
+      ],
+      { maxBuffer: DIFF_MAX_BUFFER },
+    );
   }
 
   /** The note when it is here, else what the commit message alone can reconstruct. */
@@ -950,10 +1157,32 @@ export class Graft {
     return record ? { record, recordSource: "message" } : { record: null, recordSource: null };
   }
 
+  private warnedBadNote = false;
+
+  /**
+   * The record in the commit's note, or null when there is none. A note that
+   * does not parse (two records concatenated by an old `graft sync`, or a
+   * hand edit) is reported once on stderr, and readers fall back to the
+   * commit message rather than showing nothing.
+   */
   private async readNote(commit: string): Promise<ChangeRecord | null> {
+    const raw = await this.rawNote(commit);
+    if (raw === null) return null;
+    const record = parseRecord(raw);
+    if (!record && !this.warnedBadNote) {
+      this.warnedBadNote = true;
+      process.stderr.write(
+        `graft: the note on ${commit.slice(0, 10)} in ${NOTES_REF} is not a valid change record; reading the commit message instead. ` +
+          `Replace or remove it with git notes --ref=${NOTES_REF} edit/remove ${commit.slice(0, 10)}.\n`,
+      );
+    }
+    return record;
+  }
+
+  /** The note's text on `commit` under `ref`, or null when it has none. */
+  private async rawNote(commit: string, ref: string = NOTES_REF): Promise<string | null> {
     try {
-      const raw = await this.git.run(["notes", `--ref=${NOTES_REF}`, "show", commit]);
-      return JSON.parse(raw) as ChangeRecord;
+      return await this.git.run(["notes", `--ref=${ref}`, "show", commit]);
     } catch {
       return null;
     }
@@ -1048,8 +1277,15 @@ function defaultAuthor(partial?: Partial<ChangeAuthor>): ChangeAuthor {
 
 function capOutput(s: string): string {
   if (Buffer.byteLength(s) <= EVIDENCE_OUTPUT_CAP) return s;
-  const tail = Buffer.from(s).subarray(-EVIDENCE_OUTPUT_CAP).toString("utf8");
-  return "[... truncated ...]\n" + tail;
+  return "[... truncated ...]\n" + utf8Tail(Buffer.from(s), EVIDENCE_OUTPUT_CAP);
+}
+
+/** The last `max` bytes of `buf` as text, starting on a character boundary rather than mid-character. */
+function utf8Tail(buf: Buffer, max: number): string {
+  let start = Math.max(0, buf.length - max);
+  // Continuation bytes are 10xxxxxx; step past them to the next character's first byte.
+  while (start < buf.length && (buf[start] & 0xc0) === 0x80) start++;
+  return buf.subarray(start).toString("utf8");
 }
 
 function sha256File(path: string): Promise<string> {
@@ -1062,14 +1298,100 @@ function sha256File(path: string): Promise<string> {
   });
 }
 
-/** Run a shell command from `cwd`, capturing its exit code and combined output. Records nothing. */
+/** How much of a command's combined output runShell keeps: the tail, since that is where a failure is reported. */
+export const SHELL_OUTPUT_KEEP = 64 * 1024;
+
+/**
+ * Run a shell command from `cwd`, capturing its exit code and the last
+ * SHELL_OUTPUT_KEEP bytes of combined output (cut on a character boundary,
+ * marked when cut), so a command that prints gigabytes does not hold them
+ * all in memory. Records nothing.
+ */
 export function runShell(command: string, cwd: string): Promise<{ exitCode: number; output: string }> {
   return new Promise((resolve) => {
     const child = spawn(command, { cwd, shell: true, env: process.env, stdio: ["ignore", "pipe", "pipe"] });
     const chunks: Buffer[] = [];
-    child.stdout.on("data", (c: Buffer) => chunks.push(c));
-    child.stderr.on("data", (c: Buffer) => chunks.push(c));
+    let held = 0;
+    let dropped = false;
+    const keep = (c: Buffer) => {
+      chunks.push(c);
+      held += c.length;
+      // Drop whole chunks from the front while what remains still covers the tail.
+      while (chunks.length > 1 && held - chunks[0].length >= SHELL_OUTPUT_KEEP) {
+        held -= chunks.shift()!.length;
+        dropped = true;
+      }
+    };
+    child.stdout.on("data", keep);
+    child.stderr.on("data", keep);
     child.on("error", (err) => resolve({ exitCode: 127, output: String(err) }));
-    child.on("close", (code) => resolve({ exitCode: code ?? 1, output: Buffer.concat(chunks).toString("utf8") }));
+    child.on("close", (code) => {
+      const all = Buffer.concat(chunks);
+      const output = dropped || all.length > SHELL_OUTPUT_KEEP ? "[... truncated ...]\n" + utf8Tail(all, SHELL_OUTPUT_KEEP) : all.toString("utf8");
+      resolve({ exitCode: code ?? 1, output });
+    });
   });
+}
+
+/** Untracked files bigger than this are left out of the tree hashed for each evidence run. */
+export const UNTRACKED_HASH_CAP = 1024 * 1024;
+/** Output allowed for one commit's diff in `export`. */
+const DIFF_MAX_BUFFER = 1024 * 1024 * 1024;
+
+/** The paths among `files` (relative to `root`) larger than `cap` bytes; ones that cannot be read are skipped. */
+async function filesLargerThan(root: string, files: string[], cap: number): Promise<string[]> {
+  const out: string[] = [];
+  for (let i = 0; i < files.length; i += 64) {
+    const batch = files.slice(i, i + 64);
+    const sizes = await Promise.all(batch.map((f) => stat(join(root, f)).then((st) => st.size, () => 0)));
+    batch.forEach((f, j) => {
+      if (sizes[j] > cap) out.push(f);
+    });
+  }
+  return out;
+}
+
+/** True when an environment flag is set to 1, true or yes; "0", "false" or empty leave it off. */
+export function envFlag(name: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  return /^(1|true|yes)$/i.test((env[name] ?? "").trim());
+}
+
+/** Every Graft-Change id a message names, in order. */
+function changeIds(message: string): string[] {
+  return [...message.matchAll(/^Graft-Change:\s*(\S+)\s*$/gm)].map((m) => m[1]);
+}
+
+/** A note's text as a change record, or null when it is not one. */
+function parseRecord(raw: string): ChangeRecord | null {
+  try {
+    const parsed = JSON.parse(raw) as ChangeRecord;
+    return parsed && typeof parsed === "object" && typeof parsed.id === "string" && Array.isArray(parsed.evidence) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Of two notes for one commit, the one to keep: a record over a non-record, more evidence, a later landing, then ours. */
+function betterNote(ours: string | null, theirs: string | null): string | null {
+  if (theirs === null) return ours;
+  if (ours === null) return theirs;
+  const a = parseRecord(ours);
+  const b = parseRecord(theirs);
+  if (!a || !b) return a || !b ? ours : theirs;
+  if (a.evidence.length !== b.evidence.length) return a.evidence.length > b.evidence.length ? ours : theirs;
+  return (b.landedAt ?? "") > (a.landedAt ?? "") ? theirs : ours;
+}
+
+/** The git subcommand in a git process's argv, past global options such as -C and -c. */
+function gitSubcommand(argv: string[]): string | null {
+  for (let i = 1; i < argv.length; i++) {
+    const a = argv[i];
+    if (["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"].includes(a)) {
+      i++;
+      continue;
+    }
+    if (a.startsWith("-")) continue;
+    return a;
+  }
+  return null;
 }

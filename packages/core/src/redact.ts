@@ -26,12 +26,38 @@ export function secretEnvValues(env: NodeJS.ProcessEnv = process.env): { name: s
   return found.sort((a, b) => b.value.length - a.value.length);
 }
 
-/** Replace every occurrence of a secret-looking env value with a marker naming the variable. */
+/**
+ * Credentials that look like themselves wherever they appear, so a token
+ * pasted into a prompt or typed on a command line is caught even when no
+ * environment variable holds it. Each keeps a label and drops the value.
+ */
+const TOKEN_PATTERNS: [RegExp, string | ((...m: string[]) => string)][] = [
+  [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, "[redacted private key]"],
+  [/\bsk-ant-[A-Za-z0-9_-]{20,}/g, "[redacted Anthropic key]"],
+  [/\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}/g, "[redacted API key]"],
+  [/\bgh[pousr]_[A-Za-z0-9]{30,}|\bgithub_pat_[A-Za-z0-9_]{30,}/g, "[redacted GitHub token]"],
+  [/\bxox[abposr]-[A-Za-z0-9-]{10,}/g, "[redacted Slack token]"],
+  [/\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, "[redacted AWS key]"],
+  [/\bAIza[0-9A-Za-z_-]{35}\b/g, "[redacted Google key]"],
+  [/\bnpm_[A-Za-z0-9]{36}\b/g, "[redacted npm token]"],
+  // scheme://user:password@host keeps the user and host.
+  [/\b([a-z][a-z0-9+.-]*:\/\/[^\s:/@]+:)[^\s@/]+@/gi, (_m, head) => `${head}[redacted]@`],
+  // --password=x, password: x, api_key=x keep the key.
+  [/((?:--?)?\b(?:[A-Za-z0-9]+[_-])*(?:password|passwd|pwd|secret|token|api[-_]?key|access[-_]?key|auth[-_]?token)\b\s*[=:]\s*)(?!\[redacted)("[^"]*"|'[^']*'|[^\s'"&;]+)/gi, (_m, head) => `${head}[redacted]`],
+];
+
+/**
+ * Replace every occurrence of a secret-looking env value with a marker naming
+ * the variable, and every well-known credential format with a marker naming
+ * its kind. Applied to everything a record keeps: task, plan, commands,
+ * labels, notes and output, since the commit message is pushed history.
+ */
 export function redact(text: string, env: NodeJS.ProcessEnv = process.env): string {
   let out = text;
   for (const { name, value } of secretEnvValues(env)) {
     out = out.split(value).join(`[redacted ${name}]`);
   }
+  for (const [re, to] of TOKEN_PATTERNS) out = typeof to === "string" ? out.replace(re, to) : out.replace(re, to);
   return out;
 }
 
@@ -41,6 +67,10 @@ const SECRET_FILE_PATTERNS: RegExp[] = [
   /(^|\/)id_(rsa|dsa|ecdsa|ed25519)(\.pub)?$/,
   /(^|\/)(credentials|service-account[^/]*)\.json$/i,
   /(^|\/)\.(npmrc|pypirc|netrc)$/,
+  /(^|\/)\.aws\/credentials$/,
+  /(^|\/)\.git-credentials$/,
+  /(^|\/)(\.kube\/config|kubeconfig(\.ya?ml)?)$/,
+  /\.tfvars(\.json)?$/, // terraform.tfvars, prod.auto.tfvars; not *.tfvars.example
 ];
 
 /**

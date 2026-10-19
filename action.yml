@@ -3,13 +3,22 @@
 #   - uses: actions/checkout@v4
 #     with: { fetch-depth: 0 }
 #   # your install step (npm ci, go mod download, ...), so recorded commands can run
-#   - uses: FourShore/Graft@v0   # v0 moves with each 0.x release; pin @v0.1.0 or a SHA for one exact version
+#   - uses: FourShore/Graft@v0   # v0 moves with each 0.x release; @v0.1.0 or that tag's SHA stays on one
+#
+# Each release sets the `version` input's default below to its own version, so
+# pinning a release tag (or its commit SHA) also pins the Graft it installs.
+# A SHA that is not a release installs whatever version the last release set.
 #
 # It installs Graft, fetches the notes ref, and runs `graft check` against the
-# pull request's base branch with GitHub annotations and a step summary. The
-# recorded commands are re-run only for branches of the same repository, since
-# a fork's commit messages are text a stranger wrote and the check would
-# execute them; set `rerun: "false"` to never re-run, or `"true"` to always.
+# pull request's base branch with GitHub annotations and a step summary. On a
+# merge_group event the base is the queue's base commit, on a push the commit
+# before it; any other event needs the `base` input. The check reads the
+# policy from the base, not from the branch under review. Recorded commands
+# are re-run only for branches of the same repository, since a fork's commit
+# messages are text a stranger wrote and the check would execute them; set
+# `rerun: "false"` to never re-run, or `"true"` to always. Even then only the
+# policy's catalog commands are run, plus commands that fully match one of
+# its `checkCommands` patterns.
 # Set `comment: "true"` to also post the summary table as one pull request
 # comment, updated in place on each run; the calling workflow then needs
 # `permissions: pull-requests: write`, and a fork's pull request gets a
@@ -21,14 +30,14 @@ branding:
   color: green
 inputs:
   base:
-    description: The branch this pull request merges into.
+    description: The branch this pull request merges into. Empty on merge_group and push events, where the base commit comes from the event.
     default: ${{ github.base_ref }}
   rerun:
     description: Re-run the recorded passing commands on this checkout. "auto" does so for branches of this repository only.
     default: auto
   version:
-    description: The @fourshore/graft version to install.
-    default: latest
+    description: The @fourshore/graft version to install. Each release sets this default to its own version.
+    default: "0.1.0"
   node-version:
     description: Node.js version used to run Graft itself.
     default: "22"
@@ -58,12 +67,33 @@ runs:
         SAME_REPO: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
         BASE: ${{ inputs.base }}
         COMMENT: ${{ inputs.comment }}
+        EVENT: ${{ github.event_name }}
+        MERGE_GROUP_BASE: ${{ github.event.merge_group.base_sha }}
+        PUSH_BEFORE: ${{ github.event.before }}
       run: |
+        if [ -n "$BASE" ]; then
+          base="origin/$BASE"
+        else
+          case "$EVENT" in
+            merge_group) base="$MERGE_GROUP_BASE" ;;
+            push)
+              if [ -z "$PUSH_BEFORE" ] || [[ "$PUSH_BEFORE" =~ ^0+$ ]]; then
+                echo "::notice title=Graft check::This push created the branch, so there is no previous commit to check from; skipped."
+                exit 0
+              fi
+              base="$PUSH_BEFORE" ;;
+            *)
+              echo "::error title=Graft check::No base for a $EVENT event: set the action's base input to the branch or commit to check from."
+              exit 1 ;;
+          esac
+        fi
         flags=()
+        # A push or a merge queue run checks commits already in this repository, so they are not a stranger's text.
+        if [ "$EVENT" = "push" ] || [ "$EVENT" = "merge_group" ]; then SAME_REPO=true; fi
         if [ "$RERUN" = "true" ] || { [ "$RERUN" = "auto" ] && [ "$SAME_REPO" = "true" ]; }; then flags+=(--rerun); fi
         # Only asked for with comment, so a pinned older version without the option keeps working.
         if [ "$COMMENT" = "true" ]; then flags+=(--summary-file "$RUNNER_TEMP/graft-check-summary.md"); fi
-        graft check --base "origin/$BASE" --format github "${flags[@]}"
+        graft check --base "$base" --format github "${flags[@]}"
     - name: Post the Graft summary on the pull request
       if: always() && inputs.comment == 'true' && github.event.pull_request.number
       shell: bash

@@ -35,6 +35,8 @@ export interface ChangeRecord {
    * task and keeping the evidence, instead of refusing.
    */
   capturedBy?: string;
+  /** The harness session that opened the change, when a capture hook did; runs from other sessions are not recorded on it. */
+  sessionId?: string;
   /**
    * Changes abandoned in this worktree since the last land, folded into the
    * change that did land: the plans that did not work and why, kept so the
@@ -359,13 +361,19 @@ const LEGACY_LABEL = /^([A-Za-z0-9][A-Za-z0-9 _-]{0,59}): (\S+(?:[ /.]\S*)+)$/;
  * Returns null when the message carries no Graft-Change trailer.
  */
 export function parseMessageRecord(message: string, authoredAt: string): ChangeRecord | null {
-  const trailers = parseTrailers(message);
+  const lines = message.split("\n");
+  const found = recordBlockOf(lines);
+  if (!found) return null;
+  // Only the record Graft wrote: its own trailer paragraph and the blocks just
+  // above it, so a task that mentions "Evidence:" or a squash of several
+  // landed commits reads as the one record the chosen Graft-Change belongs to.
+  const trailerText = found.trailers.join("\n");
+  const trailers = parseTrailers(trailerText);
   const id = trailers[TRAILER_KEYS.change];
   if (!id) return null;
-  const lines = message.split("\n");
-  const plan = readBlock(lines, "Plan:");
+  const plan = found.blocks.get("Plan:") ?? null;
   const evidence: Evidence[] = [];
-  const evidenceBlock = readBlock(lines, EVIDENCE_HEADER)?.split("\n") ?? [];
+  const evidenceBlock = found.blocks.get(EVIDENCE_HEADER)?.split("\n") ?? [];
   // Graft 0.0.6 wrote the label outside the bracket, as `[pass] label: command`.
   // Such a block never has a label inside a bracket, which is how it is told apart.
   const legacy = evidenceBlock.every((l) => !LABELLED_BRACKET.test(l));
@@ -406,13 +414,13 @@ export function parseMessageRecord(message: string, authoredAt: string): ChangeR
     });
   }
   const attempts: Attempt[] = [];
-  for (const line of readBlock(lines, TRIED_HEADER)?.split("\n") ?? []) {
+  for (const line of found.blocks.get(TRIED_HEADER)?.split("\n") ?? []) {
     const m = ATTEMPT_LINE.exec(line);
     if (!m) continue;
     attempts.push({ id: m[1], task: m[2], summary: m[2], evidenceSummary: m[3], startedAt: authoredAt, abandonedAt: authoredAt, evidence: [] });
   }
-  const artifacts = parseArtifactTrailers(message);
-  const overrides = parseOverrideTrailers(message);
+  const artifacts = parseArtifactTrailers(trailerText);
+  const overrides = parseOverrideTrailers(trailerText);
   const [kind, ...name] = (trailers[TRAILER_KEYS.author] ?? "human:unknown").split(":");
   return {
     version: 1,
@@ -445,14 +453,52 @@ export function parseOverrideTrailers(message: string): Override[] {
   return OVERRIDES.filter((o) => found.has(o));
 }
 
+const RECORD_HEADERS = ["Plan:", TRIED_HEADER, EVIDENCE_HEADER];
+
 /**
- * The indented lines that follow `header` on its own line. Blank lines are
+ * The record Graft wrote into a message: the trailer paragraph holding the
+ * last `Graft-Change` line, and the Plan:, Tried: and Evidence: blocks in
+ * the paragraphs immediately before it, in that order. A header elsewhere in
+ * the message (in the task's own text, or in an earlier record of a squash)
+ * is not read. Null when the message names no change.
+ */
+function recordBlockOf(lines: string[]): { trailers: string[]; blocks: Map<string, string> } | null {
+  let at = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (/^Graft-Change:/.test(lines[i])) {
+      at = i;
+      break;
+    }
+  }
+  if (at < 0) return null;
+  let start = at;
+  while (start > 0 && lines[start - 1].trim()) start--;
+  let end = at;
+  while (end + 1 < lines.length && lines[end + 1].trim()) end++;
+  const blocks = new Map<string, string>();
+  // Walk back over the blocks: each is a header line, then indented (or blank) lines.
+  let allowed = RECORD_HEADERS.length;
+  let i = start - 1;
+  while (i >= 0) {
+    while (i >= 0 && !lines[i].trim()) i--;
+    let h = i;
+    while (h >= 0 && (!lines[h].trim() || lines[h].startsWith("  "))) h--;
+    if (h < 0 || h === i) break; // no indented body above, so not a block
+    const which = RECORD_HEADERS.indexOf(lines[h]);
+    if (which < 0 || which >= allowed) break;
+    blocks.set(lines[h], readBlock(lines, h));
+    allowed = which;
+    i = h - 1;
+  }
+  return { trailers: lines.slice(start, end + 1), blocks };
+}
+
+/**
+ * The indented lines that follow the header at `start`. Blank lines are
  * kept while the next non-blank line is still indented, so a multi-paragraph
  * plan survives; the block ends at the first unindented line.
  */
-function readBlock(lines: string[], header: string): string | null {
-  const start = lines.indexOf(header);
-  if (start < 0) return null;
+function readBlock(lines: string[], start: number): string {
   const body: string[] = [];
   const rest = lines.slice(start + 1);
   for (let i = 0; i < rest.length; i++) {
