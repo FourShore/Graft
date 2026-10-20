@@ -16,14 +16,16 @@ the task it was given, the checks that ran and whether they passed, and a commit
 without them is refused. Two things are yours.
 
 - \`graft start "<the task, in the words you were given>"\` names the change.
-  In Claude Code with the capture hooks installed, your prompt already opened
-  one and this only names it; if another session left one open, add \`--replace\`.
+  Where the capture hooks are installed (Claude Code, Codex, Cursor, Copilot
+  CLI, Gemini CLI), your prompt already opened one and this only names it; if
+  another session left one open, add \`--replace\`.
 - Run the repo's checks before committing. \`.graft/policy.json\` names them and
   says which files need which; \`graft status\` lists them. \`graft evidence <name>\`
-  runs one by name and records the result, in any agent. In Claude Code the
-  hooks also record the test, build and lint runs you make, unless the exit
-  code is hidden (\`npm test | tail\`). \`graft evidence --note "<what you checked>"\`
-  records a manual check. A check that ran before your last edit does not count.
+  runs one by name and records the result, in any agent. With the hooks, the
+  test, build and lint runs you make are recorded as you make them, unless the
+  exit code is hidden (\`npm test | tail\`) or your agent does not report it.
+  \`graft evidence --note "<what you checked>"\` records a manual check. A check
+  that ran before your last edit does not count.
 
 Then commit. \`graft status\` says whether this clone has the git hooks: with
 them, a plain \`git commit\` carries the record; without them, use

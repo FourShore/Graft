@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { readFile, writeFile } from "node:fs/promises";
 import { Command } from "commander";
-import { Graft, GraftError, attemptLines, gitHooksInstalled, handleClaudeCodeEvent, shellJoin, type ClaudeCodeEvent, type LogEntry } from "@fourshore/graft-core";
+import { AGENT_INFO, CAPTURE_AGENTS, Graft, GraftError, HOOK_SPECS, attemptLines, gitHooksInstalled, handleCaptureEvent, isCaptureAgent, normalizeAgentEvent, replyFor, shellJoin, type CaptureAgent, type LogEntry } from "@fourshore/graft-core";
 import type { ChangeRecord } from "@fourshore/graft-core";
 import { renderCheckGithub, renderCheckText, runCheck } from "@fourshore/graft-review";
 import { createRequire } from "node:module";
@@ -29,10 +29,15 @@ program
   .option("--remote <name>", "remote to configure (default: origin)")
   .option("--force", "overwrite an existing policy file")
   .option("--no-agents", "leave AGENTS.md alone")
-  .option("--no-hooks", "do not install the Claude Code and git capture hooks")
+  .option("--no-hooks", "do not install the capture hooks (agent and git)")
+  .option(
+    "--capture <agents>",
+    `which agents get capture hooks: auto (the ones this repo or machine uses; Claude Code always), all, or a list from ${CAPTURE_AGENTS.join(", ")}`,
+    "auto",
+  )
   .option("--ci", "write a GitHub Actions workflow that runs graft check on every pull request")
   .action(async (o) => {
-    const r = await graft().init({ remote: o.remote, force: o.force, agents: o.agents, hooks: o.hooks, ci: o.ci });
+    const r = await graft().init({ remote: o.remote, force: o.force, agents: o.agents, hooks: o.hooks, ci: o.ci, capture: parseCapture(o.capture) });
     const lines = [
       r.configured.length ? `Set ${r.configured.join(", ")}` : "Git config already set",
       r.policyWritten
@@ -47,20 +52,28 @@ program
     }
     if (r.hooks) {
       const h = r.hooks;
-      lines.push(
-        h.claudeCode === "written"
-          ? "Added capture hooks to .claude/settings.json (prompt opens a change, test/build/lint runs become evidence); commit it"
-          : h.claudeCode === "present"
-            ? ".claude/settings.json already has the capture hooks"
-            : ".claude/settings.json is not valid JSON; capture hooks not added",
-      );
+      for (const agent of CAPTURE_AGENTS) {
+        const state = h.agents[agent];
+        if (!state) continue;
+        const file = HOOK_SPECS[agent].file;
+        const title = AGENT_INFO[agent].title;
+        lines.push(
+          state === "written"
+            ? `Added ${title} capture hooks to ${file} (prompt opens a change, test/build/lint runs become evidence); commit it`
+            : state === "present"
+              ? `${file} already has the ${title} capture hooks`
+              : `${file} is not valid JSON; ${title} capture hooks not added`,
+        );
+      }
+      const skipped = CAPTURE_AGENTS.filter((a) => !h.agents[a]);
+      if (skipped.length) lines.push(`No hooks written for ${skipped.map((a) => AGENT_INFO[a].title).join(", ")}; pass --capture all or --capture ${skipped[0]} to add them.`);
       const gitHooks = Object.entries(h.git);
       const foreign = gitHooks.filter(([, state]) => state === "foreign").map(([name]) => name);
       const written = gitHooks.filter(([, state]) => state === "written").map(([name]) => name);
       if (written.length) lines.push(`Installed git hooks ${written.join(", ")} in ${h.hooksDir}, so a plain git commit carries the record`);
       else if (!foreign.length) lines.push("Git hooks already installed");
       if (foreign.length) lines.push(`Left ${foreign.join(" and ")} alone in ${h.hooksDir}: another hook is there. Add \`graft hook <name> "$@"\` to it yourself.`);
-      lines.push("The hooks run `graft`, so it must be on PATH for Claude Code and git.");
+      lines.push("The hooks run `graft`, so it must be on PATH for the agent and for git.");
     }
     if (r.ci) {
       lines.push(
@@ -216,23 +229,26 @@ program
 
 program
   .command("hook")
-  .description("entry points for the hooks graft init installs: claude-code (stdin JSON), prepare-commit-msg <file> [source], post-commit")
-  .argument("<kind>", "claude-code | prepare-commit-msg | post-commit")
+  .description(`entry points for the hooks graft init installs: an agent's hook (${CAPTURE_AGENTS.join(", ")}; stdin JSON), prepare-commit-msg <file> [source], post-commit`)
+  .argument("<kind>", `${CAPTURE_AGENTS.join(" | ")} | prepare-commit-msg | post-commit`)
   .argument("[args...]", "what git passes the hook")
   .action(async (kind: string, args: string[]) => {
-    if (kind === "claude-code") {
+    if (isCaptureAgent(kind)) {
       // Never break the agent's session: swallow everything, exit 0.
+      let payload: unknown;
       try {
-        const raw = await readStdin();
-        const event = JSON.parse(raw) as ClaudeCodeEvent;
-        const outcome = await handleClaudeCodeEvent(graft(), event);
+        payload = JSON.parse(await readStdin());
+        const outcome = await handleCaptureEvent(graft(), kind, normalizeAgentEvent(kind, payload));
         if (json()) console.log(JSON.stringify(outcome));
-        else if (outcome.context) {
-          // Claude Code reads this from stdout and adds it to the agent's context.
-          console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: event.hook_event_name, additionalContext: outcome.context } }));
+        else {
+          // The agent reads this from stdout: a note for its context, or the answer its prompt hook must give.
+          const reply = replyFor(kind, payload, outcome);
+          if (reply) console.log(reply);
         }
       } catch (err) {
         process.stderr.write(`graft hook: ${err instanceof Error ? err.message : String(err)}\n`);
+        const reply = replyFor(kind, payload, { action: "ignored", reason: "error" });
+        if (reply && !json()) console.log(reply);
       }
       return;
     }
@@ -251,7 +267,7 @@ program
       if (r.attached) console.log(`graft: recorded change ${r.id} on ${r.commit?.slice(0, 10)}`);
       return;
     }
-    throw new GraftError(`Unknown hook '${kind}'. Expected claude-code, prepare-commit-msg or post-commit.`);
+    throw new GraftError(`Unknown hook '${kind}'. Expected ${CAPTURE_AGENTS.join(", ")}, prepare-commit-msg or post-commit.`);
   });
 
 program
@@ -470,3 +486,13 @@ program.parseAsync(process.argv).catch((err: unknown) => {
   console.error(`graft: ${msg}`);
   process.exit(1);
 });
+
+/** `--capture auto|all|<agent,...>` as init takes it. */
+function parseCapture(value: string): CaptureAgent[] | "auto" | "all" {
+  const v = value.trim().toLowerCase();
+  if (v === "auto" || v === "all") return v;
+  const agents = v.split(/[,\s]+/).filter(Boolean);
+  const bad = agents.filter((a) => !isCaptureAgent(a));
+  if (bad.length) throw new GraftError(`Unknown agent${bad.length > 1 ? "s" : ""} for --capture: ${bad.join(", ")}. Expected auto, all, or any of ${CAPTURE_AGENTS.join(", ")}.`);
+  return agents as CaptureAgent[];
+}

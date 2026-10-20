@@ -33,7 +33,8 @@ import { POLICY_PATH, readPolicy, expandTemplate, expandTrailers, evaluateRules,
 import { globToRegExp, looksLikeSecretFile, redact, secretFilesNamed } from "./redact.js";
 import { writeCiWorkflow, type CiResult } from "./ci.js";
 import { writeAgentsSection, type AgentsResult } from "./agents.js";
-import { installHooks, type HooksResult } from "./hooks.js";
+import { detectCaptureAgents, installHooks, type HooksResult } from "./hooks.js";
+import { CAPTURE_AGENTS, type CaptureAgent } from "./capture-hook.js";
 import { copyFile, mkdir, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
@@ -56,6 +57,8 @@ export interface StartOptions {
   capturedBy?: string;
   /** Set by the capture hooks: the harness session that opened it. */
   sessionId?: string;
+  /** Set by the capture hooks: the task is a placeholder for the session, not what anyone asked. */
+  taskPlaceholder?: boolean;
   /** Reuse an existing change id, so one change lands in several repositories. */
   id?: string;
   /** What this change undoes; set by `revert`. */
@@ -209,6 +212,7 @@ export class Graft {
       if (!opts.task?.trim()) throw new GraftError("A task is required.");
       if (opts.id !== undefined) open.id = opts.id;
       open.task = redact(opts.task.trim());
+      delete open.taskPlaceholder;
       if (opts.plan?.trim()) open.plan = redact(opts.plan.trim());
       if (opts.ref?.trim()) open.ref = opts.ref.trim();
       open.ref ??= await this.defaultRef();
@@ -244,6 +248,7 @@ export class Graft {
       evidence: [],
       ...(opts.capturedBy ? { capturedBy: opts.capturedBy } : {}),
       ...(opts.sessionId ? { sessionId: opts.sessionId } : {}),
+      ...(opts.taskPlaceholder ? { taskPlaceholder: true } : {}),
     };
     await this.store.write(record);
     return record;
@@ -264,7 +269,8 @@ export class Graft {
         return undefined;
       }
     }
-    if (!p.ref) return undefined;
+    // The built-in link stands in only when the policy names no template at all; a template with an unset variable means no ref.
+    if (!p.ref) return builtInRef();
     const { value, missing } = expandTemplate(p.ref);
     return missing || !value.trim() ? undefined : value.trim();
   }
@@ -642,6 +648,11 @@ export class Graft {
       if (override === "no-evidence" ? opts.allowNoEvidence : opts.allowSecrets) used.add(override);
       else throw new GraftError(message);
     };
+    if (open.taskPlaceholder && policy.task === "named") {
+      throw new GraftError(
+        'The task was never named: the policy keeps prompts out of the record (task: "named"), so run graft start "<task, in the words you were given>" before committing.',
+      );
+    }
     if (policy.requireEvidence) {
       if (open.evidence.length === 0) {
         refuse("no-evidence", "No evidence recorded. Run `graft evidence -- <command>` or pass --allow-no-evidence.");
@@ -704,12 +715,14 @@ export class Graft {
 
     if (overrides.length) open.overrides = overrides;
     else delete open.overrides;
+    delete open.taskPlaceholder;
     open.landedAt = new Date().toISOString();
-    open.ref ??= await this.defaultRef(policy);
     await this.foldAttempts(open);
     const fromPolicy = expandTrailers(policy.trailers ?? []);
     const explicit = opts.trailers ?? [];
     const trailers = [...fromPolicy.trailers.filter((t) => !explicit.includes(t)), ...explicit];
+    // A session link given as a trailer (Claude Code, Copilot, Entire) is where the task came from.
+    open.ref ??= (await this.defaultRef(policy)) ?? foreignTaskRef(trailers.join("\n"));
     const message = buildCommitMessage(open, opts.title, trailers);
     // The git hooks graft init installs step aside while Graft itself commits.
     const previous = process.env.GRAFT_LANDING;
@@ -779,8 +792,10 @@ export class Graft {
     }
     if (overrides.length) open.overrides = overrides;
     else delete open.overrides;
+    delete open.taskPlaceholder;
     open.landedAt = new Date().toISOString();
-    open.ref ??= await this.defaultRef(policy);
+    // A session link another tool already put in the message (Claude Code, Copilot, Entire) is where the task came from.
+    open.ref ??= (await this.defaultRef(policy)) ?? foreignTaskRef(current);
     await this.foldAttempts(open);
     await this.store.write(open);
     await this.store.clearAttempts();
@@ -792,10 +807,12 @@ export class Graft {
     const lines = current.split("\n");
     const comment = source === "message" ? null : await this.commentPrefix();
     const firstComment = comment === null ? -1 : lines.findIndex((l) => l.startsWith(comment));
-    const body = (firstComment === -1 ? lines : lines.slice(0, firstComment)).join("\n").replace(/\s+$/, "");
     const comments = firstComment === -1 ? "" : "\n" + lines.slice(firstComment).join("\n");
+    // Trailers the message already ends with (Co-Authored-By, Claude-Session) stay in the last
+    // paragraph, after the record, so git still reads them as trailers.
+    const { body, trailers } = splitTrailers((firstComment === -1 ? lines : lines.slice(0, firstComment)).join("\n").replace(/\s+$/, ""));
     const prefix = body ? body + "\n\n" : "\n\n";
-    await writeFile(messageFile, prefix + block + "\n" + comments);
+    await writeFile(messageFile, prefix + block + "\n" + (trailers ? trailers + "\n" : "") + comments);
     return { applied: true, id: open.id };
   }
 
@@ -885,7 +902,7 @@ export class Graft {
    * write a starter policy file, and
    * tell agents how to use Graft in AGENTS.md. Safe to run more than once.
    */
-  async init(opts: { remote?: string; force?: boolean; agents?: boolean; hooks?: boolean; ci?: boolean } = {}): Promise<InitResult> {
+  async init(opts: { remote?: string; force?: boolean; agents?: boolean; hooks?: boolean; ci?: boolean; capture?: CaptureAgent[] | "auto" | "all" } = {}): Promise<InitResult> {
     const topLevel = await this.git.topLevel();
     const configured: string[] = [];
     const want: Array<[string, string]> = [
@@ -931,7 +948,8 @@ export class Graft {
       policyFrom = detected.from;
     }
     const agents = opts.agents === false ? undefined : await writeAgentsSection(topLevel);
-    const hooks = opts.hooks === false ? undefined : await installHooks(this.git, topLevel);
+    const capture = opts.capture === "all" ? [...CAPTURE_AGENTS] : opts.capture === undefined || opts.capture === "auto" ? await detectCaptureAgents(topLevel) : opts.capture;
+    const hooks = opts.hooks === false ? undefined : await installHooks(this.git, topLevel, capture);
     const ci = opts.ci ? await writeCiWorkflow(topLevel) : undefined;
     return { topLevel, configured, policyWritten, policyFrom, remote: remote ?? undefined, agents, hooks, ci };
   }
@@ -1225,6 +1243,19 @@ export class Graft {
   }
 }
 
+/**
+ * Split a commit message into its text and the trailer paragraph it ends
+ * with, by git's rule: the last paragraph, when every line is `Key: value`
+ * and it is not the subject.
+ */
+export function splitTrailers(message: string): { body: string; trailers: string } {
+  const paragraphs = message.replace(/\s+$/, "").split(/\n[ \t]*\n/);
+  if (paragraphs.length < 2) return { body: message, trailers: "" };
+  const last = paragraphs[paragraphs.length - 1];
+  if (!last.split("\n").every((l) => /^[A-Za-z][A-Za-z0-9-]*:\s+\S/.test(l) || /^\s+\S/.test(l))) return { body: message, trailers: "" };
+  return { body: paragraphs.slice(0, -1).join("\n\n"), trailers: last };
+}
+
 export function buildCommitMessage(record: ChangeRecord, title?: string, extraTrailers: string[] = []): string {
   const subject = (title?.trim() || record.task).split("\n")[0].slice(0, 72);
   const lines = [subject, ""];
@@ -1394,4 +1425,33 @@ function gitSubcommand(argv: string[]): string | null {
     return a;
   }
   return null;
+}
+
+/**
+ * A task reference Graft can fill with no policy at all: the Claude Code
+ * session link, from the variable its web and Remote Control sessions set
+ * (the same link Claude Code itself writes as a `Claude-Session:` trailer).
+ */
+export function builtInRef(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const id = env.CLAUDE_CODE_REMOTE_SESSION_ID?.trim();
+  if (!id) return undefined;
+  return `https://claude.ai/code/session_${id.replace(/^cse_/, "")}`;
+}
+
+/** Trailers other tools write that name where a change came from, in the order they are trusted. */
+export const FOREIGN_REF_TRAILERS = ["Claude-Session", "Agent-Logs-Url", "Entire-Checkpoint", "Graft-Task-Ref"] as const;
+
+/** The session link or checkpoint id another tool already put in a commit message, as the task reference. */
+export function foreignTaskRef(message: string): string | undefined {
+  // Git trailers are `Key: value` lines; the keys are matched case-insensitively, as git does.
+  const found = new Map<string, string>();
+  for (const line of message.split("\n")) {
+    const m = /^([A-Za-z][A-Za-z-]*):\s*(.+?)\s*$/.exec(line);
+    if (m) found.set(m[1].toLowerCase(), m[2]);
+  }
+  for (const key of FOREIGN_REF_TRAILERS) {
+    const v = found.get(key.toLowerCase());
+    if (v) return key === "Entire-Checkpoint" ? `entire:${v}` : v;
+  }
+  return undefined;
 }

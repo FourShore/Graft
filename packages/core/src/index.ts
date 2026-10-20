@@ -1,4 +1,4 @@
-export { Graft, GraftError, buildCommitMessage, recordBlock, runShell } from "./graft.js";
+export { FOREIGN_REF_TRAILERS, Graft, GraftError, buildCommitMessage, builtInRef, foreignTaskRef, recordBlock, runShell, splitTrailers } from "./graft.js";
 export type { AbandonOptions, CapturedRun, ExportEntry, FinishResult, InitResult, LandOptions, LandedChange, LogEntry, PrepareResult, RevertResult, StartOptions, SyncResult } from "./graft.js";
 export * from "./policy.js";
 export * from "./record.js";
@@ -7,6 +7,8 @@ export * from "./agents.js";
 export * from "./capture.js";
 export * from "./detect.js";
 export * from "./claude-code.js";
+export * from "./capture-hook.js";
+export * from "./agent-hooks.js";
 export * from "./hooks.js";
 export * from "./context.js";
 export * from "./ci.js";
