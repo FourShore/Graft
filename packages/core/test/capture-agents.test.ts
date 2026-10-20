@@ -7,7 +7,7 @@ import { Graft, builtInRef, foreignTaskRef, splitTrailers } from "../src/graft.j
 import { CAPTURE_AGENTS, commandOf, exitCodeOf, handleCaptureEvent, textOf } from "../src/capture-hook.js";
 import { normalizeAgentEvent, replyFor } from "../src/agent-hooks.js";
 import { handleClaudeCodeEvent } from "../src/claude-code.js";
-import { HOOK_SPECS, installHooks } from "../src/hooks.js";
+import { HOOK_SPECS, hasAgentHooks, installHooks } from "../src/hooks.js";
 import { parsePolicy } from "../src/policy.js";
 
 let dir: string;
@@ -298,5 +298,25 @@ describe("hook installers", () => {
     expect(Object.keys(only.agents)).toEqual(["codex"]);
     expect(only.claudeCode).toBe("present");
     for (const agent of CAPTURE_AGENTS) expect(HOOK_SPECS[agent].command).toContain(`graft hook ${agent}`);
+  });
+});
+
+describe("the Claude Code plugin's hooks", () => {
+  it("step aside where the repo's own hook file runs graft, and record otherwise", async () => {
+    const cli = join(process.cwd(), "packages", "cli", "dist", "cli.js");
+    const run = (flags: string[], payload: object) =>
+      execFileSync("node", [cli, "hook", "claude-code", ...flags], { cwd: dir, encoding: "utf8", input: JSON.stringify(payload) }).trim();
+    const prompt = { hook_event_name: "UserPromptSubmit", prompt: "Fix the flaky login test", session_id: "s" };
+    expect(await hasAgentHooks(dir, "claude-code")).toBe(false);
+    run(["--plugin"], prompt);
+    expect((await graft.status())?.task).toBe("Fix the flaky login test");
+    await graft.abandon({ discard: true });
+
+    await installHooks(graft.git, dir, ["claude-code"]);
+    expect(await hasAgentHooks(dir, "claude-code")).toBe(true);
+    run(["--plugin"], prompt);
+    expect(await graft.status()).toBeNull();
+    run([], prompt);
+    expect((await graft.status())?.task).toBe("Fix the flaky login test");
   });
 });

@@ -1,0 +1,14 @@
+{
+  "name": "fourshore",
+  "owner": { "name": "FourShore", "url": "https://github.com/FourShore" },
+  "description": "Plugins from FourShore. Add with /plugin marketplace add FourShore/Graft.",
+  "plugins": [
+    {
+      "name": "graft",
+      "source": "./plugin",
+      "description": "No evidence, no merge: records the task and the checks behind every commit, and refuses a commit that cannot show them.",
+      "category": "productivity",
+      "tags": ["git", "evidence", "commit", "hooks", "verification"]
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "name": "graft",
+  "version": "0.1.0",
+  "description": "No evidence, no merge: records the task and the checks behind every commit, and refuses a commit that cannot show them.",
+  "author": { "name": "FourShore", "url": "https://github.com/FourShore" },
+  "homepage": "https://github.com/FourShore/Graft",
+  "repository": "https://github.com/FourShore/Graft",
+  "license": "MIT",
+  "keywords": ["git", "evidence", "commit", "hooks", "agents", "verification"]
+}

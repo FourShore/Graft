@@ -1,0 +1,50 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v graft >/dev/null 2>&1 || echo 'The Graft plugin is enabled but graft is not installed, so nothing is recorded. Install it: npm install -g @fourshore/graft'",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v graft >/dev/null 2>&1 || exit 0; graft hook claude-code --plugin",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v graft >/dev/null 2>&1 || exit 0; graft hook claude-code --plugin",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v graft >/dev/null 2>&1 || exit 0; graft hook claude-code --plugin",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}
