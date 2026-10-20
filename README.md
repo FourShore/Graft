@@ -1,21 +1,54 @@
 # Graft
 
-**Git records what changed. Graft records what was asked, what was run, and
-refuses to merge a change that cannot show it.**
+**No evidence, no merge.** Graft refuses a commit that cannot show what was
+asked and what was run to check it, and fails the pull request that carries
+one anyway.
 
-Every commit carries a record: the task the author was given, who (or which
-agent) did the work, and the commands they ran to check it. It lives in the
-commit message as trailers and an `Evidence:` block, so git, GitHub and your
-tools keep working as they are. Three things make it more than a convention:
+```
+$ git commit -m "Add rate limiting"
+graft: No evidence recorded. Run `graft evidence -- <command>` or set GRAFT_ALLOW_NO_EVIDENCE=1 for this commit.
 
-- **The landing gate.** `graft land` refuses a change with no evidence, and a
-  policy names the commands each kind of file needs before it may land.
-- **The check in CI.** `graft check` fails a pull request whose behavior
-  changes carry no evidence that meets the policy, and re-runs the policy's
-  recorded commands so a `[pass]` is a fact, not a claim.
-- **Capture without ritual.** Hooks record the prompt as the task and every
-  test, build or lint run as evidence, so the record exists whether or not the
-  agent remembers Graft.
+$ graft evidence test
+Recorded test: npm test -> exit 0 (12.3s)
+
+$ git commit -m "Add rate limiting"
+graft: added change m4z1gs7jgdyp3pj2za9c to the commit message
+```
+
+The commit that lands says what the refused one could not:
+
+```
+Add rate limiting
+
+Evidence:
+  [pass test] npm test (12.3s)
+
+Graft-Change: m4z1gs7jgdyp3pj2za9c
+Graft-Task: Add rate limiting to the public API
+Graft-Task-Ref: https://claude.ai/code/session_01ABC
+Graft-Author: agent:claude-code
+Graft-Evidence: 1 command, 1 passed
+```
+
+It is all in the commit message, as trailers and an `Evidence:` block, so git,
+GitHub and your tools keep working as they are. Three things hold the line:
+
+- **The gate.** A commit with no evidence, or without the checks the policy
+  names for the files it touches, is refused: by `graft land`, and by a plain
+  `git commit` once the hooks are in.
+- **The check.** `graft check` fails a pull request whose behavior changes
+  carry no evidence that meets the policy, and `--rerun` runs the recorded
+  commands again so a `[pass]` is a fact, not a claim.
+- **The capture.** Hooks for Claude Code, Codex, Cursor, Copilot CLI and
+  Gemini CLI record the prompt as the task and every test, build or lint run
+  as evidence, with the exit code the agent's own harness reported, so the
+  record exists whether or not the agent remembers Graft.
+
+```
+npm install -g @fourshore/graft
+graft init          # policy, hooks for the agents you use, AGENTS.md section
+graft init --ci     # and a GitHub Actions workflow that runs graft check on every pull request
+```
 
 ## Why
 
@@ -58,8 +91,12 @@ Safe on an existing repo; it doesn't touch history. It writes
 `.graft/policy.json`, installs the capture hooks, adds a "Version control"
 section to `AGENTS.md`, and sets a few git config keys so the optional notes
 survive `commit --amend` and `rebase`. Commit what it writes, including the
-edit to `.claude/settings.json`: a per-session `init` leaves a diff until
-that change is committed.
+hook files: a per-session `init` leaves a diff until that change is committed.
+
+Which agents get hooks is decided by what is around: Claude Code always, and
+Codex, Cursor, Copilot CLI or Gemini CLI when the repo or your home directory
+has its config directory. `graft init --capture all` writes all five, for a
+repo other people will clone, and `--capture codex,gemini` names a set.
 
 ## Policy: the definition of done
 
@@ -139,7 +176,20 @@ every change carries a `Graft-Task-Ref` without anyone passing `--ref`:
 
 The capture hook's change gets it when the prompt opens one, an explicit
 `graft start --ref` overrides it, and a change is left without a ref rather
-than given a half-filled one when the variable is unset.
+than given a half-filled one when the variable is unset. Without a `ref`
+template two sources still fill it: a Claude Code cloud session's own link,
+from the session variable above, and a session trailer another tool already
+put in the commit message (`Claude-Session` from Claude Code, `Agent-Logs-Url`
+from Copilot, `Entire-Checkpoint` from Entire, recorded as `entire:<id>`), so
+the task link is there whichever tool wrote the commit.
+`task` says what the record may hold about the task. The default, `"captured"`,
+lets the capture hooks record the prompt as the task. `"named"` keeps every
+prompt out of the record: the hooks still open a change and record the runs,
+but the task is a placeholder until `graft start "<task>"` names it, and the
+gate refuses to land a placeholder with no override. Use it where prompts
+carry customer names or plans that must not become permanent history, and
+tell the agent (the `AGENTS.md` section does) to name the task in the words
+it was given.
 `captureCommands` lists extra regular expressions for commands the capture
 hooks record on top of the built-in test, build, lint and type-check patterns.
 `checkCommands` lists regular expressions for recorded commands outside the
@@ -155,40 +205,56 @@ amends, and squashes.
 `graft init` also installs hooks, so records exist whether or not anyone
 remembers Graft:
 
-- **Claude Code hooks** in `.claude/settings.json`. The prompt opens a change
-  (the prompt is the task, as the agent received it), and every Bash call that
-  looks like a test, build, lint or type-check run is recorded as evidence
-  with the exit code and output the harness itself reported, so it is a pass
-  or a fail, not a claim. Other commands are ignored. Widen the filter with
-  `captureCommands` in the policy. An explicit `graft start` afterwards just
-  names the task and keeps what was captured. A captured command that `cd`s
-  to an absolute path inside the repository is recorded relative to the root
-  (`cd ./pkg && go test ./...`), and one typed in a subdirectory gets that
-  `cd` in front, so it re-runs on another machine. A run whose exit code is
-  not the check's (`npm test | tail`, `npm test || true`, `npm test; echo`,
-  a background run) is not recorded; the hook tells the agent so, and to run
-  it on its own or with `set -o pipefail`. A change opened by one Claude Code
+- **Agent hooks.** The prompt opens a change (the prompt is the task, as the
+  agent received it), and every shell call that looks like a test, build,
+  lint or type-check run is recorded as evidence with the exit code and
+  output the agent's own harness reported, so it is a pass or a fail, not a
+  claim. Other commands are ignored. Widen the filter with `captureCommands`
+  in the policy. An explicit `graft start` afterwards just names the task and
+  keeps what was captured. One hook command serves every agent, `graft hook
+  <agent>`, and `init` writes it where each one reads its hooks:
+
+  | Agent | Hook file | Events |
+  | --- | --- | --- |
+  | Claude Code | `.claude/settings.json` | `UserPromptSubmit`, `PostToolUse` and `PostToolUseFailure` for `Bash` |
+  | Codex | `.codex/hooks.json` | `UserPromptSubmit`, `PostToolUse` for `Bash` |
+  | Cursor | `.cursor/hooks.json` | `beforeSubmitPrompt`, `postToolUse` for `Shell` |
+  | Copilot CLI | `.github/hooks/graft.json` | `userPromptSubmitted`, `postToolUse` |
+  | Gemini CLI | `.gemini/settings.json` | `BeforeAgent`, `AfterTool` for `run_shell_command` |
+
+  A captured command that `cd`s to an absolute path inside the repository is
+  recorded relative to the root (`cd ./pkg && go test ./...`), and one typed
+  in a subdirectory gets that `cd` in front, so it re-runs on another
+  machine. A run whose exit code is not the check's (`npm test | tail`,
+  `npm test || true`, `npm test; echo`, a background run) is not recorded,
+  and neither is one whose harness reported no exit code at all, which Cursor
+  and Copilot CLI sometimes do; the hook tells the agent so, and to run it
+  with `graft evidence <name>` or `set -o pipefail`. A change opened by one
   session does not take runs from another session in the same worktree. A
   short reply such as "continue" does not open a change with "continue" as
-  its task: the session's last real prompt is used. The
-  settings file is tracked: `init` edits it in place, and the edit is meant
-  to be committed, so a per-session `init` leaves a diff until it is.
+  its task: the session's last real prompt is used. The hook files are
+  tracked: `init` edits them in place, and the edit is meant to be committed,
+  so a per-session `init` leaves a diff until it is.
 - **Git hooks** (`prepare-commit-msg` and `post-commit`). A plain
   `git commit` with a change open gets the Plan and Evidence blocks and the
   trailers in its message and the full record as a note, exactly like
   `graft land`, and the same policy gate applies (`GRAFT_ALLOW_NO_EVIDENCE=1`
   or `GRAFT_ALLOW_SECRETS=1` override it for one commit, and the commit then
   carries a `Graft-Override` trailer; `0`, `false` or empty do not).
-  Merges, squashes, amends of a commit that already carries a record, and
-  the commits git makes for a rebase, cherry-pick or revert are left alone,
-  and a hook that is already there is not overwritten. A message given with
-  `-m` or `-F` is kept as written, so `git commit -m "#42 fix the crash"`
-  keeps its subject.
+  Trailers the message already ends with (`Co-Authored-By`, `Claude-Session`)
+  stay in the last paragraph, after the record, so git still reads them as
+  trailers. Merges, squashes, amends of a commit that already carries a
+  record, and the commits git makes for a rebase, cherry-pick or revert are
+  left alone, and a hook that is already there is not overwritten. A message
+  given with `-m` or `-F` is kept as written, so `git commit -m "#42 fix the
+  crash"` keeps its subject.
 
 The hooks run `graft`. Where it is not on PATH they step aside: a commit goes
 through unrecorded with a one-line install hint, for `graft check` to catch at
-the pull request, and the Claude Code hooks do nothing. `graft status` says
-whether the clone has the git hooks. `graft init --no-hooks` skips them. Claude Code runs project hooks only after you trust the folder.
+the pull request, and the agent hooks do nothing (Cursor's still answers
+`continue`, so the prompt is not blocked). `graft status` says whether the
+clone has the git hooks. `graft init --no-hooks` skips them. Claude Code runs
+project hooks only after you trust the folder.
 
 ## Verify at the pull request
 

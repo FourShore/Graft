@@ -283,7 +283,13 @@ is left out of that commit, never written empty. `ref`, optional, is one
 such template for the change's `ref`, used when `graft start` is given none
 (the capture hooks never pass one), so `Graft-Task-Ref` is filled from the
 harness's session variable on every change; an unset variable leaves the
-change without a ref. `captureCommands`, optional,
+change without a ref. Without `ref`, a Claude Code cloud session's link is
+used when its session variable is set, and otherwise a `Claude-Session`,
+`Agent-Logs-Url` or `Entire-Checkpoint` trailer already in the commit message
+(the last as `entire:<id>`). `task`, optional, is `"captured"` (the default:
+the capture hooks record the prompt as the task) or `"named"` (they never do;
+a change they open carries a placeholder task that `land` refuses until
+`graft start` names it, with no override). `captureCommands`, optional,
 is a list of regular expressions (as strings) for commands the capture hooks
 record as evidence on top of the built-in test, build, lint and type-check
 patterns.
