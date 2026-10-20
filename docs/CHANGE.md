@@ -61,7 +61,7 @@ change is being made.
 | `startedAt`, `landedAt` | yes / on land | ISO 8601. |
 | `commit` | on land | The SHA the record was first landed on. Informational; the trailer is the durable link. After an amend or rebase the note moves with the commit but this field keeps the original SHA, so readers take the commit from where the note is attached, never from this field. |
 | `evidence[]` | yes (may be empty) | Ordered list of what was done to verify the change. |
-| `capturedBy` | no | The harness whose hook opened the change (`claude-code`, from the prompt) rather than an explicit `graft start`. A later `graft start` adopts such a change, naming the task and keeping its evidence. |
+| `capturedBy` | no | The harness whose hook opened the change (`claude-code`, `codex`, `cursor`, `copilot` or `gemini`, from the prompt) rather than an explicit `graft start`. A later `graft start` adopts such a change, naming the task and keeping its evidence and, unless it names one with `--author` or `--human`, the author the hook captured. |
 | `attempts[]` | no | Changes abandoned in this worktree since the last land, each with its `id`, `task`, `plan`, `reason`, `startedAt`, `abandonedAt` and `evidence`: the plans that did not work and why. Written as the `Tried:` block. |
 | `reverts` | no | The change id or commit this change undoes, when it was opened by `graft revert`. Written as the `Graft-Reverts` trailer. |
 | `artifacts[]` | no | Files the change produced, each `{ "name", "sha256" }` (lower-case hex), recorded with `graft artifact`. One `Graft-Artifact` trailer each, so a build found in the field resolves to its change with `graft show <sha256>`. |
@@ -285,7 +285,8 @@ such template for the change's `ref`, used when `graft start` is given none
 harness's session variable on every change; an unset variable leaves the
 change without a ref. Without `ref`, a Claude Code cloud session's link is
 used when its session variable is set, and otherwise a `Claude-Session`,
-`Agent-Logs-Url` or `Entire-Checkpoint` trailer already in the commit message
+`Agent-Logs-Url` or `Entire-Checkpoint` trailer already in the commit message's
+trailer paragraph
 (the last as `entire:<id>`). `task`, optional, is `"captured"` (the default:
 the capture hooks record the prompt as the task) or `"named"` (they never do;
 a change they open carries a placeholder task that `land` refuses until

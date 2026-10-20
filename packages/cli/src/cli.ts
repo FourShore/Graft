@@ -10,6 +10,12 @@ import { appendFile } from "node:fs/promises";
 
 const { version } = createRequire(import.meta.url)("../package.json") as { version: string };
 
+// A reader that closes early (`graft export | head`) is not an error worth a stack trace.
+process.stdout.on("error", (err: NodeJS.ErrnoException) => {
+  if (err.code === "EPIPE") process.exit(0);
+  throw err;
+});
+
 const program = new Command();
 program
   .name("graft")
@@ -24,7 +30,7 @@ const json = () => Boolean(program.opts<{ json?: boolean }>().json);
 program
   .command("init")
   .description(
-    "prepare this repo: carry notes through rebases, fetch them from the remote, write .graft/policy.json, tell agents how to use Graft in AGENTS.md",
+    "prepare this repo: write .graft/policy.json, install the capture and git hooks, carry notes through rebases, tell agents how to use Graft in AGENTS.md",
   )
   .option("--remote <name>", "remote to configure (default: origin)")
   .option("--force", "overwrite an existing policy file")
@@ -70,9 +76,16 @@ program
       const gitHooks = Object.entries(h.git);
       const foreign = gitHooks.filter(([, state]) => state === "foreign").map(([name]) => name);
       const written = gitHooks.filter(([, state]) => state === "written").map(([name]) => name);
-      if (written.length) lines.push(`Installed git hooks ${written.join(", ")} in ${h.hooksDir}, so a plain git commit carries the record`);
+      // Only prepare-commit-msg puts the record on a plain commit; with it foreign, the other hooks alone do not.
+      const carries = h.git["prepare-commit-msg"] !== "foreign";
+      if (written.length) lines.push(`Installed git hooks ${written.join(", ")} in ${h.hooksDir}${carries ? ", so a plain git commit carries the record" : ""}`);
       else if (!foreign.length) lines.push("Git hooks already installed");
-      if (foreign.length) lines.push(`Left ${foreign.join(" and ")} alone in ${h.hooksDir}: another hook is there. Add \`graft hook <name> "$@"\` to it yourself.`);
+      if (foreign.length) {
+        lines.push(
+          `Left ${foreign.join(" and ")} alone in ${h.hooksDir}: another hook is there. Add \`graft hook <name> "$@"\` to it yourself` +
+            (carries ? "." : ", or a plain git commit carries no record."),
+        );
+      }
       lines.push("The hooks run `graft`, so it must be on PATH for the agent and for git.");
     }
     if (r.ci) {
@@ -229,8 +242,8 @@ program
 
 program
   .command("hook")
-  .description(`entry points for the hooks graft init installs: an agent's hook (${CAPTURE_AGENTS.join(", ")}; stdin JSON), prepare-commit-msg <file> [source], post-commit`)
-  .argument("<kind>", `${CAPTURE_AGENTS.join(" | ")} | prepare-commit-msg | post-commit`)
+  .description(`entry points for the hooks graft init installs: an agent's hook (${CAPTURE_AGENTS.join(", ")}; stdin JSON), prepare-commit-msg <file> [source], commit-msg <file>, post-commit`)
+  .argument("<kind>", `${CAPTURE_AGENTS.join(" | ")} | prepare-commit-msg | commit-msg | post-commit`)
   .argument("[args...]", "what git passes the hook")
   .option("--plugin", "the hook is the Claude Code plugin's: step aside when the repo's own hook file already runs graft")
   .action(async (kind: string, args: string[], o: { plugin?: boolean }) => {
@@ -240,11 +253,25 @@ program
       try {
         payload = JSON.parse(await readStdin());
         const g = graft();
-        if (o.plugin && (await hasAgentHooks(await g.git.topLevel(), kind))) {
-          // The repo's hooks and the plugin's would each record the run; the repo's win.
-          const reply = replyFor(kind, payload, { action: "ignored", reason: "the repo's own hooks run graft" });
-          if (reply && !json()) console.log(reply);
-          return;
+        if (o.plugin) {
+          // The plugin follows the user into every repo. One that is not set up for Graft has no gate to land what the hook
+          // would record, so the change would sit open for good, with the prompt in .git; and where the repo's own hooks
+          // run graft, the plugin's copy would record every run twice. In both the repo's state wins.
+          const top = await g.git.topLevel();
+          const reason = (await hasAgentHooks(top, kind))
+            ? "the repo's own hooks run graft"
+            : !(await g.isSetUp())
+              ? "this repo is not set up for Graft (no .graft/policy.json and no git hooks); run graft init"
+              : null;
+          if (reason) {
+            const outcome = { action: "ignored" as const, reason };
+            if (json()) console.log(JSON.stringify(outcome));
+            else {
+              const reply = replyFor(kind, payload, outcome);
+              if (reply) console.log(reply);
+            }
+            return;
+          }
         }
         const outcome = await handleCaptureEvent(g, kind, normalizeAgentEvent(kind, payload));
         if (json()) console.log(JSON.stringify(outcome));
@@ -270,12 +297,18 @@ program
       }
       return;
     }
+    if (kind === "commit-msg") {
+      const [file] = args;
+      if (!file) throw new GraftError("commit-msg needs the message file git passes it.");
+      await graft().checkCommitMessage(file);
+      return;
+    }
     if (kind === "post-commit") {
       const r = await graft().finishCommit();
       if (r.attached) console.log(`graft: recorded change ${r.id} on ${r.commit?.slice(0, 10)}`);
       return;
     }
-    throw new GraftError(`Unknown hook '${kind}'. Expected ${CAPTURE_AGENTS.join(", ")}, prepare-commit-msg or post-commit.`);
+    throw new GraftError(`Unknown hook '${kind}'. Expected ${CAPTURE_AGENTS.join(", ")}, prepare-commit-msg, commit-msg or post-commit.`);
   });
 
 program

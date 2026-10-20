@@ -25,6 +25,7 @@ import {
   parseMessageRecord,
   evidenceLines,
   EVIDENCE_HEADER,
+  RECORD_HEADERS,
   trailersFor,
 } from "./record.js";
 import { OpenChangeStore } from "./store.js";
@@ -33,7 +34,7 @@ import { POLICY_PATH, readPolicy, expandTemplate, expandTrailers, evaluateRules,
 import { globToRegExp, looksLikeSecretFile, redact, secretFilesNamed } from "./redact.js";
 import { writeCiWorkflow, type CiResult } from "./ci.js";
 import { writeAgentsSection, type AgentsResult } from "./agents.js";
-import { detectCaptureAgents, installHooks, type HooksResult } from "./hooks.js";
+import { detectCaptureAgents, gitHooksInstalled, installHooks, type HooksResult } from "./hooks.js";
 import { CAPTURE_AGENTS, type CaptureAgent } from "./capture-hook.js";
 import { copyFile, mkdir, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -211,12 +212,16 @@ export class Graft {
       // A hook opened this change from the prompt; an explicit start names the task and keeps what was captured.
       if (!opts.task?.trim()) throw new GraftError("A task is required.");
       if (opts.id !== undefined) open.id = opts.id;
-      open.task = redact(opts.task.trim());
-      delete open.taskPlaceholder;
+      // A second hook racing the first brings only a placeholder; it never replaces the task that is there.
+      if (!opts.taskPlaceholder) {
+        open.task = redact(opts.task.trim());
+        delete open.taskPlaceholder;
+      }
       if (opts.plan?.trim()) open.plan = redact(opts.plan.trim());
       if (opts.ref?.trim()) open.ref = opts.ref.trim();
       open.ref ??= await this.defaultRef();
-      if (opts.author) {
+      // The hook knew who is doing the work (codex, gemini, a model); a `graft start` that names no author keeps that rather than guessing a human from $USER.
+      if (opts.author?.name || opts.author?.kind) {
         const author = defaultAuthor(opts.author);
         // The hook knew the model; keep it while the author is still that agent, not once a human or another tool takes over.
         const same = author.kind === open.author.kind && author.name === open.author.name;
@@ -345,6 +350,16 @@ export class Graft {
   private topLevelCache?: Promise<string>;
 
   /** The working tree root, asked of git once per Graft instance. */
+  /** True when this repo opted into Graft: it has a policy file, or this clone has the git hooks. */
+  async isSetUp(): Promise<boolean> {
+    try {
+      await stat(join(await this.topLevel(), POLICY_PATH));
+      return true;
+    } catch {
+      return gitHooksInstalled(this.git);
+    }
+  }
+
   private topLevel(): Promise<string> {
     this.topLevelCache ??= this.git.topLevel().catch((err) => {
       this.topLevelCache = undefined;
@@ -692,7 +707,9 @@ export class Graft {
           `Run graft evidence ${stale.map((s) => s.name).join(", graft evidence ")} again${unstaged}, or pass --allow-no-evidence.`,
       );
     }
-    const suspicious = staged.filter((p) => looksLikeSecretFile(p, policy.secretFiles));
+    // A staged deletion adds nothing to history: removing a tracked .env is the fix, not the leak.
+    const deleted = new Set(await this.git.stagedDeletions());
+    const suspicious = staged.filter((p) => !deleted.has(p) && looksLikeSecretFile(p, policy.secretFiles));
     if (suspicious.length > 0) {
       refuse(
         "secrets",
@@ -767,6 +784,8 @@ export class Graft {
     const open = await this.store.read();
     if (!open) return { applied: false, reason: "no change is open" };
     const current = await readFile(messageFile, "utf8");
+    // `git commit --fixup`/`--squash` arrive as a plain message; the commit is folded into another by autosquash, so the record is not its own.
+    if (/^(fixup|squash|amend)! /.test(current)) return { applied: false, reason: "fixup commit" };
     const sequencer = await this.sequencerRunning(open, current);
     if (sequencer) return { applied: false, reason: `${sequencer} in progress` };
     if (parseTrailers(current)[TRAILER_KEYS.change]) return { applied: false, reason: "message already carries a record" };
@@ -794,8 +813,8 @@ export class Graft {
     else delete open.overrides;
     delete open.taskPlaceholder;
     open.landedAt = new Date().toISOString();
-    // A session link another tool already put in the message (Claude Code, Copilot, Entire) is where the task came from.
-    open.ref ??= (await this.defaultRef(policy)) ?? foreignTaskRef(current);
+    // A session link another tool already put in the message's trailers (Claude Code, Copilot, Entire) is where the task came from.
+    open.ref ??= (await this.defaultRef(policy)) ?? foreignTaskRef(splitTrailers(current).trailers);
     await this.foldAttempts(open);
     await this.store.write(open);
     await this.store.clearAttempts();
@@ -810,10 +829,33 @@ export class Graft {
     const comments = firstComment === -1 ? "" : "\n" + lines.slice(firstComment).join("\n");
     // Trailers the message already ends with (Co-Authored-By, Claude-Session) stay in the last
     // paragraph, after the record, so git still reads them as trailers.
-    const { body, trailers } = splitTrailers((firstComment === -1 ? lines : lines.slice(0, firstComment)).join("\n").replace(/\s+$/, ""));
-    const prefix = body ? body + "\n\n" : "\n\n";
+    const split = splitTrailers((firstComment === -1 ? lines : lines.slice(0, firstComment)).join("\n").replace(/\s+$/, ""));
+    // Graft's own trailers are the record's to write; a hand-written one would be a second copy or a lie.
+    const trailers = split.trailers
+      .split("\n")
+      .filter((l) => !/^graft-/i.test(l))
+      .join("\n");
+    const prefix = split.body ? split.body + "\n\n" : "\n\n";
     await writeFile(messageFile, prefix + block + "\n" + (trailers ? trailers + "\n" : "") + comments);
     return { applied: true, id: open.id };
+  }
+
+  /**
+   * The commit-msg hook: refuse a message that is nothing but the record,
+   * which is what an editor closed without a subject leaves behind. Git would
+   * abort such a commit as empty, and the record prepare-commit-msg added
+   * must not turn that into a commit titled "Evidence:".
+   */
+  async checkCommitMessage(messageFile: string): Promise<void> {
+    const message = await readFile(messageFile, "utf8");
+    // prepare-commit-msg keeps git's comment lines after the record, so with no subject typed the record is the first
+    // line. Comment lines are not stripped here: `-m "#42 fix it"` keeps that subject, as git does without an editor.
+    const first = message.split("\n").find((l) => l.trim());
+    if (first === undefined) return; // git aborts an empty message itself
+    if (!parseTrailers(message)[TRAILER_KEYS.change]) return;
+    if (RECORD_HEADERS.includes(first.trim()) || /^Graft-[A-Za-z-]+:/.test(first)) {
+      throw new GraftError("Aborting commit due to empty commit message: the message carries only the Graft record. Give the commit a subject, or abandon the change.");
+    }
   }
 
   /**
@@ -1170,7 +1212,8 @@ export class Graft {
   ): Promise<Pick<LogEntry, "record" | "recordSource">> {
     if (!parseTrailers(message)[TRAILER_KEYS.change]) return { record: null, recordSource: null };
     const note = await this.readNote(commit);
-    if (note) return { record: note, recordSource: "note" };
+    // A note that names another change rode along on a rewrite (an autosquash moved it); the message is the record then.
+    if (note && note.id === parseTrailers(message)[TRAILER_KEYS.change]) return { record: note, recordSource: "note" };
     const record = parseMessageRecord(message, authoredAt);
     return record ? { record, recordSource: "message" } : { record: null, recordSource: null };
   }
@@ -1441,11 +1484,16 @@ export function builtInRef(env: NodeJS.ProcessEnv = process.env): string | undef
 /** Trailers other tools write that name where a change came from, in the order they are trusted. */
 export const FOREIGN_REF_TRAILERS = ["Claude-Session", "Agent-Logs-Url", "Entire-Checkpoint", "Graft-Task-Ref"] as const;
 
-/** The session link or checkpoint id another tool already put in a commit message, as the task reference. */
-export function foreignTaskRef(message: string): string | undefined {
+/**
+ * The session link or checkpoint id another tool already put in a commit
+ * message's trailers, as the task reference. Pass the trailer paragraph
+ * (`splitTrailers(message).trailers`), not the whole message, so a subject
+ * that happens to read `Key: value` is not taken for one.
+ */
+export function foreignTaskRef(trailers: string): string | undefined {
   // Git trailers are `Key: value` lines; the keys are matched case-insensitively, as git does.
   const found = new Map<string, string>();
-  for (const line of message.split("\n")) {
+  for (const line of trailers.split("\n")) {
     const m = /^([A-Za-z][A-Za-z-]*):\s*(.+?)\s*$/.exec(line);
     if (m) found.set(m[1].toLowerCase(), m[2]);
   }

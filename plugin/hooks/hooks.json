@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "command -v graft >/dev/null 2>&1 || echo 'The Graft plugin is enabled but graft is not installed, so nothing is recorded. Install it: npm install -g @fourshore/graft'",
+            "command": "command -v graft >/dev/null 2>&1 || { echo \"The Graft plugin is enabled but graft is not installed, so nothing is recorded. Install it: npm install -g @fourshore/graft\"; exit 0; }; v=\"$(graft --version 2>/dev/null)\"; case \"$v\" in 0.0.*|0.1.*) echo \"The Graft plugin needs graft 0.2.0 or newer and found $v, so nothing is recorded. Update it: npm install -g @fourshore/graft@latest\";; esac",
             "timeout": 5
           }
         ]
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "command -v graft >/dev/null 2>&1 || exit 0; graft hook claude-code --plugin",
+            "command": "command -v graft >/dev/null 2>&1 || exit 0; graft hook claude-code --plugin 2>/dev/null || exit 0",
             "timeout": 15
           }
         ]
@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "command -v graft >/dev/null 2>&1 || exit 0; graft hook claude-code --plugin",
+            "command": "command -v graft >/dev/null 2>&1 || exit 0; graft hook claude-code --plugin 2>/dev/null || exit 0",
             "timeout": 15
           }
         ]
@@ -40,7 +40,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "command -v graft >/dev/null 2>&1 || exit 0; graft hook claude-code --plugin",
+            "command": "command -v graft >/dev/null 2>&1 || exit 0; graft hook claude-code --plugin 2>/dev/null || exit 0",
             "timeout": 15
           }
         ]

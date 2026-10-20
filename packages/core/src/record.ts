@@ -460,7 +460,8 @@ export function parseOverrideTrailers(message: string): Override[] {
   return OVERRIDES.filter((o) => found.has(o));
 }
 
-const RECORD_HEADERS = ["Plan:", TRIED_HEADER, EVIDENCE_HEADER];
+/** The headings of the blocks Graft writes into a message, in the order they appear. */
+export const RECORD_HEADERS = ["Plan:", TRIED_HEADER, EVIDENCE_HEADER];
 
 /**
  * The record Graft wrote into a message: the trailer paragraph holding the

@@ -94,6 +94,11 @@ describe("agent adapters", () => {
       conversation_id: "k1",
     });
     expect(run).toMatchObject({ kind: "run", command: "npm run lint", exitCode: 2, output: "src/a.ts: unused", durationMs: 300, cwd: "/w" });
+    // The Shell tool's working_directory is where the command ran; a sub-package's suite is not the root's.
+    const sub = normalizeAgentEvent("cursor", { hook_event_name: "postToolUse", tool_name: "Shell", tool_input: { command: "npm test", working_directory: "packages/foo" }, tool_output: { exitCode: 0 } });
+    expect(sub).toMatchObject({ command: "cd packages/foo && npm test" });
+    const odd = normalizeAgentEvent("cursor", { hook_event_name: "postToolUse", tool_name: "Shell", tool_input: { command: "npm test", working_directory: "it's $HOME" }, tool_output: { exitCode: 0 } });
+    expect(odd).toMatchObject({ command: "cd 'it'\\''s $HOME' && npm test" });
     // afterShellExecution carries no exit code, so the run is not recordable.
     expect(normalizeAgentEvent("cursor", { hook_event_name: "afterShellExecution", command: "npm test", output: "ok", duration: 5 })).toMatchObject({ kind: "run", exitCode: null });
     expect(normalizeAgentEvent("cursor", { hook_event_name: "postToolUse", tool_name: "Read", tool_input: {} })).toMatchObject({ kind: "ignore" });
@@ -221,6 +226,8 @@ describe("task references from other tools", () => {
     expect(foreignTaskRef("Fix it\n\nentire-checkpoint: abc123def456")).toBe("entire:abc123def456");
     expect(foreignTaskRef("Fix it\n\nCo-Authored-By: x")).toBeUndefined();
     expect(foreignTaskRef("Note: the Claude-Session: link is not a trailer here")).toBeUndefined();
+    // The hook passes the trailer paragraph, so a subject that reads like a trailer is not one.
+    expect(foreignTaskRef(splitTrailers("Claude-Session: https://claude.ai/code/session_1").trailers)).toBeUndefined();
     expect(splitTrailers("Fix: the crash")).toEqual({ body: "Fix: the crash", trailers: "" });
     expect(splitTrailers("Fix the crash\n\nIt was null.\n\nCo-Authored-By: A <a@b>\nClaude-Session: x\n")).toEqual({ body: "Fix the crash\n\nIt was null.", trailers: "Co-Authored-By: A <a@b>\nClaude-Session: x" });
     expect(splitTrailers("Fix the crash\n\nIt was null, see issue: 42.")).toEqual({ body: "Fix the crash\n\nIt was null, see issue: 42.", trailers: "" });
@@ -287,7 +294,7 @@ describe("hook installers", () => {
     expect(cursor.hooks.postToolUse[0]).toMatchObject({ matcher: "Shell", command: expect.stringContaining("graft hook cursor") });
 
     const copilot = JSON.parse(await readFile(join(dir, ".github/hooks/graft.json"), "utf8"));
-    expect(copilot).toMatchObject({ version: 1, hooks: { userPromptSubmitted: [{ type: "command", bash: expect.stringContaining("graft hook copilot") }], postToolUse: [{ type: "command", timeoutSec: 15 }] } });
+    expect(copilot).toMatchObject({ version: 1, hooks: { userPromptSubmitted: [{ type: "command", bash: expect.stringContaining("graft hook copilot"), powershell: expect.stringContaining("graft hook copilot") }], postToolUse: [{ type: "command", timeoutSec: 15 }] } });
 
     const second = await installHooks(graft.git, dir, [...CAPTURE_AGENTS]);
     expect(second.agents).toEqual({ "claude-code": "present", codex: "present", cursor: "present", copilot: "present", gemini: "present" });
@@ -307,6 +314,10 @@ describe("the Claude Code plugin's hooks", () => {
     const run = (flags: string[], payload: object) =>
       execFileSync("node", [cli, "hook", "claude-code", ...flags], { cwd: dir, encoding: "utf8", input: JSON.stringify(payload) }).trim();
     const prompt = { hook_event_name: "UserPromptSubmit", prompt: "Fix the flaky login test", session_id: "s" };
+    // A repo that never ran graft init has no gate to land what the plugin would record: nothing is written there.
+    expect(JSON.parse(run(["--plugin", "--json"], prompt))).toMatchObject({ action: "ignored", reason: expect.stringContaining("not set up for Graft") });
+    expect(await graft.status()).toBeNull();
+    await policy({});
     expect(await hasAgentHooks(dir, "claude-code")).toBe(false);
     run(["--plugin"], prompt);
     expect((await graft.status())?.task).toBe("Fix the flaky login test");

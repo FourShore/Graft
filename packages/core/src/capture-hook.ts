@@ -194,7 +194,12 @@ async function atRoot(command: string, cwd: string | undefined, topLevel: string
   const real = async (p: string) => realpath(p).catch(() => p);
   const rel = relative(await real(topLevel), await real(cwd)).replace(/\\/g, "/");
   if (!rel || rel.startsWith("..") || isAbsolute(rel)) return command;
-  return `cd ${/^[\w./-]+$/.test(rel) ? rel : JSON.stringify(rel)} && ${command}`;
+  return `cd ${quoteDir(rel)} && ${command}`;
+}
+
+/** A directory as a shell word: bare when it is plain, else single-quoted so `$`, backticks and spaces stay literal. */
+export function quoteDir(dir: string): string {
+  return /^[\w./-]+$/.test(dir) ? dir : `'${dir.replace(/'/g, `'\\''`)}'`;
 }
 
 export function clipTask(task: string): string {

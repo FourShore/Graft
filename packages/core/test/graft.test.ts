@@ -941,7 +941,7 @@ describe("capture", () => {
     await mkdir(hooksDir, { recursive: true });
     await writeFile(join(hooksDir, "post-commit"), "#!/bin/sh\necho mine\n");
     const first = await installHooks(graft.git, dir);
-    expect(first).toMatchObject({ claudeCode: "written", git: { "prepare-commit-msg": "written", "post-commit": "foreign" } });
+    expect(first).toMatchObject({ claudeCode: "written", git: { "prepare-commit-msg": "written", "commit-msg": "written", "post-commit": "foreign" } });
     const settings = JSON.parse(await readFile(join(dir, CLAUDE_SETTINGS_PATH), "utf8"));
     expect(Object.keys(settings.hooks)).toEqual(["UserPromptSubmit", "PostToolUse", "PostToolUseFailure"]);
     expect(settings.hooks.PostToolUse[0]).toMatchObject({ matcher: "Bash", hooks: [{ type: "command", command: HOOK_COMMAND }] });
@@ -949,7 +949,7 @@ describe("capture", () => {
     expect(await readFile(join(hooksDir, "prepare-commit-msg"), "utf8")).toContain("graft hook prepare-commit-msg");
 
     const second = await installHooks(graft.git, dir);
-    expect(second).toMatchObject({ claudeCode: "present", git: { "prepare-commit-msg": "present", "post-commit": "foreign" } });
+    expect(second).toMatchObject({ claudeCode: "present", git: { "prepare-commit-msg": "present", "commit-msg": "present", "post-commit": "foreign" } });
 
     // Other settings survive and the hooks are not added twice.
     await writeFile(join(dir, CLAUDE_SETTINGS_PATH), JSON.stringify({ permissions: { allow: ["Bash(npm test)"] }, hooks: { PostToolUse: [{ matcher: "Edit", hooks: [{ type: "command", command: "prettier" }] }] } }));
@@ -1472,6 +1472,10 @@ describe("policy", () => {
     expect(parsePolicy('{"requireEvidence":"command"}')).toEqual({ version: 1, requireEvidence: "command" });
     expect(() => parsePolicy('{"version":2}')).toThrow(/Unsupported policy version/);
     expect(() => parsePolicy('{"rules":[{"paths":["src/**"],"require":["test"]}]}')).toThrow(/does not define/);
+    // A broken file is named, so the message says what to open; a value the gate would read as true is refused.
+    expect(() => parsePolicy('{ "version": 1, ')).toThrow(/\.graft\/policy\.json is not valid JSON/);
+    expect(() => parsePolicy("[]")).toThrow(/must hold a JSON object/);
+    expect(() => parsePolicy('{"requireEvidence":"yes"}')).toThrow(/"requireEvidence" must be true, false or "command"/);
   });
 
   it("rejects an unknown policy version", async () => {
@@ -2112,5 +2116,132 @@ describe("built-in credential files", () => {
     for (const p of ["prod.tfvars.example", "src/config.go", "docs/kube/config.md", "aws/credentials.md"]) {
       expect([p, looksLikeSecretFile(p)]).toEqual([p, false]);
     }
+  });
+});
+
+describe("what a fresh audit found", () => {
+  const withHooks = async () => {
+    const cli = join(process.cwd(), "packages", "cli", "dist", "cli.js");
+    if (!existsSync(cli)) return null; // needs a build; npm test runs after npm run build
+    const bin = join(dir, ".bin");
+    await mkdir(bin, { recursive: true });
+    await writeFile(join(bin, "graft"), `#!/bin/sh\nexec node ${JSON.stringify(cli)} "$@"\n`);
+    await chmod(join(bin, "graft"), 0o755);
+    await writeFile(join(dir, ".gitignore"), ".bin/\n");
+    await installHooks(graft.git, dir);
+    const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, GRAFT_ALLOW_NO_EVIDENCE: "", GIT_EDITOR: "true" };
+    return (args: string[]) => execFileSync("git", args, { cwd: dir, encoding: "utf8", env, stdio: ["ignore", "pipe", "pipe"] }).trim();
+  };
+
+  it("aborts an editor closed without a subject instead of committing the record as the message", async () => {
+    const git = await withHooks();
+    if (!git) return;
+    await writeFile(join(dir, "a.txt"), "a\n");
+    git(["add", "-A"]);
+    git(["commit", "-q", "-m", "base"]);
+    const open = await graft.start({ task: "untitled" });
+    await graft.evidenceNote("ok");
+    await writeFile(join(dir, "a.txt"), "b\n");
+    git(["add", "a.txt"]);
+    // GIT_EDITOR=true leaves the message as prepare-commit-msg wrote it: the record and nothing else.
+    expect(() => git(["commit", "-q"])).toThrow(/only the Graft record/);
+    expect(git(["log", "-1", "--format=%s"])).toBe("base");
+    expect((await graft.status())?.id).toBe(open.id);
+    // With a subject the same commit goes through.
+    git(["commit", "-q", "-m", "titled"]);
+    expect(git(["log", "-1", "--format=%s"])).toBe("titled");
+    expect(git(["log", "-1", "--format=%B"])).toContain(`Graft-Change: ${open.id}`);
+    expect(await graft.status()).toBeNull();
+  });
+
+  it("leaves fixup and squash commits without a record, so autosquash does not fold one change's record into another", async () => {
+    const git = await withHooks();
+    if (!git) return;
+    await writeFile(join(dir, "a.txt"), "a\n");
+    git(["add", "-A"]);
+    git(["commit", "-q", "-m", "base"]);
+    await graft.start({ task: "first" });
+    await graft.evidenceNote("ok");
+    await writeFile(join(dir, "a.txt"), "b\n");
+    git(["add", "a.txt"]);
+    git(["commit", "-q", "-m", "first commit"]);
+    const first = git(["rev-parse", "HEAD"]);
+    const open = await graft.start({ task: "second" });
+    await graft.evidenceNote("ok");
+    await writeFile(join(dir, "a.txt"), "c\n");
+    git(["add", "a.txt"]);
+    git(["commit", "-q", "--fixup", first]);
+    expect(git(["log", "-1", "--format=%B"])).not.toContain("Graft-Change");
+    expect((await graft.status())?.id).toBe(open.id);
+    await writeFile(join(dir, "a.txt"), "d\n");
+    git(["add", "a.txt"]);
+    git(["commit", "-q", "-m", "squash! first commit"]);
+    expect(git(["log", "-1", "--format=%B"])).not.toContain("Graft-Change");
+  });
+
+  it("reads the message when the note on a commit names another change", async () => {
+    await graft.start({ task: "first" });
+    await graft.evidenceNote("ok");
+    await writeFile(join(dir, "a.txt"), "a\n");
+    const first = await graft.land({ all: true });
+    await graft.start({ task: "second" });
+    await graft.evidenceNote("ok");
+    await writeFile(join(dir, "a.txt"), "b\n");
+    const second = await graft.land({ all: true });
+    // A rewrite moved the first change's note onto the second's commit.
+    sh(["notes", "--ref=refs/notes/graft", "add", "-f", "-m", JSON.stringify(first.record), second.commit]);
+    const entry = await graft.show(second.commit);
+    expect(entry?.recordSource).toBe("message");
+    expect(entry?.record?.task).toBe("second");
+  });
+
+  it("lands a staged deletion of a credential file without an override", async () => {
+    await writeFile(join(dir, ".env"), "SECRET=1\n");
+    sh(["add", "-f", ".env"]);
+    sh(["commit", "-q", "-m", "oops"]);
+    await graft.start({ task: "stop tracking .env" });
+    await graft.evidenceNote("checked");
+    sh(["rm", "-q", "--cached", ".env"]);
+    const { commit, record } = await graft.land();
+    expect(sh(["show", "--format=", "--name-status", commit])).toBe("D\t.env");
+    expect(record.overrides).toBeUndefined();
+    // Re-adding it is still a leak.
+    await graft.start({ task: "add it back" });
+    await graft.evidenceNote("checked");
+    sh(["add", "-f", ".env"]);
+    await expect(graft.land()).rejects.toThrow(/look like credentials: \.env\./);
+  });
+
+  it("keeps the author a hook captured when graft start names none, and the task when only a placeholder arrives", async () => {
+    const author = { kind: "agent" as const, name: "codex", model: "gpt-5-codex" };
+    await graft.start({ task: "captured prompt", author, capturedBy: "codex", sessionId: "s1" });
+    // The CLI passes an author with nothing set when no --author or --human was given.
+    const named = await graft.start({ task: "the real task", author: { name: undefined, kind: undefined } });
+    expect(named.author).toEqual(author);
+    expect(named.task).toBe("the real task");
+    // A racing hook brings a placeholder; the task that is there stays.
+    const raced = await graft.start({ task: "(task not named)", taskPlaceholder: true, author, capturedBy: "codex", sessionId: "s1" });
+    expect(raced.task).toBe("the real task");
+    expect(raced.taskPlaceholder).toBeUndefined();
+    // --human is an explicit claim and wins.
+    const human = await graft.start({ task: "the real task", author: { name: undefined, kind: "human" } });
+    expect(human.author.kind).toBe("human");
+  });
+
+  it("writes Graft's trailers once even when the message already carries one", async () => {
+    await writeFile(join(dir, "a.txt"), "a\n");
+    sh(["add", "-A"]);
+    sh(["commit", "-q", "-m", "base"]);
+    const msgFile = join(dir, ".git", "MSG");
+    await graft.start({ task: "trailers", ref: "https://example/task/1" });
+    await graft.evidenceNote("ok");
+    await writeFile(join(dir, "a.txt"), "b\n");
+    sh(["add", "a.txt"]);
+    await writeFile(msgFile, "Second\n\nGraft-Task-Ref: https://example/task/9\nCo-Authored-By: A <a@b>\n");
+    expect((await graft.prepareCommitMessage(msgFile, "message")).applied).toBe(true);
+    const written = await readFile(msgFile, "utf8");
+    expect(written.match(/^Graft-Task-Ref:/gm)).toHaveLength(1);
+    expect(written).toContain("Graft-Task-Ref: https://example/task/1");
+    expect(written).toMatch(/Co-Authored-By: A <a@b>\n$/);
   });
 });

@@ -1,4 +1,4 @@
-import { commandOf, exitCodeOf, int, objectOf, str, textOf, type CaptureAgent, type CaptureEvent, type CaptureOutcome } from "./capture-hook.js";
+import { commandOf, exitCodeOf, int, objectOf, quoteDir, str, textOf, type CaptureAgent, type CaptureEvent, type CaptureOutcome } from "./capture-hook.js";
 import { normalizeClaudeCode, type ClaudeCodeEvent } from "./claude-code.js";
 
 /**
@@ -95,8 +95,11 @@ function normalizeCursor(p: Payload): CaptureEvent {
   if (event !== "postToolUse" && event !== "postToolUseFailure") return { kind: "ignore", reason: `event ${event}` };
   const tool = str(p, "tool_name") ?? "";
   if (!/^(Shell|Bash|run_terminal_cmd|terminal)$/i.test(tool)) return { kind: "ignore", reason: `tool ${tool}` };
-  const command = (commandOf(p.tool_input) ?? "").trim();
+  let command = (commandOf(p.tool_input) ?? "").trim();
   if (!command) return { kind: "ignore", reason: "no command" };
+  // The Shell tool runs in `working_directory` under the workspace; record the move so the command re-runs from the root.
+  const dir = str(objectOf(p.tool_input), "working_directory", "workingDirectory");
+  if (dir && !/^\s*cd\s/.test(command)) command = `cd ${quoteDir(dir)} && ${command}`;
   const result = event === "postToolUse" ? p.tool_output : p.error_message;
   return {
     kind: "run",
@@ -153,7 +156,7 @@ function normalizeGemini(p: Payload): CaptureEvent {
   if (!command) return { kind: "ignore", reason: "no command" };
   // The tool runs in `dir_path` under the cwd; record the move so the command re-runs from the root.
   const dir = str(input, "dir_path", "directory");
-  if (dir && !/^\s*cd\s/.test(command)) command = `cd ${/^[\w./-]+$/.test(dir) ? dir : JSON.stringify(dir)} && ${command}`;
+  if (dir && !/^\s*cd\s/.test(command)) command = `cd ${quoteDir(dir)} && ${command}`;
   // The shell tool's result names its exit code ("Exit Code: 0") in the text the model sees.
   const response = objectOf(p.tool_response);
   const llm = response?.llmContent ?? response?.returnDisplay ?? p.tool_response;

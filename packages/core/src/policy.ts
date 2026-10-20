@@ -111,7 +111,13 @@ export async function readPolicy(topLevel: string): Promise<Policy> {
 
 /** A policy file's text, parsed and validated the way `readPolicy` does, for a policy read from a commit rather than the working tree. */
 export function parsePolicy(raw: string): Policy {
-  const parsed = JSON.parse(raw) as Partial<Policy>;
+  let parsed: Partial<Policy>;
+  try {
+    parsed = JSON.parse(raw) as Partial<Policy>;
+  } catch (err) {
+    throw new Error(`${POLICY_PATH} is not valid JSON: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error(`${POLICY_PATH} must hold a JSON object.`);
   if (parsed.version !== undefined && parsed.version !== 1) {
     throw new Error(`Unsupported policy version ${String(parsed.version)} in ${POLICY_PATH}`);
   }
@@ -123,6 +129,9 @@ export function parsePolicy(raw: string): Policy {
 const COMMAND_NAME = /^[A-Za-z0-9][A-Za-z0-9_.:-]*$/;
 
 function validatePolicy(policy: Policy): void {
+  if (typeof policy.requireEvidence !== "boolean" && policy.requireEvidence !== "command") {
+    throw new Error(`${POLICY_PATH}: "requireEvidence" must be true, false or "command".`);
+  }
   if (policy.task !== undefined && policy.task !== "captured" && policy.task !== "named") {
     throw new Error(`${POLICY_PATH}: "task" must be "captured" or "named".`);
   }

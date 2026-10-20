@@ -235,19 +235,26 @@ remembers Graft:
   its task: the session's last real prompt is used. The hook files are
   tracked: `init` edits them in place, and the edit is meant to be committed,
   so a per-session `init` leaves a diff until it is.
-- **Git hooks** (`prepare-commit-msg` and `post-commit`). A plain
-  `git commit` with a change open gets the Plan and Evidence blocks and the
-  trailers in its message and the full record as a note, exactly like
+- **Git hooks** (`prepare-commit-msg`, `commit-msg` and `post-commit`). A
+  plain `git commit` with a change open gets the Plan and Evidence blocks and
+  the trailers in its message and the full record as a note, exactly like
   `graft land`, and the same policy gate applies (`GRAFT_ALLOW_NO_EVIDENCE=1`
   or `GRAFT_ALLOW_SECRETS=1` override it for one commit, and the commit then
-  carries a `Graft-Override` trailer; `0`, `false` or empty do not).
-  Trailers the message already ends with (`Co-Authored-By`, `Claude-Session`)
-  stay in the last paragraph, after the record, so git still reads them as
-  trailers. Merges, squashes, amends of a commit that already carries a
-  record, and the commits git makes for a rebase, cherry-pick or revert are
-  left alone, and a hook that is already there is not overwritten. A message
-  given with `-m` or `-F` is kept as written, so `git commit -m "#42 fix the
-  crash"` keeps its subject.
+  carries a `Graft-Override` trailer; `0`, `false` or empty do not). The gate
+  runs in `prepare-commit-msg`, which `git commit --no-verify` does not skip:
+  those variables are the only way past it. Trailers the message already
+  ends with (`Co-Authored-By`, `Claude-Session`) stay in the last paragraph,
+  after the record, so git still reads them as trailers; Graft's own are
+  written by Graft, so a hand-written `Graft-Task-Ref` is dropped rather
+  than doubled. An editor closed without a subject aborts the commit, as it
+  would without Graft, instead of landing one titled `Evidence:`. Merges,
+  squashes, `--fixup` and `--squash` commits, amends of a commit that
+  already carries a record, and the commits git makes for a rebase,
+  cherry-pick or revert are left alone, and a hook that is already there is
+  not overwritten. A message given with `-m` or `-F` is kept as written, so
+  `git commit -m "#42 fix the crash"` keeps its subject. A staged deletion of
+  a file that looks like a credential is not refused: removing a tracked
+  `.env` is the fix, not the leak.
 
 The hooks run `graft`. Where it is not on PATH they step aside: a commit goes
 through unrecorded with a one-line install hint, for `graft check` to catch at
@@ -483,9 +490,13 @@ npm install -g @fourshore/graft
 (On Claude Code before 2.1.275: `/plugin marketplace add FourShore/Graft`,
 then `/plugin install graft@fourshore`.) Its `graft:init` skill sets a repo
 up and reviews the policy, and `graft:workflow` is the section above in
-skill form. Where a repo's own `.claude/settings.json` already runs the
-capture hook, the plugin's copy steps aside, so a repo set up with `graft
-init` and a contributor with the plugin do not record twice. The plugin
+skill form. The plugin follows you into every repository, so it records
+only where Graft is set up (a `.graft/policy.json`, or this clone's git
+hooks); elsewhere nothing is written. Where a repo's own
+`.claude/settings.json` already runs the capture hook, the plugin's copy
+steps aside, so a repo set up with `graft init` and a contributor with the
+plugin do not record twice. It needs `@fourshore/graft` 0.2.0 or newer and
+says so at session start when the installed one is older. The plugin
 lives in [plugin/](https://github.com/FourShore/Graft/tree/main/plugin) and this repository is its marketplace.
 
 Agents with MCP support can use the same steps as tools. For Claude Code:
