@@ -27,7 +27,7 @@ not recorded and this step is required before the commit will go through.
 which. Run them so the exit code is yours to see, not hidden behind a pipe:
 
 ```
-graft evidence test                      # a policy command, by name
+graft evidence test                      # a policy command (or review), by name
 graft evidence -- npm run lint           # any command
 graft evidence --note "<what you checked by hand>"
 ```

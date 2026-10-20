@@ -1,6 +1,7 @@
 export { FOREIGN_REF_TRAILERS, Graft, GraftError, buildCommitMessage, builtInRef, foreignTaskRef, recordBlock, runShell, splitTrailers } from "./graft.js";
 export type { AbandonOptions, CapturedRun, ExportEntry, FinishResult, InitResult, LandOptions, LandedChange, LogEntry, PrepareResult, RevertResult, StartOptions, SyncResult } from "./graft.js";
 export * from "./policy.js";
+export * from "./review.js";
 export * from "./record.js";
 export * from "./redact.js";
 export * from "./agents.js";

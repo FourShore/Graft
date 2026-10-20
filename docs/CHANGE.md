@@ -107,6 +107,20 @@ Two kinds in version 1.
   staleness is asserted only when it is certain.
 - `note`: free text for verification that did not come from a command: a manual
   check, a link to a CI run, a screenshot description.
+- `review`: an independent reading of the change by a model, the one kind
+  of evidence that is not the author's own run. `name` is the policy's name
+  for it, `model` the model that answered (as the API reported it, or as a
+  reviewer command named itself), `verdict` is `approve` or
+  `request-changes` (the latter exactly when a finding is a blocker),
+  `summary` one or two sentences, `findings` a list of `{ severity, file?,
+  line?, text }` with severity `blocker`, `warning` or `nit`, `promptSha256`
+  the hash of the instructions the reviewer ran under (the built-in prompt,
+  or the policy's `prompt` file) and `diffSha256` the hash of the diff it
+  read. `tree` and `stale` work as for a command: a review that approved
+  content other than what is being committed does not meet a rule.
+  Recorded by `graft evidence <name>` on the working tree's diff against
+  the last commit; run again by `graft check --rerun` on each commit's own
+  diff, and that verdict is the one that counts.
 
 Evidence is append-only while a change is open. Tools must not edit or drop
 evidence; a failed run stays in the record next to the later run that passed.
@@ -193,7 +207,11 @@ reader of the message alone reaches the same verdict on the policy as one with
 the note, which keeps every run. `Graft-Evidence` counts every run.
 The bracket holds the status, `pass`, `stale`, `fail <exit code>` or `note`,
 and then the label if there is one (`[pass unit tests]`, `[note manual]`); after it
-come the command and its duration, or the note text. Keeping the label inside
+come the command and its duration, or the note text. A review is
+`[review approve code] claude-opus-5-5 (prompt 4f3a2b1c; 2 findings)`:
+the verdict (or `stale`) and name in the bracket, then the model, the first
+eight hex digits of the prompt's hash and the count of findings; the
+findings themselves are in the note. Keeping the label inside
 the bracket means a command or note containing `: ` is read back exactly.
 Labels lose any square brackets; commands and notes are collapsed to one line
 and cut at 200 characters. Output is not in the message.
@@ -302,12 +320,23 @@ command only when it matches one of these. Unset, only catalog commands are
 re-run. `commands`, optional, is a map of name to shell command: the repo's
 checks, named once, run by `graft evidence <name>`, recognised by the
 capture hooks, and re-run by `graft check --rerun` under their current
-definition. `rules`, optional, is a list of `{ "paths": [globs], "require":
-[names] }`: a change touching a file that matches `paths` must carry a
-passing, non-attested run of every named command, made on the content being
-committed (see `tree` under Evidence), or `land` refuses and `check` fails
-the commit. A rule naming a command that `commands` does not
-define makes the policy unreadable, so the mistake surfaces at once. Readers
+definition. `reviews`, optional, is a map of name to review: `{}` reviews
+with the default model (`claude-opus-5-5`, through the API with
+`ANTHROPIC_API_KEY`) under the built-in instructions; `model` picks another;
+`prompt` names a file in the repo whose text replaces the built-in
+instructions (the record carries the hash of whichever was used); `command`
+runs a program instead of the API, which reads the request (`name`, `task`,
+`diff`, `instructions`) as JSON on stdin and prints the result (`verdict`,
+`summary`, `findings`, `model`) as JSON; `differentModel` refuses a review by
+the model in the record's `author.model`, and by an agent author whose model
+is not recorded. Names share the namespace of `commands`. `rules`, optional,
+is a list of `{ "paths": [globs], "require": [names] }`: a change touching a
+file that matches `paths` must carry a passing, non-attested run of every
+named command and an approving review for every named review, made on the
+content being committed (see `tree` under Evidence), or `land` refuses and
+`check` fails the commit. A rule naming something neither `commands` nor
+`reviews` defines makes the policy unreadable, so the mistake surfaces at
+once. Readers
 reject unknown policy versions. The file is committed, so changing policy is a
 reviewed change like any other; `graft check` reads it from the base of the
 range it checks, so a branch is held to the policy it is merging into, not

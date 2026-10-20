@@ -48,6 +48,9 @@ jobs:
       # Add the step that installs this project's dependencies here, so the
       # recorded commands can run (npm ci, go mod download, pip install ...).
       - uses: ${CHECK_ACTION}
+        # Where the policy names reviews, the key the check re-runs them with:
+        # with:
+        #   anthropic-api-key: \${{ secrets.ANTHROPIC_API_KEY }}
 `;
 
 /** Write the check workflow unless a file is already there. */

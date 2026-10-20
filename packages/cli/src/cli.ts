@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import { readFile, writeFile } from "node:fs/promises";
 import { Command } from "commander";
-import { AGENT_INFO, CAPTURE_AGENTS, Graft, GraftError, HOOK_SPECS, attemptLines, gitHooksInstalled, handleCaptureEvent, hasAgentHooks, isCaptureAgent, normalizeAgentEvent, replyFor, shellJoin, type CaptureAgent, type LogEntry } from "@fourshore/graft-core";
-import type { ChangeRecord } from "@fourshore/graft-core";
+import { AGENT_INFO, CAPTURE_AGENTS, DEFAULT_REVIEW_MODEL, Graft, GraftError, HOOK_SPECS, attemptLines, gitHooksInstalled, handleCaptureEvent, hasAgentHooks, isCaptureAgent, normalizeAgentEvent, replyFor, shellJoin, type CaptureAgent, type LogEntry } from "@fourshore/graft-core";
+import type { ChangeRecord, ReviewEvidence } from "@fourshore/graft-core";
 import { renderCheckGithub, renderCheckText, runCheck } from "@fourshore/graft-review";
 import { createRequire } from "node:module";
 import { randomBytes } from "node:crypto";
@@ -148,13 +148,13 @@ program
 
 program
   .command("evidence")
-  .description("run a command (or a policy command by name) and record its result, attach a run you already made, or record a note")
+  .description("run a command (or a policy command or review by name) and record its result, attach a run you already made, or record a note")
   .option("--label <label>", "what this evidence shows, e.g. 'unit tests'")
   .option("--note <text>", "record a note instead of running a command")
   .option("--attach", "do not run the command; record it as a run you already made, marked attested")
   .option("--exit <code>", "with --attach: the exit code of your run (default 0)")
   .option("--output-file <path>", "with --attach: a file holding your run's output (last 4 KB kept)")
-  .argument("[command...]", "a name from the policy's commands, or a command to run (put -- before it)")
+  .argument("[command...]", "a name from the policy's commands or reviews, or a command to run (put -- before it)")
   .action(async (command: string[], o) => {
     const g = graft();
     if (o.note) {
@@ -163,12 +163,19 @@ program
       return;
     }
     if (!command.length) {
-      const names = Object.entries(await g.catalog());
+      const names = [...Object.keys(await g.catalog()), ...Object.keys(await g.reviews())];
       throw new GraftError(
         names.length
-          ? `Give a policy command by name (${names.map(([n]) => n).join(", ")}), a command after --, or use --note.`
+          ? `Give a policy command or review by name (${names.join(", ")}), a command after --, or use --note.`
           : "Give a command after --, or use --note.",
       );
+    }
+    if (command.length === 1 && (await g.reviews())[command[0]]) {
+      if (o.attach) throw new GraftError(`"${command[0]}" is a review, which Graft runs itself; it cannot be attached as a run you made.`);
+      const ev = await g.evidenceReview(command[0], o.label);
+      out(ev, formatReview(ev));
+      if (ev.verdict !== "approve") process.exitCode = 1;
+      return;
     }
     if (command.length === 1 && (await g.catalog())[command[0]]) {
       if (o.attach) {
@@ -190,9 +197,9 @@ program
     }
     // One bare word is meant as a policy name far more often than as a program (a typo such as `graft evidence tset` should not run tset).
     if (command.length === 1 && /^[\w:.-]+$/.test(command[0]) && !process.argv.includes("--")) {
-      const names = Object.keys(await g.catalog());
+      const names = [...Object.keys(await g.catalog()), ...Object.keys(await g.reviews())];
       throw new GraftError(
-        `No policy command is named ${command[0]}${names.length ? ` (the policy names ${names.join(", ")})` : ""}. ` +
+        `No policy command or review is named ${command[0]}${names.length ? ` (the policy names ${names.join(", ")})` : ""}. ` +
           `To run ${command[0]} as a command, put -- before it: graft evidence -- ${command[0]}`,
       );
     }
@@ -347,13 +354,15 @@ program
     const record = await g.status();
     const names = Object.entries(await g.catalog());
     const commands = names.length ? `\ncommands: ${names.map(([n, c]) => `${n} (${c})`).join(", ")}` : "";
+    const reviewNames = Object.entries(await g.reviews());
+    const reviews = reviewNames.length ? `\nreviews: ${reviewNames.map(([n, s]) => `${n} (${s.command ? "command" : (s.model ?? DEFAULT_REVIEW_MODEL)}${s.differentModel ? ", not the author's model" : ""})`).join(", ")}` : "";
     const waiting = await g.attempts();
     const attempts = waiting.length ? `\nattempts waiting for the next land: ${waiting.map((a) => `${a.id} (${a.reason ?? a.task})`).join(", ")}` : "";
     const gitHooks = await gitHooksInstalled(g.git);
     const hooks = gitHooks
       ? "\ngit hooks: installed, so a plain git commit carries the record"
       : "\ngit hooks: not installed in this clone; commit with graft land, or run graft init to install them";
-    out({ open: record, commands: await g.catalog(), attempts: waiting, gitHooks }, (record ? formatRecord(record) : "No change is open.") + commands + attempts + hooks);
+    out({ open: record, commands: await g.catalog(), reviews: await g.reviews(), attempts: waiting, gitHooks }, (record ? formatRecord(record) : "No change is open.") + commands + reviews + attempts + hooks);
   });
 
 program
@@ -504,9 +513,19 @@ function formatRecord(r: ChangeRecord): string {
     lines.push(
       ev.kind === "command"
         ? `  ${ev.attested ? (ev.exitCode === 0 ? "attested" : `ATTESTED FAIL ${ev.exitCode}`) : ev.exitCode !== 0 ? "FAIL" : ev.stale ? "stale" : "pass"}  ${ev.command}${tag(ev.name, ev.label)}`
-        : `  note  ${ev.text}${ev.label ? `  [${ev.label}]` : ""}`,
+        : ev.kind === "review"
+          ? `  ${ev.stale ? "stale review" : ev.verdict === "approve" ? "approved" : "CHANGES REQUESTED"}  ${ev.model}${tag(ev.name, ev.label)} (prompt ${ev.promptSha256.slice(0, 8)}; ${ev.findings.length} finding${ev.findings.length === 1 ? "" : "s"})${ev.summary ? `\n        ${ev.summary}` : ""}`
+          : `  note  ${ev.text}${ev.label ? `  [${ev.label}]` : ""}`,
     );
   }
+  return lines.join("\n");
+}
+
+/** A review as `graft evidence <name>` prints it: the verdict, the summary and every finding. */
+function formatReview(ev: ReviewEvidence): string {
+  const lines = [`${ev.verdict === "approve" ? "Approved" : "Changes requested"} by ${ev.model} (review ${ev.name ?? ""}, prompt ${ev.promptSha256.slice(0, 8)}, ${(ev.durationMs / 1000).toFixed(1)}s)`];
+  if (ev.summary) lines.push(`  ${ev.summary}`);
+  for (const f of ev.findings) lines.push(`  ${f.severity}${f.file ? ` ${f.file}${f.line ? `:${f.line}` : ""}` : ""}: ${f.text}`);
   return lines.join("\n");
 }
 

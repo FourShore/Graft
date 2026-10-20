@@ -1,13 +1,14 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { globToRegExp } from "./redact.js";
-import type { CommandEvidence, Evidence } from "./record.js";
+import type { CommandEvidence, Evidence, ReviewEvidence } from "./record.js";
+import type { ReviewSpec } from "./review.js";
 
 /** Which named commands a change that touches these paths must carry as passing evidence. */
 export interface CoverageRule {
   /** Globs relative to the repo root, same rules as secretFiles. */
   paths: string[];
-  /** Names from `commands`. */
+  /** Names from `commands` or `reviews`. */
   require: string[];
 }
 
@@ -86,10 +87,22 @@ export interface Policy {
    */
   commands?: Record<string, string>;
   /**
+   * Reviews the repo names, each an independent reading of the change by a
+   * model under instructions the record identifies by hash: `{ "code": {} }`
+   * reviews with the default model and prompt; `model`, `prompt` (a file in
+   * the repo), `command` (a reviewer run instead of the API) and
+   * `differentModel` (the reviewer may not be the author's model) adjust
+   * one. `graft evidence <name>` runs one on the working tree; `graft check
+   * --rerun` runs it again on each commit, and that run is the one that
+   * counts. Names share the namespace of `commands`, and `rules` refer to them.
+   */
+  reviews?: Record<string, ReviewSpec>;
+  /**
    * The repo's definition of done, by path: a change that touches a file
    * matching a rule's `paths` must carry a passing run (by Graft or a
-   * harness, not attested) of every command the rule names. `land` refuses
-   * otherwise, and `graft check` fails the commit.
+   * harness, not attested) of every command the rule names, and an approving
+   * review for every review it names. `land` refuses otherwise, and `graft
+   * check` fails the commit.
    */
   rules?: CoverageRule[];
 }
@@ -139,12 +152,24 @@ function validatePolicy(policy: Policy): void {
     if (!COMMAND_NAME.test(name)) throw new Error(`${POLICY_PATH}: command name "${name}" must be a word (letters, digits, _ . : -).`);
     if (typeof command !== "string" || !command.trim()) throw new Error(`${POLICY_PATH}: command "${name}" must be a non-empty string.`);
   }
+  for (const [name, spec] of Object.entries(policy.reviews ?? {})) {
+    if (!COMMAND_NAME.test(name)) throw new Error(`${POLICY_PATH}: review name "${name}" must be a word (letters, digits, _ . : -).`);
+    if (policy.commands?.[name]) throw new Error(`${POLICY_PATH}: "${name}" is both a command and a review; rules refer to one name, so pick one.`);
+    if (!spec || typeof spec !== "object" || Array.isArray(spec)) throw new Error(`${POLICY_PATH}: review "${name}" must be an object ({} for the defaults).`);
+    for (const key of ["model", "prompt", "command"] as const) {
+      if (spec[key] !== undefined && (typeof spec[key] !== "string" || !spec[key].trim())) throw new Error(`${POLICY_PATH}: review "${name}": "${key}" must be a non-empty string.`);
+    }
+    if (spec.differentModel !== undefined && typeof spec.differentModel !== "boolean") throw new Error(`${POLICY_PATH}: review "${name}": "differentModel" must be true or false.`);
+    for (const key of Object.keys(spec)) {
+      if (!["model", "prompt", "command", "differentModel"].includes(key)) throw new Error(`${POLICY_PATH}: review "${name}" has an unknown key "${key}" (model, prompt, command, differentModel).`);
+    }
+  }
   for (const rule of policy.rules ?? []) {
     if (!Array.isArray(rule.paths) || !rule.paths.length) throw new Error(`${POLICY_PATH}: every rule needs a non-empty "paths" list.`);
     if (!Array.isArray(rule.require) || !rule.require.length) throw new Error(`${POLICY_PATH}: every rule needs a non-empty "require" list.`);
     for (const name of rule.require) {
-      if (!policy.commands?.[name]) {
-        throw new Error(`${POLICY_PATH}: rule for ${rule.paths.join(", ")} requires "${name}", which "commands" does not define.`);
+      if (!policy.commands?.[name] && !policy.reviews?.[name]) {
+        throw new Error(`${POLICY_PATH}: rule for ${rule.paths.join(", ")} requires "${name}", which neither "commands" nor "reviews" defines.`);
       }
     }
   }
@@ -162,10 +187,12 @@ export function matchCatalog(policy: Policy, command: string): string | null {
   return null;
 }
 
-/** A named command that is not met by the evidence, with the files that asked for it. */
+/** A named command or review that is not met by the evidence, with the files that asked for it. */
 export interface UnmetRule {
   name: string;
+  /** The command's text; empty for a review. */
   command: string;
+  kind: "command" | "review";
   files: string[];
 }
 
@@ -180,16 +207,31 @@ export interface UnmetRule {
  */
 export function evaluateRules(policy: Policy, files: string[], evidence: Evidence[], opts: { labelIsName?: boolean } = {}): UnmetRule[] {
   const commands = policy.commands ?? {};
+  const reviews = policy.reviews ?? {};
   const unmet = new Map<string, Set<string>>();
   for (const { rule, files: hit } of rulesHit(policy, files)) {
     for (const name of rule.require) {
       if (commands[name] && coveringRuns(evidence, name, commands[name], opts).length) continue;
+      if (!commands[name] && reviews[name] && coveringReviews(evidence, name, opts).length) continue;
       const set = unmet.get(name) ?? new Set<string>();
       for (const f of hit) set.add(f);
       unmet.set(name, set);
     }
   }
-  return [...unmet].map(([name, set]) => ({ name, command: commands[name] ?? "", files: [...set] }));
+  return [...unmet].map(([name, set]) => ({ name, command: commands[name] ?? "", kind: commands[name] ? "command" : "review", files: [...set] }));
+}
+
+/**
+ * The reviews that count for a name: recorded under it (or, with
+ * `labelIsName`, with the name as label, which is all a commit message
+ * keeps), approving, not stale, and not followed by a later review of the
+ * same name that requested changes.
+ */
+export function coveringReviews(evidence: Evidence[], name: string, opts: { labelIsName?: boolean } = {}): ReviewEvidence[] {
+  const labelIsName = opts.labelIsName ?? true;
+  const runs = evidence.filter((e): e is ReviewEvidence => e.kind === "review" && (e.name === name || (labelIsName && !e.name && e.label === name)));
+  const lastFail = runs.map((r) => r.verdict !== "approve").lastIndexOf(true);
+  return runs.slice(lastFail + 1).filter((r) => r.verdict === "approve" && !r.stale);
 }
 
 /** The rules whose paths match any of `files`, each with the files that matched. */

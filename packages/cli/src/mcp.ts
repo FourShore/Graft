@@ -70,9 +70,9 @@ server.registerTool(
   "graft_evidence",
   {
     description:
-      "Run a verification command (tests, lint, build) and attach its exit code and output to the open change as evidence. Returns the result so you can read it. Pass `name` to run one of the repo's policy commands by name (graft_status lists them); the landing gate and graft check look for those names. To attach a run you already made instead of running it again, pass its exitCode (and output); it is then recorded as attested rather than pass, which does not satisfy a policy that requires a command.",
+      "Run a verification command (tests, lint, build) and attach its exit code and output to the open change as evidence. Returns the result so you can read it. Pass `name` to run one of the repo's policy commands or reviews by name (graft_status lists them); the landing gate and graft check look for those names. A review name sends the working tree's diff to an independent model and records its verdict and findings. To attach a run you already made instead of running it again, pass its exitCode (and output); it is then recorded as attested rather than pass, which does not satisfy a policy that requires a command.",
     inputSchema: {
-      name: z.string().optional().describe("A name from the policy's commands; runs that command and records it under the name (with exitCode, attaches your run of it instead)"),
+      name: z.string().optional().describe("A name from the policy's commands or reviews; runs it and records the result under the name (with exitCode, attaches your run of a command instead)"),
       command: z.string().optional().describe("Shell command, run from the repo root (or, with exitCode, the command you ran)"),
       label: z.string().optional().describe("What this shows, e.g. 'unit tests'"),
       exitCode: z.number().int().optional().describe("Give this to attach a run you already made; the command is not run"),
@@ -122,11 +122,11 @@ server.registerTool(
   "graft_status",
   {
     description:
-      "The open change (null if none), the policy's named commands, which graft_evidence runs by `name`, abandoned attempts waiting to land with the next change, and whether this clone has the git hooks (gitHooks), in which case a plain git commit carries the record; without them, commit with graft_land.",
+      "The open change (null if none), the policy's named commands and reviews, which graft_evidence runs by `name`, abandoned attempts waiting to land with the next change, and whether this clone has the git hooks (gitHooks), in which case a plain git commit carries the record; without them, commit with graft_land.",
     inputSchema: {},
   },
   async () =>
-    guarded(async () => ({ open: await graft.status(), commands: await graft.catalog(), attempts: await graft.attempts(), gitHooks: await gitHooksInstalled(graft.git) })),
+    guarded(async () => ({ open: await graft.status(), commands: await graft.catalog(), reviews: await graft.reviews(), attempts: await graft.attempts(), gitHooks: await gitHooksInstalled(graft.git) })),
 );
 
 server.registerTool(

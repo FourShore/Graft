@@ -200,6 +200,58 @@ commit message.
 [docs/CHANGE.md](https://github.com/FourShore/Graft/blob/main/docs/CHANGE.md#where-it-lives) covers what survives rebases,
 amends, and squashes.
 
+### Review as evidence
+
+Every other kind of evidence is the author's own run. A review is the one
+that is not: an independent reading of the diff by a model, under
+instructions the record identifies by hash, recorded next to the tests. The
+policy names one like a command, and a rule requires it the same way:
+
+```json
+{
+  "version": 1,
+  "commands": { "test": "npm test" },
+  "reviews": { "code": { "differentModel": true } },
+  "rules": [{ "paths": ["src/**"], "require": ["test", "code"] }]
+}
+```
+
+`graft evidence code` sends the working tree's diff against the last commit
+and the task to the reviewer and records its verdict, summary, findings
+(each a severity, a file and line when it concerns one, and a sentence),
+the model that answered, and the SHA-256 of the instructions it ran under.
+The verdict is `request-changes` exactly when a finding is a blocker, so a
+record's verdict always agrees with its findings. In the commit message it
+is one line, `[review approve code] claude-opus-5-5 (prompt 4f3a2b1c; 0
+findings)`, and the findings themselves stay in the note. `land` treats the
+rule like any other: an approving review of the content being committed, or
+it refuses and says which review to run; a review that approved an earlier
+tree is `stale`. A reviewer that declines to review records nothing and
+says so.
+
+The default reviewer is `claude-opus-5-5` through the API, with the key in
+`ANTHROPIC_API_KEY`, under a built-in prompt that asks for findings, not a
+narrative: does the diff do the task, is it correct, is it safe, were tests
+weakened. Each review in the policy can set `model`, `prompt` (a file in the
+repo with your own instructions; the record's hash then names it), and
+`differentModel`, which refuses a review by the model that wrote the change
+(the record's `Graft-Model`), since a model marking its own work is not a
+second opinion. `command` replaces the API call with a program of your own:
+it reads the request as JSON on stdin (`name`, `task`, `diff`,
+`instructions`) and prints the result as JSON (`verdict`, `summary`,
+`findings`, and `model`), which is how a reviewer behind another gateway, a
+local model, or a test gets in. No fallback model is ever used: the record
+names the reviewer, so it must be the one asked for.
+
+The review that counts is the one made where the pull request is checked.
+`graft check --rerun` runs each review the policy names again on each
+commit's own diff and task, so the author's recorded verdict is a claim like
+a `[pass]`, and the check's verdict is the fact: an approval there meets the
+rule whatever the author recorded, and a request for changes fails the
+commit with the findings in the summary. The action takes the key as
+`anthropic-api-key` (see below); without one, reviews are listed as not
+re-run and the recorded verdicts stand.
+
 ## Capture without ritual
 
 `graft init` also installs hooks, so records exist whether or not anyone
@@ -279,6 +331,8 @@ jobs:
         with: { fetch-depth: 0 }
       # your install step (npm ci, go mod download, ...), so recorded commands can run
       - uses: FourShore/Graft@v0   # v0 moves with each 0.x release; @v0.1.0 or that tag's SHA stays on one
+        # where the policy names reviews, the key the check re-runs them with:
+        # with: { anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }} }
 ```
 
 Each release sets the action's `version` input to its own version, so pinning
@@ -294,7 +348,11 @@ same repository, since a fork's commit messages are text a stranger wrote;
 catalog commands and those matching `checkCommands` are run. With
 `comment: "true"` it also posts the summary table as one pull request comment,
 updated in place on each run; the workflow then needs
-`permissions: pull-requests: write`. The same check runs from a shell:
+`permissions: pull-requests: write`. With `anthropic-api-key` (a repository
+secret, never written into the workflow) it re-runs the reviews the policy
+names, so the verdict in the summary is the check's own; the key is only
+read where the check re-runs, so a fork's pull request never sees it. The
+same check runs from a shell:
 
 ```
 graft check --base origin/main            # every behavior change needs evidence that meets the policy
@@ -334,7 +392,11 @@ and is otherwise listed as not re-run without failing the check. A recorded
 `graft check --rerun` is run but does not re-run anything itself. A commit
 whose trailers promise evidence that only the git note holds fails as "note
 missing" and says to fetch `refs/notes/graft`, rather than as a commit with
-none. `--base main` resolves to `origin/main` in a clone that has no local
+none. Reviews the policy names are run again too, one per commit on that
+commit's own diff, when the check has `ANTHROPIC_API_KEY` or the review
+names a `command`; a request for changes fails the commit with the findings,
+and a review the check cannot run is listed as not re-run. `--base main`
+resolves to `origin/main` in a clone that has no local
 `main`, which is every CI runner; with no `--base` the check uses
 `origin/main`, else `origin/master`, and otherwise asks for one. With
 `--format github` the step summary has each commit's task, and the text log,
@@ -541,7 +603,8 @@ it can, without Graft having to be one.
 
 - **CI as a second tier of evidence.** `graft check --rerun` emits a result
   the pull request summary and `graft show` can tell apart from the author's
-  run, so author-run and CI-verified are visible everywhere.
+  run, so author-run and CI-verified are visible everywhere. Reviews already
+  work this way: the check's verdict is the one that counts.
 - **A log across repositories.** `graft start --id` already lands one change
   in several repositories; a `graft log` that reads several clones and groups
   by change id follows when someone needs it.

@@ -47,6 +47,9 @@ inputs:
   github-token:
     description: Token used to post the comment.
     default: ${{ github.token }}
+  anthropic-api-key:
+    description: API key the check uses to re-run the reviews the policy names (`reviews` in .graft/policy.json), so the verdict that counts is the one made here. Pass `${{ secrets.ANTHROPIC_API_KEY }}`; without it reviews are reported as not re-run.
+    default: ""
 runs:
   using: composite
   steps:
@@ -70,6 +73,7 @@ runs:
         EVENT: ${{ github.event_name }}
         MERGE_GROUP_BASE: ${{ github.event.merge_group.base_sha }}
         PUSH_BEFORE: ${{ github.event.before }}
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
       run: |
         if [ -n "$BASE" ]; then
           base="origin/$BASE"
