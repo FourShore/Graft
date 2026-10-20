@@ -467,9 +467,26 @@ leaves the diff out.
 
 The `AGENTS.md` section that `graft init` writes tells an agent to open a
 change before editing, record each check it runs (by name when the policy
-names commands), and commit with `graft land`. Most agent harnesses read `AGENTS.md`. Claude Code
-reads `CLAUDE.md`, so put a line containing `@AGENTS.md` in it. Pass
-`--no-agents` to `graft init` to leave the file alone.
+names commands), and commit with `graft land`. Most agent harnesses read
+`AGENTS.md`. Claude Code reads `CLAUDE.md`, so put a line containing
+`@AGENTS.md` in it. Pass `--no-agents` to `graft init` to leave the file
+alone; [docs/AGENTS.md](https://github.com/FourShore/Graft/blob/main/docs/AGENTS.md) has the section for copying by hand.
+
+In Claude Code, the plugin carries the hooks, the skills and the MCP server,
+so a person who has it needs nothing from the repo to be recorded:
+
+```
+npm install -g @fourshore/graft
+/plugin install graft --marketplace fourshore/graft
+```
+
+(On Claude Code before 2.1.275: `/plugin marketplace add FourShore/Graft`,
+then `/plugin install graft@fourshore`.) Its `graft:init` skill sets a repo
+up and reviews the policy, and `graft:workflow` is the section above in
+skill form. Where a repo's own `.claude/settings.json` already runs the
+capture hook, the plugin's copy steps aside, so a repo set up with `graft
+init` and a contributor with the plugin do not record twice. The plugin
+lives in [plugin/](https://github.com/FourShore/Graft/tree/main/plugin) and this repository is its marketplace.
 
 Agents with MCP support can use the same steps as tools. For Claude Code:
 
@@ -517,8 +534,6 @@ it can, without Graft having to be one.
 - **A log across repositories.** `graft start --id` already lands one change
   in several repositories; a `graft log` that reads several clones and groups
   by change id follows when someone needs it.
-- **The agent as installer.** A skill and an `AGENTS.md` template, so an agent
-  setting up a repository runs `graft init` the way it writes a `.gitignore`.
 
 Earlier roadmaps here described instant workspaces, optimistic merging and a
 history query service. Those need a server and are not planned in this

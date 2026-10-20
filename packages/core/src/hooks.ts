@@ -226,6 +226,19 @@ async function writeGitHooks(git: Git): Promise<Pick<HooksResult, "git" | "hooks
   return { git: result, hooksDir };
 }
 
+/**
+ * True when the repo's own hook file for `agent` runs the capture hook, so a
+ * copy installed another way (the Claude Code plugin) should step aside
+ * rather than record every run twice.
+ */
+export async function hasAgentHooks(topLevel: string, agent: CaptureAgent): Promise<boolean> {
+  try {
+    return (await readFile(join(topLevel, HOOK_SPECS[agent].file), "utf8")).includes(`graft hook ${agent}`);
+  } catch {
+    return false;
+  }
+}
+
 /** True when this clone's prepare-commit-msg is Graft's, so a plain `git commit` carries the record. */
 export async function gitHooksInstalled(git: Git): Promise<boolean> {
   try {

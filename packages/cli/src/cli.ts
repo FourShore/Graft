@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { readFile, writeFile } from "node:fs/promises";
 import { Command } from "commander";
-import { AGENT_INFO, CAPTURE_AGENTS, Graft, GraftError, HOOK_SPECS, attemptLines, gitHooksInstalled, handleCaptureEvent, isCaptureAgent, normalizeAgentEvent, replyFor, shellJoin, type CaptureAgent, type LogEntry } from "@fourshore/graft-core";
+import { AGENT_INFO, CAPTURE_AGENTS, Graft, GraftError, HOOK_SPECS, attemptLines, gitHooksInstalled, handleCaptureEvent, hasAgentHooks, isCaptureAgent, normalizeAgentEvent, replyFor, shellJoin, type CaptureAgent, type LogEntry } from "@fourshore/graft-core";
 import type { ChangeRecord } from "@fourshore/graft-core";
 import { renderCheckGithub, renderCheckText, runCheck } from "@fourshore/graft-review";
 import { createRequire } from "node:module";
@@ -232,13 +232,21 @@ program
   .description(`entry points for the hooks graft init installs: an agent's hook (${CAPTURE_AGENTS.join(", ")}; stdin JSON), prepare-commit-msg <file> [source], post-commit`)
   .argument("<kind>", `${CAPTURE_AGENTS.join(" | ")} | prepare-commit-msg | post-commit`)
   .argument("[args...]", "what git passes the hook")
-  .action(async (kind: string, args: string[]) => {
+  .option("--plugin", "the hook is the Claude Code plugin's: step aside when the repo's own hook file already runs graft")
+  .action(async (kind: string, args: string[], o: { plugin?: boolean }) => {
     if (isCaptureAgent(kind)) {
       // Never break the agent's session: swallow everything, exit 0.
       let payload: unknown;
       try {
         payload = JSON.parse(await readStdin());
-        const outcome = await handleCaptureEvent(graft(), kind, normalizeAgentEvent(kind, payload));
+        const g = graft();
+        if (o.plugin && (await hasAgentHooks(await g.git.topLevel(), kind))) {
+          // The repo's hooks and the plugin's would each record the run; the repo's win.
+          const reply = replyFor(kind, payload, { action: "ignored", reason: "the repo's own hooks run graft" });
+          if (reply && !json()) console.log(reply);
+          return;
+        }
+        const outcome = await handleCaptureEvent(g, kind, normalizeAgentEvent(kind, payload));
         if (json()) console.log(JSON.stringify(outcome));
         else {
           // The agent reads this from stdout: a note for its context, or the answer its prompt hook must give.
