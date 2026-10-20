@@ -38,6 +38,13 @@ export interface ChangeRecord {
   /** The harness session that opened the change, when a capture hook did; runs from other sessions are not recorded on it. */
   sessionId?: string;
   /**
+   * Set when a capture hook opened the change from a run with no task to
+   * give it, so `task` is a placeholder naming the session. Cleared by the
+   * `graft start` that names it; under policy `task: "named"` the gate
+   * refuses to land while it is set.
+   */
+  taskPlaceholder?: boolean;
+  /**
    * Changes abandoned in this worktree since the last land, folded into the
    * change that did land: the plans that did not work and why, kept so the
    * next reader does not rediscover them. Written as the `Tried:` block.

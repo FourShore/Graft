@@ -68,6 +68,15 @@ export interface Policy {
    */
   ref?: string;
   /**
+   * Where a change's task text comes from. "captured" (the default) lets the
+   * capture hooks record the prompt as the task, as the agent received it.
+   * "named" keeps prompts out of the record: the hooks still open a change
+   * and record runs, but the task must be named with `graft start`, and the
+   * gate refuses a change whose task was never named. For a public repo,
+   * where the commit message is published, "named" is the safe setting.
+   */
+  task?: "captured" | "named";
+  /**
    * The repo's checks, named once: `{ "test": "go test ./...", "vet386":
    * "env GOOS=windows GOARCH=386 go vet ./..." }`. `graft evidence <name>`
    * runs one; the capture hooks record a typed command that matches one
@@ -114,6 +123,9 @@ export function parsePolicy(raw: string): Policy {
 const COMMAND_NAME = /^[A-Za-z0-9][A-Za-z0-9_.:-]*$/;
 
 function validatePolicy(policy: Policy): void {
+  if (policy.task !== undefined && policy.task !== "captured" && policy.task !== "named") {
+    throw new Error(`${POLICY_PATH}: "task" must be "captured" or "named".`);
+  }
   for (const [name, command] of Object.entries(policy.commands ?? {})) {
     if (!COMMAND_NAME.test(name)) throw new Error(`${POLICY_PATH}: command name "${name}" must be a word (letters, digits, _ . : -).`);
     if (typeof command !== "string" || !command.trim()) throw new Error(`${POLICY_PATH}: command "${name}" must be a non-empty string.`);

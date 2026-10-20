@@ -1,6 +1,8 @@
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { access, chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import type { Git } from "./git.js";
+import { CAPTURE_AGENTS, type CaptureAgent } from "./capture-hook.js";
 
 export const CLAUDE_SETTINGS_PATH = ".claude/settings.json";
 /**
@@ -9,16 +11,18 @@ export const CLAUDE_SETTINGS_PATH = ".claude/settings.json";
  * not log a hook error on every prompt and every Bash call.
  */
 export const HOOK_COMMAND = "command -v graft >/dev/null 2>&1 || exit 0; graft hook claude-code";
-/** The part of any command that runs the capture hook. */
-const HOOK_INVOCATION = "graft hook claude-code";
 /** What `graft init` wrote before the guard; recognized and upgraded in place. */
 const OLD_HOOK_COMMANDS = ["graft hook claude-code"];
 const MARK = "# graft-hook";
 const INSTALL_HINT = "npm install -g @fourshore/graft";
 
+export type HookFileState = "written" | "present" | "unreadable";
+
 export interface HooksResult {
-  /** What happened to .claude/settings.json. */
-  claudeCode: "written" | "present" | "unreadable";
+  /** What happened to .claude/settings.json; the same as `agents["claude-code"]`, kept for readers of earlier versions. */
+  claudeCode: HookFileState;
+  /** Per agent whose hooks were asked for: what happened to its config file. */
+  agents: Partial<Record<CaptureAgent, HookFileState>>;
   /** Per git hook: written, already Graft's, or left alone because another hook is there. */
   git: Record<"prepare-commit-msg" | "post-commit", "written" | "present" | "foreign">;
   /** Where the git hooks went, for the message. */
@@ -26,55 +30,166 @@ export interface HooksResult {
 }
 
 /**
- * Install the capture hooks: Claude Code hooks in .claude/settings.json so
- * the prompt opens a change and every test, build or lint command the agent
- * runs is recorded, and git hooks so a plain `git commit` carries the record.
- * Idempotent; never overwrites a hook Graft did not write.
+ * Where each agent reads its hooks from and what one handler looks like
+ * there. Claude Code, Codex and Gemini CLI share one shape (an event maps to
+ * matcher groups, each with its handlers); Cursor and Copilot CLI keep a flat
+ * list of handlers per event, under their own key for the command.
  */
-export async function installHooks(git: Git, topLevel: string): Promise<HooksResult> {
+interface HookSpec {
+  file: string;
+  /** Hook command for this agent; Cursor's prompt hook must answer `continue` even when graft is missing. */
+  command: string;
+  /** Events to hook, each with the matcher that picks the shell tool (none for the prompt event). */
+  events: Array<[event: string, matcher?: string]>;
+  shape: "groups" | "flat";
+  /** The handler object at a group's `hooks[]` (groups) or the event's list (flat). */
+  handler: (matcher?: string) => Record<string, unknown>;
+  /** The key holding the command in a handler, for recognizing one that is Graft's. */
+  commandKey: string;
+  /** Top-level fields a fresh file needs besides `hooks` (Cursor and Copilot CLI version their files). */
+  top?: Record<string, unknown>;
+}
+
+const guarded = (agent: CaptureAgent) => `command -v graft >/dev/null 2>&1 || exit 0; graft hook ${agent}`;
+
+export const HOOK_SPECS: Record<CaptureAgent, HookSpec> = {
+  "claude-code": {
+    file: CLAUDE_SETTINGS_PATH,
+    command: HOOK_COMMAND,
+    events: [["UserPromptSubmit"], ["PostToolUse", "Bash"], ["PostToolUseFailure", "Bash"]],
+    shape: "groups",
+    handler: () => ({ type: "command", command: HOOK_COMMAND, timeout: 15 }),
+    commandKey: "command",
+  },
+  codex: {
+    file: ".codex/hooks.json",
+    command: guarded("codex"),
+    events: [["UserPromptSubmit"], ["PostToolUse", "Bash"]],
+    shape: "groups",
+    handler: () => ({ type: "command", command: guarded("codex"), timeout: 15 }),
+    commandKey: "command",
+  },
+  gemini: {
+    file: ".gemini/settings.json",
+    command: guarded("gemini"),
+    events: [["BeforeAgent"], ["AfterTool", "run_shell_command"]],
+    shape: "groups",
+    handler: () => ({ name: "graft", type: "command", command: guarded("gemini"), timeout: 15000 }),
+    commandKey: "command",
+  },
+  cursor: {
+    file: ".cursor/hooks.json",
+    // Cursor blocks the prompt when its hook answers with no JSON, so a missing binary must still say `continue`.
+    command: `command -v graft >/dev/null 2>&1 || { echo '{"continue":true}'; exit 0; }; graft hook cursor`,
+    events: [["beforeSubmitPrompt"], ["postToolUse", "Shell"]],
+    shape: "flat",
+    handler: (matcher) => ({
+      command: `command -v graft >/dev/null 2>&1 || { echo '{"continue":true}'; exit 0; }; graft hook cursor`,
+      ...(matcher ? { matcher } : {}),
+      timeout: 15,
+    }),
+    commandKey: "command",
+    top: { version: 1 },
+  },
+  copilot: {
+    file: ".github/hooks/graft.json",
+    command: guarded("copilot"),
+    events: [["userPromptSubmitted"], ["postToolUse"]],
+    shape: "flat",
+    handler: () => ({ type: "command", bash: guarded("copilot"), timeoutSec: 15 }),
+    commandKey: "bash",
+    top: { version: 1 },
+  },
+};
+
+/**
+ * The agents a repo appears to use, by their config directories here or in
+ * the home directory. Claude Code is always included: its hooks were the
+ * only ones earlier versions wrote, and the file is harmless where it is not
+ * read.
+ */
+export async function detectCaptureAgents(topLevel: string): Promise<CaptureAgent[]> {
+  const home = homedir();
+  const here = (p: string) => exists(join(topLevel, p));
+  const mine = (p: string) => exists(join(home, p));
+  const found: CaptureAgent[] = ["claude-code"];
+  if ((await here(".codex")) || (await mine(".codex"))) found.push("codex");
+  if ((await here(".cursor")) || (await mine(".cursor"))) found.push("cursor");
+  if ((await here(".github/hooks")) || (await mine(".copilot"))) found.push("copilot");
+  if ((await here(".gemini")) || (await mine(".gemini"))) found.push("gemini");
+  return found;
+}
+
+async function exists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Install the capture hooks: each agent's hook config so the prompt opens a
+ * change and every test, build or lint command the agent runs is recorded,
+ * and git hooks so a plain `git commit` carries the record. Idempotent; never
+ * overwrites a hook Graft did not write.
+ */
+export async function installHooks(git: Git, topLevel: string, agents: readonly CaptureAgent[] = ["claude-code"]): Promise<HooksResult> {
+  const result: HooksResult["agents"] = {};
+  for (const agent of CAPTURE_AGENTS) {
+    if (agents.includes(agent)) result[agent] = await writeAgentHooks(topLevel, agent);
+  }
   return {
-    claudeCode: await writeClaudeSettings(topLevel),
+    claudeCode: result["claude-code"] ?? "present",
+    agents: result,
     ...(await writeGitHooks(git)),
   };
 }
 
-async function writeClaudeSettings(topLevel: string): Promise<HooksResult["claudeCode"]> {
-  const file = join(topLevel, CLAUDE_SETTINGS_PATH);
+async function writeAgentHooks(topLevel: string, agent: CaptureAgent): Promise<HookFileState> {
+  const spec = HOOK_SPECS[agent];
+  const file = join(topLevel, spec.file);
   let settings: Record<string, unknown> = {};
   let indent: string | number = 2;
+  let fresh = true;
   try {
     const raw = await readFile(file, "utf8");
     settings = JSON.parse(raw) as Record<string, unknown>;
+    fresh = false;
     // Keep the file's own indentation, so the diff is only the hooks.
     indent = /^[{[]\s*\n([ \t]+)\S/.exec(raw)?.[1] ?? 2;
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") return "unreadable";
   }
-  const hooks = (settings.hooks ??= {}) as Record<string, { matcher?: string; hooks: { type: string; command: string; timeout?: number }[] }[]>;
-  const entry = (matcher?: string) => ({ ...(matcher ? { matcher } : {}), hooks: [{ type: "command", command: HOOK_COMMAND, timeout: 15 }] });
-  const wanted: [string, string | undefined][] = [
-    ["UserPromptSubmit", undefined],
-    ["PostToolUse", "Bash"],
-    ["PostToolUseFailure", "Bash"],
-  ];
+  if (fresh && spec.top) settings = { ...spec.top, ...settings };
+  const hooks = (settings.hooks ??= {}) as Record<string, Record<string, unknown>[]>;
+  const ours = `graft hook ${agent}`;
+  const isOurs = (h: Record<string, unknown>) => typeof h[spec.commandKey] === "string" && (h[spec.commandKey] as string).includes(ours);
   let changed = false;
-  for (const [event, matcher] of wanted) {
+  for (const [event, matcher] of spec.events) {
     const list = (hooks[event] ??= []);
-    for (const e of list) {
-      for (const h of e.hooks ?? []) {
-        if (OLD_HOOK_COMMANDS.includes(h.command)) {
-          h.command = HOOK_COMMAND;
-          changed = true;
+    if (!Array.isArray(list)) return "unreadable";
+    if (spec.shape === "groups") {
+      for (const group of list) {
+        for (const h of (group.hooks as Record<string, unknown>[] | undefined) ?? []) {
+          if (agent === "claude-code" && OLD_HOOK_COMMANDS.includes(h.command as string)) {
+            h.command = HOOK_COMMAND;
+            changed = true;
+          }
         }
       }
+      // Any command that runs the capture hook counts, so a repo that wrapped or guarded it its own way keeps its version.
+      if (list.some((group) => ((group.hooks as Record<string, unknown>[] | undefined) ?? []).some(isOurs))) continue;
+      list.push({ ...(matcher ? { matcher } : {}), hooks: [spec.handler(matcher)] });
+    } else {
+      if (list.some(isOurs)) continue;
+      list.push(spec.handler(matcher));
     }
-    // Any command that runs the capture hook counts, so a repo that wrapped or guarded it its own way keeps its version.
-    if (list.some((e) => e.hooks?.some((h) => h.command?.includes(HOOK_INVOCATION)))) continue;
-    list.push(entry(matcher));
     changed = true;
   }
   if (!changed) return "present";
-  await mkdir(join(topLevel, ".claude"), { recursive: true });
+  await mkdir(dirname(file), { recursive: true });
   await writeFile(file, JSON.stringify(settings, null, indent) + "\n");
   return "written";
 }

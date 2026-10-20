@@ -25,6 +25,8 @@ beforeEach(async () => {
   sh(["init", "-q", "-b", "main"]);
   sh(["config", "user.name", "Test"]);
   sh(["config", "user.email", "test@example.com"]);
+  // A cloud session sets this, and Graft would fill every change's ref from it.
+  delete process.env.CLAUDE_CODE_REMOTE_SESSION_ID;
   graft = new Graft(dir);
 });
 
