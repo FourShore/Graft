@@ -31,7 +31,7 @@ Graft-Evidence: 1 command, 1 passed
 ```
 
 It is all in the commit message, as trailers and an `Evidence:` block, so git,
-GitHub and your tools keep working as they are. Three things hold the line:
+GitHub and your tools keep working as they are. Four things hold the line:
 
 - **The gate.** A commit with no evidence, or without the checks the policy
   names for the files it touches, is refused: by `graft land`, and by a plain
@@ -43,6 +43,11 @@ GitHub and your tools keep working as they are. Three things hold the line:
   Gemini CLI record the prompt as the task and every test, build or lint run
   as evidence, with the exit code the agent's own harness reported, so the
   record exists whether or not the agent remembers Graft.
+- **The review.** A rule can require a review next to the tests: an
+  independent model reads the diff and the task, and its verdict, findings
+  and instructions (by hash) go into the record. The check runs it again in
+  your CI with your key, on a model other than the author's if you ask, and
+  that verdict is the one that counts.
 
 ```
 npm install -g @fourshore/graft
