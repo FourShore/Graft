@@ -47,6 +47,20 @@ const TOKEN_PATTERNS: [RegExp, string | ((...m: string[]) => string)][] = [
 ];
 
 /**
+ * A prompt as a captured task may keep it: links become `[link to host]` and
+ * email addresses `[email]`, since a prompt carries ticket URLs, document
+ * links and people's addresses that would otherwise become pushed history.
+ * The host is kept so a reader still knows where the link pointed. A task
+ * named with `graft start` is the author's own words and is not scrubbed.
+ */
+export function scrubPrompt(text: string): string {
+  return text
+    // Sentence punctuation after a link is the sentence's, not the link's.
+    .replace(/\b[a-z][a-z0-9+.-]*:\/\/(?:[^\s/@]*@)?([^\s/:?#)\]>"',;]+)[^\s)\]>"']*?([.,;:!?]*)(?=[\s)\]>"']|$)/gi, (_m, host: string, tail: string) => `[link to ${host.toLowerCase().replace(/\.+$/, "")}]${tail}`)
+    .replace(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g, "[email]");
+}
+
+/**
  * Replace every occurrence of a secret-looking env value with a marker naming
  * the variable, and every well-known credential format with a marker naming
  * its kind. Applied to everything a record keeps: task, plan, commands,

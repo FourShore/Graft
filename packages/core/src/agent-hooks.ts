@@ -1,4 +1,4 @@
-import { commandOf, exitCodeOf, int, objectOf, quoteDir, str, textOf, type CaptureAgent, type CaptureEvent, type CaptureOutcome } from "./capture-hook.js";
+import { commandOf, exitCodeFrom, exitCodeOf, int, objectOf, quoteDir, str, textOf, type CaptureAgent, type CaptureEvent, type CaptureOutcome, type Json } from "./capture-hook.js";
 import { normalizeClaudeCode, type ClaudeCodeEvent } from "./claude-code.js";
 
 /**
@@ -66,11 +66,11 @@ function normalizeCodex(p: Payload): CaptureEvent {
   const input = objectOf(p.tool_input);
   // Codex's reference leaves `tool_response` tool-specific; the exit code is read from wherever it is, or the run is not recorded.
   const response = p.tool_response ?? p.error;
-  const exitCode = event === "PostToolUse" && response === undefined ? 0 : exitCodeOf(response);
+  const code = event === "PostToolUse" && response === undefined ? { exitCode: 0 } : codeOf(response);
   return {
     kind: "run",
     command,
-    exitCode,
+    ...code,
     output: textOf(response),
     ...cwdOf(p),
     ...common,
@@ -90,7 +90,7 @@ function normalizeCursor(p: Payload): CaptureEvent {
     // This event carries the command and its output but no exit code; postToolUse (matcher Shell) does.
     const command = (str(p, "command") ?? "").trim();
     if (!command) return { kind: "ignore", reason: "no command" };
-    return { kind: "run", command, exitCode: exitCodeOf(p.output), output: textOf(p.output), ...cwdOf(p), ...common, ...durationOf(p) };
+    return { kind: "run", command, ...codeOf(p.output), output: textOf(p.output), ...cwdOf(p), ...common, ...durationOf(p) };
   }
   if (event !== "postToolUse" && event !== "postToolUseFailure") return { kind: "ignore", reason: `event ${event}` };
   const tool = str(p, "tool_name") ?? "";
@@ -104,7 +104,7 @@ function normalizeCursor(p: Payload): CaptureEvent {
   return {
     kind: "run",
     command,
-    exitCode: exitCodeOf(result),
+    ...codeOf(result),
     output: textOf(result),
     ...cwdOf(p),
     ...common,
@@ -133,7 +133,7 @@ function normalizeCopilot(p: Payload): CaptureEvent {
   return {
     kind: "run",
     command,
-    exitCode: exitCodeOf(result),
+    ...codeOf(result),
     output: textOf(result),
     ...cwdOf(p),
     ...common,
@@ -189,6 +189,16 @@ function modelOf(p: Payload): { model?: string } {
 function cwdOf(p: Payload): { cwd?: string } {
   const cwd = str(p, "cwd") ?? (Array.isArray(p.workspace_roots) && typeof p.workspace_roots[0] === "string" ? (p.workspace_roots[0] as string) : undefined);
   return cwd ? { cwd } : {};
+}
+
+/**
+ * The exit code for a run event, marked when it was only read from the
+ * output text. Gemini CLI documents its "Exit Code: N" line and is read
+ * directly; for the others such a line may be the program's own.
+ */
+function codeOf(result: Json): { exitCode: number | null; exitCodeFromText?: true } {
+  const { exitCode, fromText } = exitCodeFrom(result);
+  return fromText ? { exitCode, exitCodeFromText: true } : { exitCode };
 }
 
 function durationOf(p: Payload): { durationMs?: number } {

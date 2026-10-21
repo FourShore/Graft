@@ -183,7 +183,13 @@ put in the commit message (`Claude-Session` from Claude Code, `Agent-Logs-Url`
 from Copilot, `Entire-Checkpoint` from Entire, recorded as `entire:<id>`), so
 the task link is there whichever tool wrote the commit.
 `task` says what the record may hold about the task. The default, `"captured"`,
-lets the capture hooks record the prompt as the task. `"named"` keeps every
+lets the capture hooks record the prompt as the task, with every link cut to
+its host (`[link to linear.app]`) and every email address dropped, since a
+prompt carries ticket URLs and people's addresses that would otherwise
+become pushed history; a task named with `graft start` is kept as written.
+This is a one-line task, never the transcript: tools that keep whole
+sessions in the repository (Entire stores them on a branch, and warns that a
+public repo exposes them) record far more. `"named"` keeps every
 prompt out of the record: the hooks still open a change and record the runs,
 but the task is a placeholder until `graft start "<task>"` names it, and the
 gate refuses to land a placeholder with no override. Use it where prompts
@@ -279,9 +285,13 @@ remembers Graft:
   in a subdirectory gets that `cd` in front, so it re-runs on another
   machine. A run whose exit code is not the check's (`npm test | tail`,
   `npm test || true`, `npm test; echo`, a background run) is not recorded,
-  and neither is one whose harness reported no exit code at all, which Cursor
-  and Copilot CLI sometimes do; the hook tells the agent so, and to run it
-  with `graft evidence <name>` or `set -o pipefail`. A change opened by one
+  and neither is one whose harness reported no exit code at all; the hook
+  tells the agent so, and to run it with `graft evidence <name>` or
+  `set -o pipefail`. Where the exit code is only an "Exit code: N" line in
+  the tool's output (Copilot CLI never sends a field for it), the last such
+  line is read and the run is recorded as attested: it shows in the record,
+  but a rule does not accept it, since the program could have printed that
+  line itself. Gemini CLI documents its own line, so its runs are passes. A change opened by one
   session does not take runs from another session in the same worktree. A
   short reply such as "continue" does not open a change with "continue" as
   its task: the session's last real prompt is used. The hook files are

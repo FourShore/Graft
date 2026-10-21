@@ -4,6 +4,7 @@ import type { Graft } from "./graft.js";
 import type { ChangeAuthor } from "./record.js";
 import { analyzeCommand, relativizeCommand } from "./capture.js";
 import { matchCatalog, readPolicy } from "./policy.js";
+import { scrubPrompt } from "./redact.js";
 
 /**
  * The agents whose hooks Graft can read. Each one hands its events to the
@@ -38,6 +39,11 @@ export type CaptureEvent =
       command: string;
       /** The exit code the agent reported, or null when its payload carries none (the run is then not recorded, and the agent is told). */
       exitCode: number | null;
+      /**
+       * Set when no field carried the exit code and it was read from an "Exit code: N" line in the tool's text, which
+       * the program's own output could have printed: the run is then recorded as attested, a claim rather than a pass.
+       */
+      exitCodeFromText?: boolean;
       output: string;
       /** Where the command ran, when the agent says; a run in a subdirectory is recorded with the `cd` in front. */
       cwd?: string;
@@ -99,10 +105,11 @@ export async function handleCaptureEvent(graft: Graft, agent: CaptureAgent, even
     // Under `task: "named"` the prompt is never written down, not even as the session's task.
     if (named) return { action: "ignored", reason: 'policy task: "named" keeps prompts out of the record' };
     const ack = ACK.test(task);
-    if (!ack) await graft.rememberSessionTask(event.sessionId, clipTask(task));
+    // A prompt is written into pushed history; links and addresses in it name customers and private systems.
+    if (!ack) await graft.rememberSessionTask(event.sessionId, clipTask(scrubPrompt(task)));
     if (await graft.status()) return { action: "ignored", reason: "a change is already open" };
     // "continue" after a land is the same task going on; keep it, or wait for a run or a graft start to name it.
-    const taskName = ack ? await graft.sessionTask(event.sessionId) : clipTask(task);
+    const taskName = ack ? await graft.sessionTask(event.sessionId) : clipTask(scrubPrompt(task));
     if (!taskName) return { action: "ignored", reason: "a short reply, not a task" };
     const record = await graft.start({ task: taskName, author: author(), capturedBy: agent, ...session });
     return { action: "started", id: record.id, task: record.task };
@@ -159,6 +166,7 @@ export async function handleCaptureEvent(graft: Graft, agent: CaptureAgent, even
     opened = true;
   }
   const label = name ?? `${kind} (captured)`;
+  const attested = Boolean(event.exitCodeFromText);
   const ev = await graft.evidenceCaptured({
     command,
     exitCode: event.exitCode,
@@ -167,10 +175,17 @@ export async function handleCaptureEvent(graft: Graft, agent: CaptureAgent, even
     label,
     via: agent,
     ...(name ? { name } : {}),
+    ...(attested ? { attested: true } : {}),
   });
   const now = (await graft.status())!;
-  const context =
-    opened && named ? `graft: change ${now.id} was opened by this run without a task, because the policy keeps prompts out of the record. Run graft start "<task>" before committing.` : undefined;
+  const notes: string[] = [];
+  if (opened && named) notes.push(`graft: change ${now.id} was opened by this run without a task, because the policy keeps prompts out of the record. Run graft start "<task>" before committing.`);
+  if (attested) {
+    notes.push(
+      `graft: ${info.title} reported no exit code for this ${what} run, so it was recorded as attested (exit ${event.exitCode}, read from the tool's output), which a policy rule does not accept. Run ${byHand} to record a pass that counts.`,
+    );
+  }
+  const context = notes.length ? notes.join("\n") : undefined;
   return {
     action: "recorded",
     id: now.id,
@@ -209,7 +224,7 @@ export function clipTask(task: string): string {
 
 /* ---- Helpers the adapters share: agents disagree on field names and nesting. ---- */
 
-type Json = unknown;
+export type Json = unknown;
 
 /** A string at any of `keys` on `obj`, first one found. */
 export function str(obj: Json, ...keys: string[]): string | undefined {
@@ -255,21 +270,32 @@ export function objectOf(v: Json): Record<string, unknown> | undefined {
  * `result`), or an "Exit code: N" line in its text. Null when none is there.
  */
 export function exitCodeOf(result: Json): number | null {
+  return exitCodeFrom(result).exitCode;
+}
+
+/**
+ * `exitCodeOf`, saying where the code came from: a field the agent set, or a
+ * line in the text. A harness appends its line after the output, so the last
+ * one is taken: a test that prints "exit code: 1" for a child process it
+ * expected to fail does not decide the run.
+ */
+export function exitCodeFrom(result: Json): { exitCode: number | null; fromText: boolean } {
   const obj = objectOf(result);
   if (obj) {
     const direct = int(obj, "exit_code", "exitCode", "exit_status", "status_code", "returncode");
-    if (direct !== null) return direct;
+    if (direct !== null) return { exitCode: direct, fromText: false };
     for (const key of ["metadata", "result", "output", "data"]) {
       const nested = objectOf(obj[key]);
       if (nested) {
         const code = int(nested, "exit_code", "exitCode", "exit_status", "status_code", "returncode");
-        if (code !== null) return code;
+        if (code !== null) return { exitCode: code, fromText: false };
       }
     }
   }
   const text = typeof result === "string" ? result : obj ? textOf(obj) : "";
-  const m = /(?:^|\n)\s*(?:exit[ _]?code|exit status)\s*[:=]?\s*(-?\d+)\b/i.exec(text);
-  return m ? Number(m[1]) : null;
+  const all = [...text.matchAll(/(?:^|\n)\s*(?:exit[ _]?code|exit status)\s*[:=]?\s*(-?\d+)\b/gi)];
+  const last = all.at(-1);
+  return last ? { exitCode: Number(last[1]), fromText: true } : { exitCode: null, fromText: false };
 }
 
 /** The text a tool result carries, from the usual output fields or the whole thing when it is a string. */

@@ -81,7 +81,10 @@ Two kinds in version 1.
   Graft or a harness saw, though `graft check --rerun` runs it. With `via`
   set (for example `"claude-code"`) a harness reported the run through a
   hook, with its own exit code and output: a pass or fail like any other,
-  marked only so a reader knows who ran it. With `name` set the run is one
+  marked only so a reader knows who ran it. A harness run whose exit code
+  came only from an "Exit code: N" line in the tool's output, not from a
+  field of the payload, is recorded with `via` and `attested: true`, since
+  the program could have printed that line. With `name` set the run is one
   of the policy's named commands (`graft evidence test`, or a captured
   command that matched the catalog); the message line carries the name in
   place of any free label, so a record rebuilt from the message still
@@ -306,7 +309,8 @@ used when its session variable is set, and otherwise a `Claude-Session`,
 `Agent-Logs-Url` or `Entire-Checkpoint` trailer already in the commit message's
 trailer paragraph
 (the last as `entire:<id>`). `task`, optional, is `"captured"` (the default:
-the capture hooks record the prompt as the task) or `"named"` (they never do;
+the capture hooks record the prompt as the task, with links cut to
+`[link to <host>]` and email addresses to `[email]`) or `"named"` (they never do;
 a change they open carries a placeholder task that `land` refuses until
 `graft start` names it, with no override). `captureCommands`, optional,
 is a list of regular expressions (as strings) for commands the capture hooks

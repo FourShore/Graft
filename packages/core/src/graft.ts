@@ -127,6 +127,8 @@ export interface CapturedRun {
   name?: string;
   /** Which harness reported it, e.g. "claude-code". */
   via: string;
+  /** The harness gave no exit code and it was read from the output text: a claim, recorded as attested. */
+  attested?: boolean;
 }
 
 export interface PrepareResult {
@@ -557,6 +559,7 @@ export class Graft {
       label: run.label === undefined ? undefined : redact(run.label),
       ...(run.name ? { name: run.name } : {}),
       via: run.via,
+      ...(run.attested ? { attested: true as const } : {}),
       ...(await this.treeField()),
     };
     await this.appendEvidence(open, ev);
