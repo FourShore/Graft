@@ -1509,6 +1509,13 @@ describe("the reusable action", () => {
     const action = await readFile(join(root, "action.yml"), "utf8");
     expect(action).toMatch(new RegExp(`\\n  version:\\n    description: [^\\n]*\\n    default: "${version.replace(/\./g, "\\.")}"\\n`));
   });
+
+  it("uses only the contexts a composite action can read, since anything else fails the whole action at load", async () => {
+    const action = await readFile(join(process.cwd(), "action.yml"), "utf8");
+    const contexts = [...action.matchAll(/\$\{\{\s*([a-z_]+)/g)].map((m) => m[1]);
+    expect(contexts.length).toBeGreaterThan(0);
+    for (const c of contexts) expect(["inputs", "github", "steps", "runner", "env", "job", "strategy", "matrix"]).toContain(c);
+  });
 });
 
 describe("sync", () => {
