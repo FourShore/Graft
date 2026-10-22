@@ -12,6 +12,7 @@ import { handleClaudeCodeEvent, promptTask } from "../src/claude-code.js";
 import { detectPolicy } from "../src/detect.js";
 import { gitHooksInstalled, installHooks, CLAUDE_SETTINGS_PATH, HOOK_COMMAND } from "../src/hooks.js";
 import { evidenceLines, parseMessageRecord, type Evidence } from "../src/record.js";
+import { DEFAULT_REVIEW_PROMPT, REVIEW_DIFF_CAP, capDiff, parseReviewResult, sameModelReason, sha256 } from "../src/review.js";
 import { existsSync } from "node:fs";
 import { chmod } from "node:fs/promises";
 
@@ -303,8 +304,8 @@ describe("command catalog and rules", () => {
     const pass = (extra: object) => ({ kind: "command" as const, at, exitCode: 0, durationMs: 1, output: "", command: "x", ...extra });
     expect(evaluateRules(policy, ["README.md"], [])).toEqual([]);
     expect(evaluateRules(policy, ["cmd/a.go", "README.md"], [])).toEqual([
-      { name: "test", command: "go test  ./...", files: ["cmd/a.go"] },
-      { name: "vet386", command: "env GOOS=windows GOARCH=386 go vet ./...", files: ["cmd/a.go"] },
+      { name: "test", command: "go test  ./...", kind: "command", files: ["cmd/a.go"] },
+      { name: "vet386", command: "env GOOS=windows GOARCH=386 go vet ./...", kind: "command", files: ["cmd/a.go"] },
     ]);
     // Covered by name, by label (a record rebuilt from the message), or by the catalog's command text.
     expect(evaluateRules(policy, ["a.go"], [pass({ name: "test" }), pass({ label: "vet386" })])).toEqual([]);
@@ -330,7 +331,7 @@ describe("command catalog and rules", () => {
   it("rejects a policy whose rule names a command the catalog lacks", async () => {
     await mkdir(join(dir, ".graft"), { recursive: true });
     await writeFile(join(dir, ".graft/policy.json"), JSON.stringify({ version: 1, rules: [{ paths: ["**/*.go"], require: ["test"] }] }));
-    await expect(readPolicy(dir)).rejects.toThrow(/requires "test", which "commands" does not define/);
+    await expect(readPolicy(dir)).rejects.toThrow(/requires "test", which neither "commands" nor "reviews" defines/);
     await writeFile(join(dir, ".graft/policy.json"), JSON.stringify({ version: 1, commands: { "bad name": "x" } }));
     await expect(readPolicy(dir)).rejects.toThrow(/command name "bad name"/);
   });
@@ -347,7 +348,7 @@ describe("command catalog and rules", () => {
     );
     expect(await graft.catalog()).toEqual({ test: "echo tests ok", lint: "echo lint ok" });
     await graft.start({ task: "catalog", ref: "https://example.com/thread/1" });
-    await expect(graft.evidenceNamed("nope")).rejects.toThrow(/No command named "nope".*Known: test, lint/);
+    await expect(graft.evidenceNamed("nope")).rejects.toThrow(/No command or review named "nope".*Known: test, lint/);
     await mkdir(join(dir, "src"), { recursive: true });
     await writeFile(join(dir, "src", "a.ts"), "a\n");
     await writeFile(join(dir, "README.md"), "r\n");
@@ -941,7 +942,7 @@ describe("capture", () => {
     await mkdir(hooksDir, { recursive: true });
     await writeFile(join(hooksDir, "post-commit"), "#!/bin/sh\necho mine\n");
     const first = await installHooks(graft.git, dir);
-    expect(first).toMatchObject({ claudeCode: "written", git: { "prepare-commit-msg": "written", "post-commit": "foreign" } });
+    expect(first).toMatchObject({ claudeCode: "written", git: { "prepare-commit-msg": "written", "commit-msg": "written", "post-commit": "foreign" } });
     const settings = JSON.parse(await readFile(join(dir, CLAUDE_SETTINGS_PATH), "utf8"));
     expect(Object.keys(settings.hooks)).toEqual(["UserPromptSubmit", "PostToolUse", "PostToolUseFailure"]);
     expect(settings.hooks.PostToolUse[0]).toMatchObject({ matcher: "Bash", hooks: [{ type: "command", command: HOOK_COMMAND }] });
@@ -949,7 +950,7 @@ describe("capture", () => {
     expect(await readFile(join(hooksDir, "prepare-commit-msg"), "utf8")).toContain("graft hook prepare-commit-msg");
 
     const second = await installHooks(graft.git, dir);
-    expect(second).toMatchObject({ claudeCode: "present", git: { "prepare-commit-msg": "present", "post-commit": "foreign" } });
+    expect(second).toMatchObject({ claudeCode: "present", git: { "prepare-commit-msg": "present", "commit-msg": "present", "post-commit": "foreign" } });
 
     // Other settings survive and the hooks are not added twice.
     await writeFile(join(dir, CLAUDE_SETTINGS_PATH), JSON.stringify({ permissions: { allow: ["Bash(npm test)"] }, hooks: { PostToolUse: [{ matcher: "Edit", hooks: [{ type: "command", command: "prettier" }] }] } }));
@@ -1471,7 +1472,11 @@ describe("policy", () => {
   it("parses a policy read from a commit with the same defaults and validation as the file", () => {
     expect(parsePolicy('{"requireEvidence":"command"}')).toEqual({ version: 1, requireEvidence: "command" });
     expect(() => parsePolicy('{"version":2}')).toThrow(/Unsupported policy version/);
-    expect(() => parsePolicy('{"rules":[{"paths":["src/**"],"require":["test"]}]}')).toThrow(/does not define/);
+    expect(() => parsePolicy('{"rules":[{"paths":["src/**"],"require":["test"]}]}')).toThrow(/neither "commands" nor "reviews" defines/);
+    // A broken file is named, so the message says what to open; a value the gate would read as true is refused.
+    expect(() => parsePolicy('{ "version": 1, ')).toThrow(/\.graft\/policy\.json is not valid JSON/);
+    expect(() => parsePolicy("[]")).toThrow(/must hold a JSON object/);
+    expect(() => parsePolicy('{"requireEvidence":"yes"}')).toThrow(/"requireEvidence" must be true, false or "command"/);
   });
 
   it("rejects an unknown policy version", async () => {
@@ -1503,6 +1508,13 @@ describe("the reusable action", () => {
     const { version } = JSON.parse(await readFile(join(root, "package.json"), "utf8")) as { version: string };
     const action = await readFile(join(root, "action.yml"), "utf8");
     expect(action).toMatch(new RegExp(`\\n  version:\\n    description: [^\\n]*\\n    default: "${version.replace(/\./g, "\\.")}"\\n`));
+  });
+
+  it("uses only the contexts a composite action can read, since anything else fails the whole action at load", async () => {
+    const action = await readFile(join(process.cwd(), "action.yml"), "utf8");
+    const contexts = [...action.matchAll(/\$\{\{\s*([a-z_]+)/g)].map((m) => m[1]);
+    expect(contexts.length).toBeGreaterThan(0);
+    for (const c of contexts) expect(["inputs", "github", "steps", "runner", "env", "job", "strategy", "matrix"]).toContain(c);
   });
 });
 
@@ -1743,8 +1755,8 @@ describe("repeated runs in the message", () => {
     ]);
     const policy = { version: 1 as const, requireEvidence: true, commands: { lint: "npm run lint" }, rules: [{ paths: ["src/**"], require: ["lint"] }] };
     // The latest run is the verdict: a pass before a failure of the same command does not meet the rule, in the note or the message.
-    expect(evaluateRules(policy, ["src/a.ts"], rebuilt.evidence)).toEqual([{ name: "lint", command: "npm run lint", files: ["src/a.ts"] }]);
-    expect(evaluateRules(policy, ["src/a.ts"], [run(0), run(0), run(2)])).toEqual([{ name: "lint", command: "npm run lint", files: ["src/a.ts"] }]);
+    expect(evaluateRules(policy, ["src/a.ts"], rebuilt.evidence)).toEqual([{ name: "lint", command: "npm run lint", kind: "command", files: ["src/a.ts"] }]);
+    expect(evaluateRules(policy, ["src/a.ts"], [run(0), run(0), run(2)])).toEqual([{ name: "lint", command: "npm run lint", kind: "command", files: ["src/a.ts"] }]);
     expect(evaluateRules(policy, ["src/a.ts"], [run(2), run(0)])).toEqual([]);
   });
 
@@ -2112,5 +2124,249 @@ describe("built-in credential files", () => {
     for (const p of ["prod.tfvars.example", "src/config.go", "docs/kube/config.md", "aws/credentials.md"]) {
       expect([p, looksLikeSecretFile(p)]).toEqual([p, false]);
     }
+  });
+});
+
+describe("what a fresh audit found", () => {
+  const withHooks = async () => {
+    const cli = join(process.cwd(), "packages", "cli", "dist", "cli.js");
+    if (!existsSync(cli)) return null; // needs a build; npm test runs after npm run build
+    const bin = join(dir, ".bin");
+    await mkdir(bin, { recursive: true });
+    await writeFile(join(bin, "graft"), `#!/bin/sh\nexec node ${JSON.stringify(cli)} "$@"\n`);
+    await chmod(join(bin, "graft"), 0o755);
+    await writeFile(join(dir, ".gitignore"), ".bin/\n");
+    await installHooks(graft.git, dir);
+    const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, GRAFT_ALLOW_NO_EVIDENCE: "", GIT_EDITOR: "true" };
+    return (args: string[]) => execFileSync("git", args, { cwd: dir, encoding: "utf8", env, stdio: ["ignore", "pipe", "pipe"] }).trim();
+  };
+
+  it("aborts an editor closed without a subject instead of committing the record as the message", async () => {
+    const git = await withHooks();
+    if (!git) return;
+    await writeFile(join(dir, "a.txt"), "a\n");
+    git(["add", "-A"]);
+    git(["commit", "-q", "-m", "base"]);
+    const open = await graft.start({ task: "untitled" });
+    await graft.evidenceNote("ok");
+    await writeFile(join(dir, "a.txt"), "b\n");
+    git(["add", "a.txt"]);
+    // GIT_EDITOR=true leaves the message as prepare-commit-msg wrote it: the record and nothing else.
+    expect(() => git(["commit", "-q"])).toThrow(/only the Graft record/);
+    expect(git(["log", "-1", "--format=%s"])).toBe("base");
+    expect((await graft.status())?.id).toBe(open.id);
+    // With a subject the same commit goes through.
+    git(["commit", "-q", "-m", "titled"]);
+    expect(git(["log", "-1", "--format=%s"])).toBe("titled");
+    expect(git(["log", "-1", "--format=%B"])).toContain(`Graft-Change: ${open.id}`);
+    expect(await graft.status()).toBeNull();
+  });
+
+  it("leaves fixup and squash commits without a record, so autosquash does not fold one change's record into another", async () => {
+    const git = await withHooks();
+    if (!git) return;
+    await writeFile(join(dir, "a.txt"), "a\n");
+    git(["add", "-A"]);
+    git(["commit", "-q", "-m", "base"]);
+    await graft.start({ task: "first" });
+    await graft.evidenceNote("ok");
+    await writeFile(join(dir, "a.txt"), "b\n");
+    git(["add", "a.txt"]);
+    git(["commit", "-q", "-m", "first commit"]);
+    const first = git(["rev-parse", "HEAD"]);
+    const open = await graft.start({ task: "second" });
+    await graft.evidenceNote("ok");
+    await writeFile(join(dir, "a.txt"), "c\n");
+    git(["add", "a.txt"]);
+    git(["commit", "-q", "--fixup", first]);
+    expect(git(["log", "-1", "--format=%B"])).not.toContain("Graft-Change");
+    expect((await graft.status())?.id).toBe(open.id);
+    await writeFile(join(dir, "a.txt"), "d\n");
+    git(["add", "a.txt"]);
+    git(["commit", "-q", "-m", "squash! first commit"]);
+    expect(git(["log", "-1", "--format=%B"])).not.toContain("Graft-Change");
+  });
+
+  it("reads the message when the note on a commit names another change", async () => {
+    await graft.start({ task: "first" });
+    await graft.evidenceNote("ok");
+    await writeFile(join(dir, "a.txt"), "a\n");
+    const first = await graft.land({ all: true });
+    await graft.start({ task: "second" });
+    await graft.evidenceNote("ok");
+    await writeFile(join(dir, "a.txt"), "b\n");
+    const second = await graft.land({ all: true });
+    // A rewrite moved the first change's note onto the second's commit.
+    sh(["notes", "--ref=refs/notes/graft", "add", "-f", "-m", JSON.stringify(first.record), second.commit]);
+    const entry = await graft.show(second.commit);
+    expect(entry?.recordSource).toBe("message");
+    expect(entry?.record?.task).toBe("second");
+  });
+
+  it("lands a staged deletion of a credential file without an override", async () => {
+    await writeFile(join(dir, ".env"), "SECRET=1\n");
+    sh(["add", "-f", ".env"]);
+    sh(["commit", "-q", "-m", "oops"]);
+    await graft.start({ task: "stop tracking .env" });
+    await graft.evidenceNote("checked");
+    sh(["rm", "-q", "--cached", ".env"]);
+    const { commit, record } = await graft.land();
+    expect(sh(["show", "--format=", "--name-status", commit])).toBe("D\t.env");
+    expect(record.overrides).toBeUndefined();
+    // Re-adding it is still a leak.
+    await graft.start({ task: "add it back" });
+    await graft.evidenceNote("checked");
+    sh(["add", "-f", ".env"]);
+    await expect(graft.land()).rejects.toThrow(/look like credentials: \.env\./);
+  });
+
+  it("keeps the author a hook captured when graft start names none, and the task when only a placeholder arrives", async () => {
+    const author = { kind: "agent" as const, name: "codex", model: "gpt-5-codex" };
+    await graft.start({ task: "captured prompt", author, capturedBy: "codex", sessionId: "s1" });
+    // The CLI passes an author with nothing set when no --author or --human was given.
+    const named = await graft.start({ task: "the real task", author: { name: undefined, kind: undefined } });
+    expect(named.author).toEqual(author);
+    expect(named.task).toBe("the real task");
+    // A racing hook brings a placeholder; the task that is there stays.
+    const raced = await graft.start({ task: "(task not named)", taskPlaceholder: true, author, capturedBy: "codex", sessionId: "s1" });
+    expect(raced.task).toBe("the real task");
+    expect(raced.taskPlaceholder).toBeUndefined();
+    // --human is an explicit claim and wins.
+    const human = await graft.start({ task: "the real task", author: { name: undefined, kind: "human" } });
+    expect(human.author.kind).toBe("human");
+  });
+
+  it("writes Graft's trailers once even when the message already carries one", async () => {
+    await writeFile(join(dir, "a.txt"), "a\n");
+    sh(["add", "-A"]);
+    sh(["commit", "-q", "-m", "base"]);
+    const msgFile = join(dir, ".git", "MSG");
+    await graft.start({ task: "trailers", ref: "https://example/task/1" });
+    await graft.evidenceNote("ok");
+    await writeFile(join(dir, "a.txt"), "b\n");
+    sh(["add", "a.txt"]);
+    await writeFile(msgFile, "Second\n\nGraft-Task-Ref: https://example/task/9\nCo-Authored-By: A <a@b>\n");
+    expect((await graft.prepareCommitMessage(msgFile, "message")).applied).toBe(true);
+    const written = await readFile(msgFile, "utf8");
+    expect(written.match(/^Graft-Task-Ref:/gm)).toHaveLength(1);
+    expect(written).toContain("Graft-Task-Ref: https://example/task/1");
+    expect(written).toMatch(/Co-Authored-By: A <a@b>\n$/);
+  });
+});
+
+describe("review evidence", () => {
+  const reviewer = `node ${JSON.stringify(join(process.cwd(), "packages", "core", "test", "fake-reviewer.mjs"))}`;
+  const policyWith = async (reviews: object, extra: object = {}) => {
+    await mkdir(join(dir, ".graft"), { recursive: true });
+    await writeFile(join(dir, ".graft/policy.json"), JSON.stringify({ version: 1, reviews, rules: [{ paths: ["src/**"], require: Object.keys(reviews) }], ...extra }));
+  };
+  const change = async (content = "export const a = 1;\n") => {
+    await mkdir(join(dir, "src"), { recursive: true });
+    await writeFile(join(dir, "src", "a.ts"), content);
+  };
+  beforeEach(() => {
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.FAKE_MODEL;
+    delete process.env.FAKE_NIT;
+  });
+
+  it("validates the policy's reviews and lets rules require them", () => {
+    expect(() => parsePolicy('{"reviews":{"code":{}},"rules":[{"paths":["src/**"],"require":["code"]}]}')).not.toThrow();
+    expect(() => parsePolicy('{"commands":{"code":"npm test"},"reviews":{"code":{}}}')).toThrow(/both a command and a review/);
+    expect(() => parsePolicy('{"reviews":{"code":{"model":""}}}')).toThrow(/"model" must be a non-empty string/);
+    expect(() => parsePolicy('{"reviews":{"code":{"differentModel":"yes"}}}')).toThrow(/"differentModel" must be true or false/);
+    expect(() => parsePolicy('{"reviews":{"code":{"temperature":1}}}')).toThrow(/unknown key "temperature"/);
+    expect(() => parsePolicy('{"reviews":{"code":[]}}')).toThrow(/must be an object/);
+    expect(() => parsePolicy('{"rules":[{"paths":["src/**"],"require":["code"]}]}')).toThrow(/neither "commands" nor "reviews" defines/);
+  });
+
+  it("records a review of the working tree, which meets a rule, is written into the message and read back from it", async () => {
+    await policyWith({ code: { command: reviewer } });
+    sh(["add", "-A"]);
+    sh(["commit", "-q", "-m", "policy"]);
+    await graft.start({ task: "add a", author: { kind: "agent", name: "codex", model: "gpt-5-codex" } });
+    await expect(graft.evidenceReview("code")).rejects.toThrow(/Nothing to review/);
+    await change();
+    const ev = await graft.evidenceNamed("code", "first look");
+    expect(ev).toMatchObject({ kind: "review", name: "code", label: "first look", model: "fake-reviewer", verdict: "approve", findings: [], promptSha256: sha256(DEFAULT_REVIEW_PROMPT) });
+    expect(ev.kind === "review" && ev.summary).toMatch(/Reviewed code for: add a \(\d+ chars of instructions, env code\)/);
+    expect(ev.kind === "review" && ev.tree).toMatch(/^[0-9a-f]{40}$/);
+    expect(evidenceSummary([ev])).toBe("1 review, 1 approved");
+    const { commit, record } = await graft.land({ all: true });
+    const message = sh(["log", "-1", "--format=%B", commit]);
+    expect(message).toMatch(/\[review approve code\] fake-reviewer \(prompt [0-9a-f]{8}; 0 findings\)/);
+    expect(message).toContain("Graft-Evidence: 1 review, 1 approved");
+    const rebuilt = parseMessageRecord(message, record.startedAt)!;
+    expect(rebuilt.evidence).toMatchObject([{ kind: "review", label: "code", verdict: "approve", model: "fake-reviewer" }]);
+    expect(evaluateRules(await readPolicy(dir), ["src/a.ts"], rebuilt.evidence)).toEqual([]);
+    expect(evaluateRules(await readPolicy(dir), ["src/a.ts"], rebuilt.evidence, { labelIsName: false })).toMatchObject([{ name: "code", kind: "review" }]);
+  });
+
+  it("refuses to land on a review that requested changes, and on one that approved an earlier tree", async () => {
+    await policyWith({ code: { command: reviewer } });
+    await graft.start({ task: "add a" });
+    await change("export const a = 1; // bug\n");
+    const bad = await graft.evidenceReview("code");
+    expect(bad).toMatchObject({ verdict: "request-changes", findings: [{ severity: "blocker", file: "src.ts", line: 1 }] });
+    await expect(graft.land({ all: true })).rejects.toThrow(/Policy requires an approving review "code" for changes to src\/a\.ts/);
+    await change("export const a = 1;\n");
+    const good = await graft.evidenceReview("code");
+    expect(good.verdict).toBe("approve");
+    await change("export const a = 2;\n");
+    await expect(graft.land({ all: true })).rejects.toThrow(/review "code" last approved before src\/a\.ts changed/);
+    await graft.evidenceReview("code");
+    const { commit } = await graft.land({ all: true });
+    expect(sh(["log", "-1", "--format=%B", commit])).toMatch(/\[review request-changes code\][\s\S]*\[review stale code\][\s\S]*\[review approve code\]/);
+  });
+
+  it("enforces differentModel against the author's model, and reads a prompt file into the record's hash", async () => {
+    await writeFile(join(dir, "REVIEW.md"), "Be harsh.\n");
+    await policyWith({ code: { command: reviewer, differentModel: true, prompt: "REVIEW.md" } });
+    await change();
+    process.env.FAKE_MODEL = "claude-opus-5-5-20260301";
+    await graft.start({ task: "t", author: { kind: "agent", name: "claude-code", model: "claude-opus-5-5" } });
+    await expect(graft.evidenceReview("code")).rejects.toThrow(/the reviewer ran on claude-opus-5-5-20260301, the model that wrote the change/);
+    await graft.start({ task: "t", replace: true, author: { kind: "agent", name: "claude-code" } });
+    await expect(graft.evidenceReview("code")).rejects.toThrow(/model is not recorded/);
+    await graft.start({ task: "t", replace: true, author: { kind: "agent", name: "claude-code", model: "claude-sonnet-5-5" } });
+    const ev = await graft.evidenceReview("code");
+    expect(ev.promptSha256).toBe(sha256("Be harsh.\n"));
+    await graft.start({ task: "t", replace: true, author: { kind: "human", name: "zach" } });
+    process.env.FAKE_MODEL = "anything";
+    expect((await graft.evidenceReview("code")).model).toBe("anything");
+    await policyWith({ code: { command: reviewer, prompt: "missing.md" } });
+    await expect(graft.evidenceReview("code")).rejects.toThrow(/missing\.md does not exist/);
+  });
+
+  it("says why a review did not run: no key for the API, a reviewer that died, or an answer that is not a review", async () => {
+    await change();
+    await graft.start({ task: "t" });
+    await policyWith({ code: {} });
+    await expect(graft.evidenceReview("code")).rejects.toThrow(/needs ANTHROPIC_API_KEY/);
+    await policyWith({ code: { command: reviewer } });
+    process.env.FAKE_DIE = "1";
+    await expect(graft.evidenceReview("code")).rejects.toThrow(/exited 3: reviewer exploded/);
+    delete process.env.FAKE_DIE;
+    process.env.FAKE_GARBAGE = "1";
+    await expect(graft.evidenceReview("code")).rejects.toThrow(/did not answer with JSON: not json/);
+    delete process.env.FAKE_GARBAGE;
+    await expect(graft.evidenceNamed("code", undefined, { exitCode: 0 })).rejects.toThrow(/cannot be attached/);
+    await expect(graft.evidenceNamed("nope")).rejects.toThrow(/No command or review named "nope".*Known: code/);
+    expect((await graft.status())!.evidence).toEqual([]);
+  });
+
+  it("derives the verdict from the findings and keeps only well-formed ones", () => {
+    expect(parseReviewResult('{"verdict":"approve","summary":" ok ","findings":[{"severity":"blocker","text":"bad","file":"a.ts","line":3}]}', "m")).toEqual({
+      model: "m",
+      verdict: "request-changes",
+      summary: "ok",
+      findings: [{ severity: "blocker", file: "a.ts", line: 3, text: "bad" }],
+    });
+    expect(parseReviewResult('{"verdict":"request-changes","summary":"","findings":[{"severity":"nit","text":"meh","line":0}],"model":"x"}', "m")).toMatchObject({ model: "x", verdict: "approve", findings: [{ severity: "nit", text: "meh" }] });
+    expect(() => parseReviewResult('{"findings":[{"severity":"high","text":"x"}]}', "m")).toThrow(/severity "high"/);
+    expect(() => parseReviewResult("[]", "m")).toThrow(/not a JSON object/);
+    expect(sameModelReason({ kind: "human", name: "z" }, "claude-opus-5-5")).toBeNull();
+    expect(sameModelReason({ kind: "agent", name: "c", model: "claude-opus-5-5" }, "claude-sonnet-5-5")).toBeNull();
+    expect(capDiff("x".repeat(REVIEW_DIFF_CAP + 10))).toMatch(/10 more characters of diff were cut/);
   });
 });

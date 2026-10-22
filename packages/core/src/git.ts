@@ -69,6 +69,11 @@ export class Git {
     return splitNul(await this.run(["diff", "--cached", "--name-only", "-z"]));
   }
 
+  /** The staged paths that are deletions: the commit removes them rather than adding content under their name. */
+  async stagedDeletions(): Promise<string[]> {
+    return splitNul(await this.run(["diff", "--cached", "--name-only", "--diff-filter=D", "-z"]));
+  }
+
   async hasWorkingTreeChanges(): Promise<boolean> {
     const out = await this.run(["status", "--porcelain"]);
     return out.length > 0;

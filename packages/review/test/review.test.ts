@@ -471,6 +471,113 @@ describe("check", () => {
     expect(r.ok).toBe(false);
   });
 
+  it("re-runs the reviews the policy names on each commit, and the verdict made here is the one that counts", async () => {
+    const reviewer = `node ${JSON.stringify(join(process.cwd(), "packages", "review", "test", "fake-reviewer.mjs"))}`;
+    delete process.env.ANTHROPIC_API_KEY;
+    const base = await seed({ version: 1, requireEvidence: true, reviews: { code: { command: reviewer } }, rules: [{ paths: ["src/**"], require: ["code"] }] });
+    // 1: reviewed and approved when landed; still fine now.
+    await graft.start({ task: "clean change" });
+    await writeFile(join(dir, "src", "a.ts"), "export const a = 2;\n");
+    await graft.evidenceReview("code");
+    await graft.land({ all: true });
+    // 2: approved when landed, but the diff the check sees has what the reviewer calls a bug.
+    await graft.start({ task: "sneaky change" });
+    await writeFile(join(dir, "src", "a.ts"), "export const a = 3; // fine\n");
+    await graft.evidenceReview("code");
+    await writeFile(join(dir, "src", "a.ts"), "export const a = 3; // bug\n");
+    await graft.land({ all: true, allowNoEvidence: true }); // the stale review is let through by the override
+    // 3: never reviewed; the check's own approval meets the rule.
+    await graft.start({ task: "unreviewed change" });
+    await writeFile(join(dir, "src", "a.ts"), "export const a = 4;\n");
+    await graft.evidenceNote("looked");
+    await graft.land({ all: true, allowNoEvidence: true });
+
+    const claim = await runCheck({ repo: dir, base });
+    expect(claim.commits.map((c) => [c.entry.title, c.ok])).toEqual([
+      ["unreviewed change", false],
+      ["sneaky change", false],
+      ["clean change", true],
+    ]);
+    expect(claim.findings.map((f) => f.kind)).toEqual(["rule-unmet", "rule-unmet"]);
+    expect(claim.reviews).toEqual([]);
+
+    const r = await runCheck({ repo: dir, base, rerun: true });
+    expect(r.reviews.map((x) => [x.name, x.model, x.verdict])).toEqual([
+      ["code", "fake-reviewer", "approve"],
+      ["code", "fake-reviewer", "request-changes"],
+      ["code", "fake-reviewer", "approve"],
+    ]);
+    expect(r.commits.map((c) => [c.entry.title, c.ok, c.rerun])).toEqual([
+      ["unreviewed change", true, "pass"],
+      ["sneaky change", false, "fail"],
+      ["clean change", true, "pass"],
+    ]);
+    expect(r.findings).toMatchObject([{ kind: "review-failed", name: "code", title: "sneaky change", reason: "request-changes", findings: [{ severity: "blocker", file: "src.ts", line: 1 }] }]);
+    expect(r.ok).toBe(false);
+    const text = renderCheckText(r);
+    expect(text).toContain("Re-ran 3 reviews on this checkout:");
+    expect(text).toContain("CHANGES REQUESTED  code: fake-reviewer on");
+    expect(text).toContain('"sneaky change": review "code" by fake-reviewer requested changes: Reviewed code for: sneaky change');
+    expect(text).toContain("blocker src.ts:1: This introduces a bug.");
+    const gh = renderCheckGithub(r);
+    expect(gh.summary).toContain("#### Reviewed again on this checkout");
+    expect(gh.summary).toContain("| ❌ changes requested | code | fake-reviewer |");
+    expect(gh.summary).toContain("  - blocker src.ts:1: This introduces a bug.");
+    expect(gh.annotations.some((a) => a.includes("requested changes"))).toBe(true);
+
+    // The reviewer's model is the author's own where the policy forbids it.
+    await writeFile(join(dir, ".graft/policy.json"), JSON.stringify({ version: 1, requireEvidence: true, reviews: { code: { command: reviewer, differentModel: true } }, rules: [{ paths: ["src/**"], require: ["code"] }] }));
+    sh(["commit", "-q", "-am", "stricter policy"]);
+    const strict = sh(["rev-parse", "HEAD"]);
+    process.env.FAKE_MODEL = "gpt-5-codex";
+    await graft.start({ task: "by codex", author: { kind: "agent", name: "codex", model: "gpt-5-codex" } });
+    await writeFile(join(dir, "src", "a.ts"), "export const a = 5;\n");
+    await graft.evidenceNote("looked");
+    await graft.land({ all: true, allowNoEvidence: true });
+    const same = await runCheck({ repo: dir, base: strict, rerun: true });
+    delete process.env.FAKE_MODEL;
+    expect(same.findings).toMatchObject([{ kind: "review-failed", reason: "same-model" }]);
+    expect(renderCheckText(same)).toContain('review "code" does not count: the reviewer ran on gpt-5-codex, the model that wrote the change');
+  });
+
+  it("reports a review it cannot run as not re-run rather than failed, and a reviewer that dies as a failure", async () => {
+    delete process.env.ANTHROPIC_API_KEY;
+    const base = await seed({ version: 1, requireEvidence: true, reviews: { code: {} }, rules: [{ paths: ["src/**"], require: ["code"] }] });
+    await graft.start({ task: "change" });
+    await writeFile(join(dir, "src", "a.ts"), "export const a = 2;\n");
+    await graft.evidenceNote("looked");
+    await graft.land({ all: true, allowNoEvidence: true });
+    const r = await runCheck({ repo: dir, base, rerun: true });
+    // The rule is still unmet: nothing approved the change, here or when it landed.
+    expect(r.findings.map((f) => f.kind).sort()).toEqual(["review-skipped", "rule-unmet"]);
+    expect(r.findings.find((f) => f.kind === "review-skipped")).toMatchObject({ name: "code", reason: expect.stringContaining("ANTHROPIC_API_KEY") });
+    expect(r.ok).toBe(false);
+    expect(renderCheckText(r)).toContain('Review "code" was not re-run on');
+    // Recorded as approved, the author's claim stands when the check cannot review: not re-run, not failed.
+    await graft.start({ task: "claimed" });
+    await writeFile(join(dir, "src", "a.ts"), "export const a = 3;\n");
+    sh(["commit", "-q", "-am", "claimed\n\nEvidence:\n  [review approve code] someone (prompt deadbeef; 0 findings)\n\nGraft-Change: m5dcmzjm2xq348cq8dy1\nGraft-Task: claimed\nGraft-Author: human:z\nGraft-Evidence: 1 review, 1 approved\n"]);
+    await graft.abandon({ discard: true });
+    const claimed = await runCheck({ repo: dir, base: "HEAD~1", rerun: true });
+    expect(claimed.findings).toMatchObject([{ kind: "review-skipped", name: "code" }]);
+    expect(claimed.ok).toBe(true);
+    expect(renderCheckGithub(claimed).summary).toContain("#### Not re-run");
+    // A reviewer command that dies fails the commit it was reviewing.
+    const reviewer = `node ${JSON.stringify(join(process.cwd(), "packages", "review", "test", "fake-reviewer.mjs"))}`;
+    await writeFile(join(dir, ".graft/policy.json"), JSON.stringify({ version: 1, requireEvidence: true, reviews: { code: { command: reviewer } }, rules: [{ paths: ["src/**"], require: ["code"] }] }));
+    sh(["commit", "-q", "-am", "command reviewer"]);
+    const withCommand = sh(["rev-parse", "HEAD"]);
+    await graft.start({ task: "reviewer dies" });
+    await writeFile(join(dir, "src", "a.ts"), "export const a = 4;\n");
+    await graft.evidenceNote("looked");
+    await graft.land({ all: true, allowNoEvidence: true });
+    process.env.FAKE_DIE = "1";
+    const died = await runCheck({ repo: dir, base: withCommand, rerun: true });
+    delete process.env.FAKE_DIE;
+    expect(died.findings).toMatchObject([{ kind: "review-failed", summary: expect.stringContaining("exited 3: reviewer exploded") }]);
+    expect(died.ok).toBe(false);
+  });
+
   it("re-runs only commands allowed by checkCommands and reports the rest as skipped without failing", async () => {
     const base = await seed({ version: 1, requireEvidence: true, checkCommands: ["echo \\w+"] });
     await graft.start({ task: "x" });

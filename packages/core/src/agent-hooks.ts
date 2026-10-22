@@ -1,4 +1,4 @@
-import { commandOf, exitCodeOf, int, objectOf, str, textOf, type CaptureAgent, type CaptureEvent, type CaptureOutcome } from "./capture-hook.js";
+import { commandOf, exitCodeFrom, exitCodeOf, int, objectOf, quoteDir, str, textOf, type CaptureAgent, type CaptureEvent, type CaptureOutcome, type Json } from "./capture-hook.js";
 import { normalizeClaudeCode, type ClaudeCodeEvent } from "./claude-code.js";
 
 /**
@@ -66,11 +66,11 @@ function normalizeCodex(p: Payload): CaptureEvent {
   const input = objectOf(p.tool_input);
   // Codex's reference leaves `tool_response` tool-specific; the exit code is read from wherever it is, or the run is not recorded.
   const response = p.tool_response ?? p.error;
-  const exitCode = event === "PostToolUse" && response === undefined ? 0 : exitCodeOf(response);
+  const code = event === "PostToolUse" && response === undefined ? { exitCode: 0 } : codeOf(response);
   return {
     kind: "run",
     command,
-    exitCode,
+    ...code,
     output: textOf(response),
     ...cwdOf(p),
     ...common,
@@ -90,18 +90,21 @@ function normalizeCursor(p: Payload): CaptureEvent {
     // This event carries the command and its output but no exit code; postToolUse (matcher Shell) does.
     const command = (str(p, "command") ?? "").trim();
     if (!command) return { kind: "ignore", reason: "no command" };
-    return { kind: "run", command, exitCode: exitCodeOf(p.output), output: textOf(p.output), ...cwdOf(p), ...common, ...durationOf(p) };
+    return { kind: "run", command, ...codeOf(p.output), output: textOf(p.output), ...cwdOf(p), ...common, ...durationOf(p) };
   }
   if (event !== "postToolUse" && event !== "postToolUseFailure") return { kind: "ignore", reason: `event ${event}` };
   const tool = str(p, "tool_name") ?? "";
   if (!/^(Shell|Bash|run_terminal_cmd|terminal)$/i.test(tool)) return { kind: "ignore", reason: `tool ${tool}` };
-  const command = (commandOf(p.tool_input) ?? "").trim();
+  let command = (commandOf(p.tool_input) ?? "").trim();
   if (!command) return { kind: "ignore", reason: "no command" };
+  // The Shell tool runs in `working_directory` under the workspace; record the move so the command re-runs from the root.
+  const dir = str(objectOf(p.tool_input), "working_directory", "workingDirectory");
+  if (dir && !/^\s*cd\s/.test(command)) command = `cd ${quoteDir(dir)} && ${command}`;
   const result = event === "postToolUse" ? p.tool_output : p.error_message;
   return {
     kind: "run",
     command,
-    exitCode: exitCodeOf(result),
+    ...codeOf(result),
     output: textOf(result),
     ...cwdOf(p),
     ...common,
@@ -130,7 +133,7 @@ function normalizeCopilot(p: Payload): CaptureEvent {
   return {
     kind: "run",
     command,
-    exitCode: exitCodeOf(result),
+    ...codeOf(result),
     output: textOf(result),
     ...cwdOf(p),
     ...common,
@@ -153,7 +156,7 @@ function normalizeGemini(p: Payload): CaptureEvent {
   if (!command) return { kind: "ignore", reason: "no command" };
   // The tool runs in `dir_path` under the cwd; record the move so the command re-runs from the root.
   const dir = str(input, "dir_path", "directory");
-  if (dir && !/^\s*cd\s/.test(command)) command = `cd ${/^[\w./-]+$/.test(dir) ? dir : JSON.stringify(dir)} && ${command}`;
+  if (dir && !/^\s*cd\s/.test(command)) command = `cd ${quoteDir(dir)} && ${command}`;
   // The shell tool's result names its exit code ("Exit Code: 0") in the text the model sees.
   const response = objectOf(p.tool_response);
   const llm = response?.llmContent ?? response?.returnDisplay ?? p.tool_response;
@@ -186,6 +189,16 @@ function modelOf(p: Payload): { model?: string } {
 function cwdOf(p: Payload): { cwd?: string } {
   const cwd = str(p, "cwd") ?? (Array.isArray(p.workspace_roots) && typeof p.workspace_roots[0] === "string" ? (p.workspace_roots[0] as string) : undefined);
   return cwd ? { cwd } : {};
+}
+
+/**
+ * The exit code for a run event, marked when it was only read from the
+ * output text. Gemini CLI documents its "Exit Code: N" line and is read
+ * directly; for the others such a line may be the program's own.
+ */
+function codeOf(result: Json): { exitCode: number | null; exitCodeFromText?: true } {
+  const { exitCode, fromText } = exitCodeFrom(result);
+  return fromText ? { exitCode, exitCodeFromText: true } : { exitCode };
 }
 
 function durationOf(p: Payload): { durationMs?: number } {

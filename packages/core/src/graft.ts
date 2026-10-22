@@ -11,6 +11,7 @@ import {
   type ChangeRecord,
   type CommandEvidence,
   type Evidence,
+  type ReviewEvidence,
   type Override,
   OVERRIDES,
   EVIDENCE_OUTPUT_CAP,
@@ -25,15 +26,17 @@ import {
   parseMessageRecord,
   evidenceLines,
   EVIDENCE_HEADER,
+  RECORD_HEADERS,
   trailersFor,
 } from "./record.js";
 import { OpenChangeStore } from "./store.js";
 import { detectPolicy } from "./detect.js";
-import { POLICY_PATH, readPolicy, expandTemplate, expandTrailers, evaluateRules, rulesHit, coveringRuns, type Policy } from "./policy.js";
+import { POLICY_PATH, readPolicy, expandTemplate, expandTrailers, evaluateRules, rulesHit, coveringRuns, coveringReviews, type Policy } from "./policy.js";
+import { ReviewError, ReviewUnavailableError, loadReviewPrompt, runReview, sameModelReason, sha256, type ReviewSpec } from "./review.js";
 import { globToRegExp, looksLikeSecretFile, redact, secretFilesNamed } from "./redact.js";
 import { writeCiWorkflow, type CiResult } from "./ci.js";
 import { writeAgentsSection, type AgentsResult } from "./agents.js";
-import { detectCaptureAgents, installHooks, type HooksResult } from "./hooks.js";
+import { detectCaptureAgents, gitHooksInstalled, installHooks, type HooksResult } from "./hooks.js";
 import { CAPTURE_AGENTS, type CaptureAgent } from "./capture-hook.js";
 import { copyFile, mkdir, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -124,6 +127,8 @@ export interface CapturedRun {
   name?: string;
   /** Which harness reported it, e.g. "claude-code". */
   via: string;
+  /** The harness gave no exit code and it was read from the output text: a claim, recorded as attested. */
+  attested?: boolean;
 }
 
 export interface PrepareResult {
@@ -211,12 +216,16 @@ export class Graft {
       // A hook opened this change from the prompt; an explicit start names the task and keeps what was captured.
       if (!opts.task?.trim()) throw new GraftError("A task is required.");
       if (opts.id !== undefined) open.id = opts.id;
-      open.task = redact(opts.task.trim());
-      delete open.taskPlaceholder;
+      // A second hook racing the first brings only a placeholder; it never replaces the task that is there.
+      if (!opts.taskPlaceholder) {
+        open.task = redact(opts.task.trim());
+        delete open.taskPlaceholder;
+      }
       if (opts.plan?.trim()) open.plan = redact(opts.plan.trim());
       if (opts.ref?.trim()) open.ref = opts.ref.trim();
       open.ref ??= await this.defaultRef();
-      if (opts.author) {
+      // The hook knew who is doing the work (codex, gemini, a model); a `graft start` that names no author keeps that rather than guessing a human from $USER.
+      if (opts.author?.name || opts.author?.kind) {
         const author = defaultAuthor(opts.author);
         // The hook knew the model; keep it while the author is still that agent, not once a human or another tool takes over.
         const same = author.kind === open.author.kind && author.name === open.author.name;
@@ -345,6 +354,16 @@ export class Graft {
   private topLevelCache?: Promise<string>;
 
   /** The working tree root, asked of git once per Graft instance. */
+  /** True when this repo opted into Graft: it has a policy file, or this clone has the git hooks. */
+  async isSetUp(): Promise<boolean> {
+    try {
+      await stat(join(await this.topLevel(), POLICY_PATH));
+      return true;
+    } catch {
+      return gitHooksInstalled(this.git);
+    }
+  }
+
   private topLevel(): Promise<string> {
     this.topLevelCache ??= this.git.topLevel().catch((err) => {
       this.topLevelCache = undefined;
@@ -380,23 +399,92 @@ export class Graft {
     return (await readPolicy(await this.git.topLevel())).commands ?? {};
   }
 
+  /** The policy's named reviews, which `graft evidence <name>` runs like a command. */
+  async reviews(): Promise<Record<string, ReviewSpec>> {
+    return (await readPolicy(await this.git.topLevel())).reviews ?? {};
+  }
+
   /**
    * Run a command from the policy catalog by name and record it under that
-   * name, or with `attest` record a run of it the author already made.
+   * name, or with `attest` record a run of it the author already made. A
+   * name from the policy's reviews runs that review instead.
    */
   async evidenceNamed(name: string, label?: string, attest?: { exitCode: number; output?: string }): Promise<Evidence> {
     const commands = await this.catalog();
     const command = commands[name];
     if (!command) {
-      const known = Object.keys(commands);
+      if ((await this.reviews())[name]) {
+        if (attest) throw new GraftError(`"${name}" is a review, which Graft runs itself; it cannot be attached as a run you made.`);
+        return this.evidenceReview(name, label);
+      }
+      const known = [...Object.keys(commands), ...Object.keys(await this.reviews())];
       throw new GraftError(
         known.length
-          ? `No command named "${name}" in ${POLICY_PATH}. Known: ${known.join(", ")}.`
+          ? `No command or review named "${name}" in ${POLICY_PATH}. Known: ${known.join(", ")}.`
           : `${POLICY_PATH} names no commands, so "${name}" cannot be run by name. Add a "commands" map, or run it with --.`,
       );
     }
     if (attest) return this.evidenceAttested(command, attest.exitCode, attest.output ?? "", label, name);
     return this.evidenceCommand(command, label, name);
+  }
+
+  /**
+   * Run a review the policy names on the working tree as it stands (what
+   * `git diff HEAD` would show, untracked files included) and record its
+   * verdict, findings, model and the hash of the instructions it ran under.
+   * A review the model refuses, or by the author's own model where the
+   * policy forbids that, records nothing and says why.
+   */
+  async evidenceReview(name: string, label?: string): Promise<ReviewEvidence> {
+    const open = await this.requireOpen();
+    const top = await this.topLevel();
+    const spec = (await this.reviews())[name];
+    if (!spec) throw new GraftError(`No review named "${name}" in ${POLICY_PATH}.`);
+    const tree = await this.worktreeHash();
+    const diff = await this.worktreeDiff(tree);
+    if (!diff.trim()) throw new GraftError("Nothing to review: the working tree matches the last commit.");
+    const started = Date.now();
+    let instructions: string;
+    let result: Awaited<ReturnType<typeof runReview>>;
+    try {
+      instructions = await loadReviewPrompt(spec, top);
+      result = await runReview(spec, { name, task: open.task, diff, instructions }, { cwd: top });
+    } catch (err) {
+      if (err instanceof ReviewError || err instanceof ReviewUnavailableError) throw new GraftError(`Review "${name}" did not run: ${err.message}`);
+      throw err;
+    }
+    if (spec.differentModel) {
+      const why = sameModelReason(open.author, result.model);
+      if (why) throw new GraftError(`Review "${name}" does not count: ${why}. The policy asks for a reviewer on a different model (differentModel); set "model" on the review.`);
+    }
+    const ev: ReviewEvidence = {
+      kind: "review",
+      at: new Date().toISOString(),
+      name,
+      ...(label === undefined ? {} : { label: redact(label) }),
+      model: result.model,
+      verdict: result.verdict,
+      summary: redact(result.summary),
+      findings: result.findings.map((f) => ({ ...f, text: redact(f.text) })),
+      promptSha256: sha256(instructions),
+      diffSha256: sha256(diff),
+      durationMs: Date.now() - started,
+      ...(tree ? { tree } : {}),
+    };
+    await this.appendEvidence(open, ev);
+    return ev;
+  }
+
+  /**
+   * The working tree's diff against the last commit, from the hashed tree
+   * (so untracked files and credential exclusions match what a run's `tree`
+   * records); without one, what git diff HEAD shows.
+   */
+  private async worktreeDiff(tree: string | undefined): Promise<string> {
+    const head = await this.git.head();
+    const flags = ["-c", "core.quotePath=false", "diff", "--no-color", "--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/", "-M"];
+    if (tree) return this.git.run([...flags, head ?? EMPTY_TREE, tree], { maxBuffer: DIFF_MAX_BUFFER });
+    return this.git.run([...flags, ...(head ? ["HEAD"] : [EMPTY_TREE])], { maxBuffer: DIFF_MAX_BUFFER });
   }
 
   /**
@@ -471,6 +559,7 @@ export class Graft {
       label: run.label === undefined ? undefined : redact(run.label),
       ...(run.name ? { name: run.name } : {}),
       via: run.via,
+      ...(run.attested ? { attested: true as const } : {}),
       ...(await this.treeField()),
     };
     await this.appendEvidence(open, ev);
@@ -571,10 +660,11 @@ export class Graft {
    * stale for a rule are marked so, so the commit message says `stale` where
    * a reader would otherwise see `pass`.
    */
-  private async staleRules(policy: Policy, staged: string[], evidence: Evidence[]): Promise<{ name: string; command: string; files: string[] }[]> {
+  private async staleRules(policy: Policy, staged: string[], evidence: Evidence[]): Promise<{ name: string; command: string; kind: "command" | "review"; files: string[] }[]> {
     const commands = policy.commands ?? {};
+    const reviews = policy.reviews ?? {};
     const stale = new Map<string, Set<string>>();
-    const staleRuns = new Set<CommandEvidence>();
+    const staleRuns = new Set<CommandEvidence | ReviewEvidence>();
     const diffs = new Map<string, string[] | null>();
     const diffFor = async (tree: string) => {
       if (!diffs.has(tree)) diffs.set(tree, await this.changedSince(tree));
@@ -594,8 +684,11 @@ export class Graft {
         !looksLikeSecretFile(f, policy.secretFiles);
       for (const name of rule.require) {
         const command = commands[name];
-        if (!command) continue;
-        const runs = coveringRuns(evidence, name, command, { labelIsName: false });
+        const runs: (CommandEvidence | ReviewEvidence)[] = command
+          ? coveringRuns(evidence, name, command, { labelIsName: false })
+          : reviews[name]
+            ? coveringReviews(evidence, name, { labelIsName: false })
+            : [];
         if (!runs.length) continue; // unmet, which the caller reports first
         let fresh = false;
         const changed = new Set<string>();
@@ -615,7 +708,7 @@ export class Graft {
     }
     // Mark after judging every rule, so a run stale for one rule still counts for another it is fresh for.
     for (const run of staleRuns) run.stale = true;
-    return [...stale].map(([name, files]) => ({ name, command: commands[name], files: [...files] }));
+    return [...stale].map(([name, files]) => ({ name, command: commands[name] ?? "", kind: commands[name] ? "command" : "review", files: [...files] }));
   }
 
   /**
@@ -672,27 +765,28 @@ export class Graft {
     }
     const unmet = evaluateRules(policy, staged, open.evidence, { labelIsName: false });
     if (unmet.length) {
-      const wants = unmet.map((u) => `"${u.name}" (${u.command})`).join(" and ");
       const files = [...new Set(unmet.flatMap((u) => u.files))];
       refuse(
         "no-evidence",
-        `Policy requires a passing run of ${wants} for changes to ${files.join(", ")}. ` +
+        `Policy requires ${wantsOf(unmet)} for changes to ${files.join(", ")}. ` +
           `Run graft evidence ${unmet.map((u) => u.name).join(", graft evidence ")}, or pass --allow-no-evidence.`,
       );
     }
     // Marks stale runs as a side effect, so the message is honest even when the gate is bypassed.
     const stale = await this.staleRules(policy, staged, open.evidence);
     if (stale.length) {
-      const wants = stale.map((s) => `"${s.name}" (${s.command})`).join(" and ");
+      const wants = stale.map((s) => (s.kind === "review" ? `review "${s.name}"` : `"${s.name}" (${s.command})`)).join(" and ");
       const files = [...new Set(stale.flatMap((s) => s.files))];
       const unstaged = files.some((f) => !staged.includes(f)) ? " with the edits you are not committing staged or stashed" : "";
       refuse(
         "no-evidence",
-        `${wants} last passed before ${files.join(", ")} changed, so the run did not check what is being committed. ` +
+        `${wants} last ${stale.every((s) => s.kind === "review") ? "approved" : "passed"} before ${files.join(", ")} changed, so it did not check what is being committed. ` +
           `Run graft evidence ${stale.map((s) => s.name).join(", graft evidence ")} again${unstaged}, or pass --allow-no-evidence.`,
       );
     }
-    const suspicious = staged.filter((p) => looksLikeSecretFile(p, policy.secretFiles));
+    // A staged deletion adds nothing to history: removing a tracked .env is the fix, not the leak.
+    const deleted = new Set(await this.git.stagedDeletions());
+    const suspicious = staged.filter((p) => !deleted.has(p) && looksLikeSecretFile(p, policy.secretFiles));
     if (suspicious.length > 0) {
       refuse(
         "secrets",
@@ -767,6 +861,8 @@ export class Graft {
     const open = await this.store.read();
     if (!open) return { applied: false, reason: "no change is open" };
     const current = await readFile(messageFile, "utf8");
+    // `git commit --fixup`/`--squash` arrive as a plain message; the commit is folded into another by autosquash, so the record is not its own.
+    if (/^(fixup|squash|amend)! /.test(current)) return { applied: false, reason: "fixup commit" };
     const sequencer = await this.sequencerRunning(open, current);
     if (sequencer) return { applied: false, reason: `${sequencer} in progress` };
     if (parseTrailers(current)[TRAILER_KEYS.change]) return { applied: false, reason: "message already carries a record" };
@@ -794,8 +890,8 @@ export class Graft {
     else delete open.overrides;
     delete open.taskPlaceholder;
     open.landedAt = new Date().toISOString();
-    // A session link another tool already put in the message (Claude Code, Copilot, Entire) is where the task came from.
-    open.ref ??= (await this.defaultRef(policy)) ?? foreignTaskRef(current);
+    // A session link another tool already put in the message's trailers (Claude Code, Copilot, Entire) is where the task came from.
+    open.ref ??= (await this.defaultRef(policy)) ?? foreignTaskRef(splitTrailers(current).trailers);
     await this.foldAttempts(open);
     await this.store.write(open);
     await this.store.clearAttempts();
@@ -810,10 +906,33 @@ export class Graft {
     const comments = firstComment === -1 ? "" : "\n" + lines.slice(firstComment).join("\n");
     // Trailers the message already ends with (Co-Authored-By, Claude-Session) stay in the last
     // paragraph, after the record, so git still reads them as trailers.
-    const { body, trailers } = splitTrailers((firstComment === -1 ? lines : lines.slice(0, firstComment)).join("\n").replace(/\s+$/, ""));
-    const prefix = body ? body + "\n\n" : "\n\n";
+    const split = splitTrailers((firstComment === -1 ? lines : lines.slice(0, firstComment)).join("\n").replace(/\s+$/, ""));
+    // Graft's own trailers are the record's to write; a hand-written one would be a second copy or a lie.
+    const trailers = split.trailers
+      .split("\n")
+      .filter((l) => !/^graft-/i.test(l))
+      .join("\n");
+    const prefix = split.body ? split.body + "\n\n" : "\n\n";
     await writeFile(messageFile, prefix + block + "\n" + (trailers ? trailers + "\n" : "") + comments);
     return { applied: true, id: open.id };
+  }
+
+  /**
+   * The commit-msg hook: refuse a message that is nothing but the record,
+   * which is what an editor closed without a subject leaves behind. Git would
+   * abort such a commit as empty, and the record prepare-commit-msg added
+   * must not turn that into a commit titled "Evidence:".
+   */
+  async checkCommitMessage(messageFile: string): Promise<void> {
+    const message = await readFile(messageFile, "utf8");
+    // prepare-commit-msg keeps git's comment lines after the record, so with no subject typed the record is the first
+    // line. Comment lines are not stripped here: `-m "#42 fix it"` keeps that subject, as git does without an editor.
+    const first = message.split("\n").find((l) => l.trim());
+    if (first === undefined) return; // git aborts an empty message itself
+    if (!parseTrailers(message)[TRAILER_KEYS.change]) return;
+    if (RECORD_HEADERS.includes(first.trim()) || /^Graft-[A-Za-z-]+:/.test(first)) {
+      throw new GraftError("Aborting commit due to empty commit message: the message carries only the Graft record. Give the commit a subject, or abandon the change.");
+    }
   }
 
   /**
@@ -1170,7 +1289,8 @@ export class Graft {
   ): Promise<Pick<LogEntry, "record" | "recordSource">> {
     if (!parseTrailers(message)[TRAILER_KEYS.change]) return { record: null, recordSource: null };
     const note = await this.readNote(commit);
-    if (note) return { record: note, recordSource: "note" };
+    // A note that names another change rode along on a rewrite (an autosquash moved it); the message is the record then.
+    if (note && note.id === parseTrailers(message)[TRAILER_KEYS.change]) return { record: note, recordSource: "note" };
     const record = parseMessageRecord(message, authoredAt);
     return record ? { record, recordSource: "message" } : { record: null, recordSource: null };
   }
@@ -1338,6 +1458,19 @@ export const SHELL_OUTPUT_KEEP = 64 * 1024;
  * marked when cut), so a command that prints gigabytes does not hold them
  * all in memory. Records nothing.
  */
+/** The empty tree, for a diff in a repository that has no commit yet. */
+const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+/** "a passing run of "test" (npm test) and an approving review "code"", for the gate's messages. */
+export function wantsOf(unmet: { name: string; command: string; kind: "command" | "review" }[]): string {
+  const commands = unmet.filter((u) => u.kind === "command");
+  const reviews = unmet.filter((u) => u.kind === "review");
+  const parts: string[] = [];
+  if (commands.length) parts.push(`a passing run of ${commands.map((u) => `"${u.name}" (${u.command})`).join(" and ")}`);
+  if (reviews.length) parts.push(`an approving review ${reviews.map((u) => `"${u.name}"`).join(" and ")}`);
+  return parts.join(" and ");
+}
+
 export function runShell(command: string, cwd: string): Promise<{ exitCode: number; output: string }> {
   return new Promise((resolve) => {
     const child = spawn(command, { cwd, shell: true, env: process.env, stdio: ["ignore", "pipe", "pipe"] });
@@ -1441,11 +1574,16 @@ export function builtInRef(env: NodeJS.ProcessEnv = process.env): string | undef
 /** Trailers other tools write that name where a change came from, in the order they are trusted. */
 export const FOREIGN_REF_TRAILERS = ["Claude-Session", "Agent-Logs-Url", "Entire-Checkpoint", "Graft-Task-Ref"] as const;
 
-/** The session link or checkpoint id another tool already put in a commit message, as the task reference. */
-export function foreignTaskRef(message: string): string | undefined {
+/**
+ * The session link or checkpoint id another tool already put in a commit
+ * message's trailers, as the task reference. Pass the trailer paragraph
+ * (`splitTrailers(message).trailers`), not the whole message, so a subject
+ * that happens to read `Key: value` is not taken for one.
+ */
+export function foreignTaskRef(trailers: string): string | undefined {
   // Git trailers are `Key: value` lines; the keys are matched case-insensitively, as git does.
   const found = new Map<string, string>();
-  for (const line of message.split("\n")) {
+  for (const line of trailers.split("\n")) {
     const m = /^([A-Za-z][A-Za-z-]*):\s*(.+?)\s*$/.exec(line);
     if (m) found.set(m[1].toLowerCase(), m[2]);
   }

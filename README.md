@@ -31,7 +31,7 @@ Graft-Evidence: 1 command, 1 passed
 ```
 
 It is all in the commit message, as trailers and an `Evidence:` block, so git,
-GitHub and your tools keep working as they are. Three things hold the line:
+GitHub and your tools keep working as they are. Four things hold the line:
 
 - **The gate.** A commit with no evidence, or without the checks the policy
   names for the files it touches, is refused: by `graft land`, and by a plain
@@ -43,6 +43,11 @@ GitHub and your tools keep working as they are. Three things hold the line:
   Gemini CLI record the prompt as the task and every test, build or lint run
   as evidence, with the exit code the agent's own harness reported, so the
   record exists whether or not the agent remembers Graft.
+- **The review.** A rule can require a review next to the tests: an
+  independent model reads the diff and the task, and its verdict, findings
+  and instructions (by hash) go into the record. The check runs it again in
+  your CI with your key, on a model other than the author's if you ask, and
+  that verdict is the one that counts.
 
 ```
 npm install -g @fourshore/graft
@@ -183,7 +188,13 @@ put in the commit message (`Claude-Session` from Claude Code, `Agent-Logs-Url`
 from Copilot, `Entire-Checkpoint` from Entire, recorded as `entire:<id>`), so
 the task link is there whichever tool wrote the commit.
 `task` says what the record may hold about the task. The default, `"captured"`,
-lets the capture hooks record the prompt as the task. `"named"` keeps every
+lets the capture hooks record the prompt as the task, with every link cut to
+its host (`[link to linear.app]`) and every email address dropped, since a
+prompt carries ticket URLs and people's addresses that would otherwise
+become pushed history; a task named with `graft start` is kept as written.
+This is a one-line task, never the transcript: tools that keep whole
+sessions in the repository (Entire stores them on a branch, and warns that a
+public repo exposes them) record far more. `"named"` keeps every
 prompt out of the record: the hooks still open a change and record the runs,
 but the task is a placeholder until `graft start "<task>"` names it, and the
 gate refuses to land a placeholder with no override. Use it where prompts
@@ -199,6 +210,58 @@ name, or whose text is a catalog command), since anything else is text from a
 commit message.
 [docs/CHANGE.md](docs/CHANGE.md#where-it-lives) covers what survives rebases,
 amends, and squashes.
+
+### Review as evidence
+
+Every other kind of evidence is the author's own run. A review is the one
+that is not: an independent reading of the diff by a model, under
+instructions the record identifies by hash, recorded next to the tests. The
+policy names one like a command, and a rule requires it the same way:
+
+```json
+{
+  "version": 1,
+  "commands": { "test": "npm test" },
+  "reviews": { "code": { "differentModel": true } },
+  "rules": [{ "paths": ["src/**"], "require": ["test", "code"] }]
+}
+```
+
+`graft evidence code` sends the working tree's diff against the last commit
+and the task to the reviewer and records its verdict, summary, findings
+(each a severity, a file and line when it concerns one, and a sentence),
+the model that answered, and the SHA-256 of the instructions it ran under.
+The verdict is `request-changes` exactly when a finding is a blocker, so a
+record's verdict always agrees with its findings. In the commit message it
+is one line, `[review approve code] claude-opus-5-5 (prompt 4f3a2b1c; 0
+findings)`, and the findings themselves stay in the note. `land` treats the
+rule like any other: an approving review of the content being committed, or
+it refuses and says which review to run; a review that approved an earlier
+tree is `stale`. A reviewer that declines to review records nothing and
+says so.
+
+The default reviewer is `claude-opus-5-5` through the API, with the key in
+`ANTHROPIC_API_KEY`, under a built-in prompt that asks for findings, not a
+narrative: does the diff do the task, is it correct, is it safe, were tests
+weakened. Each review in the policy can set `model`, `prompt` (a file in the
+repo with your own instructions; the record's hash then names it), and
+`differentModel`, which refuses a review by the model that wrote the change
+(the record's `Graft-Model`), since a model marking its own work is not a
+second opinion. `command` replaces the API call with a program of your own:
+it reads the request as JSON on stdin (`name`, `task`, `diff`,
+`instructions`) and prints the result as JSON (`verdict`, `summary`,
+`findings`, and `model`), which is how a reviewer behind another gateway, a
+local model, or a test gets in. No fallback model is ever used: the record
+names the reviewer, so it must be the one asked for.
+
+The review that counts is the one made where the pull request is checked.
+`graft check --rerun` runs each review the policy names again on each
+commit's own diff and task, so the author's recorded verdict is a claim like
+a `[pass]`, and the check's verdict is the fact: an approval there meets the
+rule whatever the author recorded, and a request for changes fails the
+commit with the findings in the summary. The action takes the key as
+`anthropic-api-key` (see below); without one, reviews are listed as not
+re-run and the recorded verdicts stand.
 
 ## Capture without ritual
 
@@ -227,27 +290,38 @@ remembers Graft:
   in a subdirectory gets that `cd` in front, so it re-runs on another
   machine. A run whose exit code is not the check's (`npm test | tail`,
   `npm test || true`, `npm test; echo`, a background run) is not recorded,
-  and neither is one whose harness reported no exit code at all, which Cursor
-  and Copilot CLI sometimes do; the hook tells the agent so, and to run it
-  with `graft evidence <name>` or `set -o pipefail`. A change opened by one
+  and neither is one whose harness reported no exit code at all; the hook
+  tells the agent so, and to run it with `graft evidence <name>` or
+  `set -o pipefail`. Where the exit code is only an "Exit code: N" line in
+  the tool's output (Copilot CLI never sends a field for it), the last such
+  line is read and the run is recorded as attested: it shows in the record,
+  but a rule does not accept it, since the program could have printed that
+  line itself. Gemini CLI documents its own line, so its runs are passes. A change opened by one
   session does not take runs from another session in the same worktree. A
   short reply such as "continue" does not open a change with "continue" as
   its task: the session's last real prompt is used. The hook files are
   tracked: `init` edits them in place, and the edit is meant to be committed,
   so a per-session `init` leaves a diff until it is.
-- **Git hooks** (`prepare-commit-msg` and `post-commit`). A plain
-  `git commit` with a change open gets the Plan and Evidence blocks and the
-  trailers in its message and the full record as a note, exactly like
+- **Git hooks** (`prepare-commit-msg`, `commit-msg` and `post-commit`). A
+  plain `git commit` with a change open gets the Plan and Evidence blocks and
+  the trailers in its message and the full record as a note, exactly like
   `graft land`, and the same policy gate applies (`GRAFT_ALLOW_NO_EVIDENCE=1`
   or `GRAFT_ALLOW_SECRETS=1` override it for one commit, and the commit then
-  carries a `Graft-Override` trailer; `0`, `false` or empty do not).
-  Trailers the message already ends with (`Co-Authored-By`, `Claude-Session`)
-  stay in the last paragraph, after the record, so git still reads them as
-  trailers. Merges, squashes, amends of a commit that already carries a
-  record, and the commits git makes for a rebase, cherry-pick or revert are
-  left alone, and a hook that is already there is not overwritten. A message
-  given with `-m` or `-F` is kept as written, so `git commit -m "#42 fix the
-  crash"` keeps its subject.
+  carries a `Graft-Override` trailer; `0`, `false` or empty do not). The gate
+  runs in `prepare-commit-msg`, which `git commit --no-verify` does not skip:
+  those variables are the only way past it. Trailers the message already
+  ends with (`Co-Authored-By`, `Claude-Session`) stay in the last paragraph,
+  after the record, so git still reads them as trailers; Graft's own are
+  written by Graft, so a hand-written `Graft-Task-Ref` is dropped rather
+  than doubled. An editor closed without a subject aborts the commit, as it
+  would without Graft, instead of landing one titled `Evidence:`. Merges,
+  squashes, `--fixup` and `--squash` commits, amends of a commit that
+  already carries a record, and the commits git makes for a rebase,
+  cherry-pick or revert are left alone, and a hook that is already there is
+  not overwritten. A message given with `-m` or `-F` is kept as written, so
+  `git commit -m "#42 fix the crash"` keeps its subject. A staged deletion of
+  a file that looks like a credential is not refused: removing a tracked
+  `.env` is the fix, not the leak.
 
 The hooks run `graft`. Where it is not on PATH they step aside: a commit goes
 through unrecorded with a one-line install hint, for `graft check` to catch at
@@ -272,6 +346,8 @@ jobs:
         with: { fetch-depth: 0 }
       # your install step (npm ci, go mod download, ...), so recorded commands can run
       - uses: FourShore/Graft@v0   # v0 moves with each 0.x release; @v0.1.0 or that tag's SHA stays on one
+        # where the policy names reviews, the key the check re-runs them with:
+        # with: { anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }} }
 ```
 
 Each release sets the action's `version` input to its own version, so pinning
@@ -287,7 +363,11 @@ same repository, since a fork's commit messages are text a stranger wrote;
 catalog commands and those matching `checkCommands` are run. With
 `comment: "true"` it also posts the summary table as one pull request comment,
 updated in place on each run; the workflow then needs
-`permissions: pull-requests: write`. The same check runs from a shell:
+`permissions: pull-requests: write`. With `anthropic-api-key` (a repository
+secret, never written into the workflow) it re-runs the reviews the policy
+names, so the verdict in the summary is the check's own; the key is only
+read where the check re-runs, so a fork's pull request never sees it. The
+same check runs from a shell:
 
 ```
 graft check --base origin/main            # every behavior change needs evidence that meets the policy
@@ -327,7 +407,11 @@ and is otherwise listed as not re-run without failing the check. A recorded
 `graft check --rerun` is run but does not re-run anything itself. A commit
 whose trailers promise evidence that only the git note holds fails as "note
 missing" and says to fetch `refs/notes/graft`, rather than as a commit with
-none. `--base main` resolves to `origin/main` in a clone that has no local
+none. Reviews the policy names are run again too, one per commit on that
+commit's own diff, when the check has `ANTHROPIC_API_KEY` or the review
+names a `command`; a request for changes fails the commit with the findings,
+and a review the check cannot run is listed as not re-run. `--base main`
+resolves to `origin/main` in a clone that has no local
 `main`, which is every CI runner; with no `--base` the check uses
 `origin/main`, else `origin/master`, and otherwise asks for one. With
 `--format github` the step summary has each commit's task, and the text log,
@@ -483,9 +567,13 @@ npm install -g @fourshore/graft
 (On Claude Code before 2.1.275: `/plugin marketplace add FourShore/Graft`,
 then `/plugin install graft@fourshore`.) Its `graft:init` skill sets a repo
 up and reviews the policy, and `graft:workflow` is the section above in
-skill form. Where a repo's own `.claude/settings.json` already runs the
-capture hook, the plugin's copy steps aside, so a repo set up with `graft
-init` and a contributor with the plugin do not record twice. The plugin
+skill form. The plugin follows you into every repository, so it records
+only where Graft is set up (a `.graft/policy.json`, or this clone's git
+hooks); elsewhere nothing is written. Where a repo's own
+`.claude/settings.json` already runs the capture hook, the plugin's copy
+steps aside, so a repo set up with `graft init` and a contributor with the
+plugin do not record twice. It needs `@fourshore/graft` 0.2.0 or newer and
+says so at session start when the installed one is older. The plugin
 lives in [plugin/](plugin/) and this repository is its marketplace.
 
 Agents with MCP support can use the same steps as tools. For Claude Code:
@@ -530,7 +618,8 @@ it can, without Graft having to be one.
 
 - **CI as a second tier of evidence.** `graft check --rerun` emits a result
   the pull request summary and `graft show` can tell apart from the author's
-  run, so author-run and CI-verified are visible everywhere.
+  run, so author-run and CI-verified are visible everywhere. Reviews already
+  work this way: the check's verdict is the one that counts.
 - **A log across repositories.** `graft start --id` already lands one change
   in several repositories; a `graft log` that reads several clones and groups
   by change id follows when someone needs it.

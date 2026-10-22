@@ -1,14 +1,20 @@
 #!/usr/bin/env node
 import { readFile, writeFile } from "node:fs/promises";
 import { Command } from "commander";
-import { AGENT_INFO, CAPTURE_AGENTS, Graft, GraftError, HOOK_SPECS, attemptLines, gitHooksInstalled, handleCaptureEvent, hasAgentHooks, isCaptureAgent, normalizeAgentEvent, replyFor, shellJoin, type CaptureAgent, type LogEntry } from "@fourshore/graft-core";
-import type { ChangeRecord } from "@fourshore/graft-core";
+import { AGENT_INFO, CAPTURE_AGENTS, DEFAULT_REVIEW_MODEL, Graft, GraftError, HOOK_SPECS, attemptLines, gitHooksInstalled, handleCaptureEvent, hasAgentHooks, isCaptureAgent, normalizeAgentEvent, replyFor, shellJoin, type CaptureAgent, type LogEntry } from "@fourshore/graft-core";
+import type { ChangeRecord, ReviewEvidence } from "@fourshore/graft-core";
 import { renderCheckGithub, renderCheckText, runCheck } from "@fourshore/graft-review";
 import { createRequire } from "node:module";
 import { randomBytes } from "node:crypto";
 import { appendFile } from "node:fs/promises";
 
 const { version } = createRequire(import.meta.url)("../package.json") as { version: string };
+
+// A reader that closes early (`graft export | head`) is not an error worth a stack trace.
+process.stdout.on("error", (err: NodeJS.ErrnoException) => {
+  if (err.code === "EPIPE") process.exit(0);
+  throw err;
+});
 
 const program = new Command();
 program
@@ -24,7 +30,7 @@ const json = () => Boolean(program.opts<{ json?: boolean }>().json);
 program
   .command("init")
   .description(
-    "prepare this repo: carry notes through rebases, fetch them from the remote, write .graft/policy.json, tell agents how to use Graft in AGENTS.md",
+    "prepare this repo: write .graft/policy.json, install the capture and git hooks, carry notes through rebases, tell agents how to use Graft in AGENTS.md",
   )
   .option("--remote <name>", "remote to configure (default: origin)")
   .option("--force", "overwrite an existing policy file")
@@ -70,9 +76,16 @@ program
       const gitHooks = Object.entries(h.git);
       const foreign = gitHooks.filter(([, state]) => state === "foreign").map(([name]) => name);
       const written = gitHooks.filter(([, state]) => state === "written").map(([name]) => name);
-      if (written.length) lines.push(`Installed git hooks ${written.join(", ")} in ${h.hooksDir}, so a plain git commit carries the record`);
+      // Only prepare-commit-msg puts the record on a plain commit; with it foreign, the other hooks alone do not.
+      const carries = h.git["prepare-commit-msg"] !== "foreign";
+      if (written.length) lines.push(`Installed git hooks ${written.join(", ")} in ${h.hooksDir}${carries ? ", so a plain git commit carries the record" : ""}`);
       else if (!foreign.length) lines.push("Git hooks already installed");
-      if (foreign.length) lines.push(`Left ${foreign.join(" and ")} alone in ${h.hooksDir}: another hook is there. Add \`graft hook <name> "$@"\` to it yourself.`);
+      if (foreign.length) {
+        lines.push(
+          `Left ${foreign.join(" and ")} alone in ${h.hooksDir}: another hook is there. Add \`graft hook <name> "$@"\` to it yourself` +
+            (carries ? "." : ", or a plain git commit carries no record."),
+        );
+      }
       lines.push("The hooks run `graft`, so it must be on PATH for the agent and for git.");
     }
     if (r.ci) {
@@ -135,13 +148,13 @@ program
 
 program
   .command("evidence")
-  .description("run a command (or a policy command by name) and record its result, attach a run you already made, or record a note")
+  .description("run a command (or a policy command or review by name) and record its result, attach a run you already made, or record a note")
   .option("--label <label>", "what this evidence shows, e.g. 'unit tests'")
   .option("--note <text>", "record a note instead of running a command")
   .option("--attach", "do not run the command; record it as a run you already made, marked attested")
   .option("--exit <code>", "with --attach: the exit code of your run (default 0)")
   .option("--output-file <path>", "with --attach: a file holding your run's output (last 4 KB kept)")
-  .argument("[command...]", "a name from the policy's commands, or a command to run (put -- before it)")
+  .argument("[command...]", "a name from the policy's commands or reviews, or a command to run (put -- before it)")
   .action(async (command: string[], o) => {
     const g = graft();
     if (o.note) {
@@ -150,12 +163,19 @@ program
       return;
     }
     if (!command.length) {
-      const names = Object.entries(await g.catalog());
+      const names = [...Object.keys(await g.catalog()), ...Object.keys(await g.reviews())];
       throw new GraftError(
         names.length
-          ? `Give a policy command by name (${names.map(([n]) => n).join(", ")}), a command after --, or use --note.`
+          ? `Give a policy command or review by name (${names.join(", ")}), a command after --, or use --note.`
           : "Give a command after --, or use --note.",
       );
+    }
+    if (command.length === 1 && (await g.reviews())[command[0]]) {
+      if (o.attach) throw new GraftError(`"${command[0]}" is a review, which Graft runs itself; it cannot be attached as a run you made.`);
+      const ev = await g.evidenceReview(command[0], o.label);
+      out(ev, formatReview(ev));
+      if (ev.verdict !== "approve") process.exitCode = 1;
+      return;
     }
     if (command.length === 1 && (await g.catalog())[command[0]]) {
       if (o.attach) {
@@ -177,9 +197,9 @@ program
     }
     // One bare word is meant as a policy name far more often than as a program (a typo such as `graft evidence tset` should not run tset).
     if (command.length === 1 && /^[\w:.-]+$/.test(command[0]) && !process.argv.includes("--")) {
-      const names = Object.keys(await g.catalog());
+      const names = [...Object.keys(await g.catalog()), ...Object.keys(await g.reviews())];
       throw new GraftError(
-        `No policy command is named ${command[0]}${names.length ? ` (the policy names ${names.join(", ")})` : ""}. ` +
+        `No policy command or review is named ${command[0]}${names.length ? ` (the policy names ${names.join(", ")})` : ""}. ` +
           `To run ${command[0]} as a command, put -- before it: graft evidence -- ${command[0]}`,
       );
     }
@@ -229,8 +249,8 @@ program
 
 program
   .command("hook")
-  .description(`entry points for the hooks graft init installs: an agent's hook (${CAPTURE_AGENTS.join(", ")}; stdin JSON), prepare-commit-msg <file> [source], post-commit`)
-  .argument("<kind>", `${CAPTURE_AGENTS.join(" | ")} | prepare-commit-msg | post-commit`)
+  .description(`entry points for the hooks graft init installs: an agent's hook (${CAPTURE_AGENTS.join(", ")}; stdin JSON), prepare-commit-msg <file> [source], commit-msg <file>, post-commit`)
+  .argument("<kind>", `${CAPTURE_AGENTS.join(" | ")} | prepare-commit-msg | commit-msg | post-commit`)
   .argument("[args...]", "what git passes the hook")
   .option("--plugin", "the hook is the Claude Code plugin's: step aside when the repo's own hook file already runs graft")
   .action(async (kind: string, args: string[], o: { plugin?: boolean }) => {
@@ -240,11 +260,25 @@ program
       try {
         payload = JSON.parse(await readStdin());
         const g = graft();
-        if (o.plugin && (await hasAgentHooks(await g.git.topLevel(), kind))) {
-          // The repo's hooks and the plugin's would each record the run; the repo's win.
-          const reply = replyFor(kind, payload, { action: "ignored", reason: "the repo's own hooks run graft" });
-          if (reply && !json()) console.log(reply);
-          return;
+        if (o.plugin) {
+          // The plugin follows the user into every repo. One that is not set up for Graft has no gate to land what the hook
+          // would record, so the change would sit open for good, with the prompt in .git; and where the repo's own hooks
+          // run graft, the plugin's copy would record every run twice. In both the repo's state wins.
+          const top = await g.git.topLevel();
+          const reason = (await hasAgentHooks(top, kind))
+            ? "the repo's own hooks run graft"
+            : !(await g.isSetUp())
+              ? "this repo is not set up for Graft (no .graft/policy.json and no git hooks); run graft init"
+              : null;
+          if (reason) {
+            const outcome = { action: "ignored" as const, reason };
+            if (json()) console.log(JSON.stringify(outcome));
+            else {
+              const reply = replyFor(kind, payload, outcome);
+              if (reply) console.log(reply);
+            }
+            return;
+          }
         }
         const outcome = await handleCaptureEvent(g, kind, normalizeAgentEvent(kind, payload));
         if (json()) console.log(JSON.stringify(outcome));
@@ -270,12 +304,18 @@ program
       }
       return;
     }
+    if (kind === "commit-msg") {
+      const [file] = args;
+      if (!file) throw new GraftError("commit-msg needs the message file git passes it.");
+      await graft().checkCommitMessage(file);
+      return;
+    }
     if (kind === "post-commit") {
       const r = await graft().finishCommit();
       if (r.attached) console.log(`graft: recorded change ${r.id} on ${r.commit?.slice(0, 10)}`);
       return;
     }
-    throw new GraftError(`Unknown hook '${kind}'. Expected ${CAPTURE_AGENTS.join(", ")}, prepare-commit-msg or post-commit.`);
+    throw new GraftError(`Unknown hook '${kind}'. Expected ${CAPTURE_AGENTS.join(", ")}, prepare-commit-msg, commit-msg or post-commit.`);
   });
 
 program
@@ -314,13 +354,15 @@ program
     const record = await g.status();
     const names = Object.entries(await g.catalog());
     const commands = names.length ? `\ncommands: ${names.map(([n, c]) => `${n} (${c})`).join(", ")}` : "";
+    const reviewNames = Object.entries(await g.reviews());
+    const reviews = reviewNames.length ? `\nreviews: ${reviewNames.map(([n, s]) => `${n} (${s.command ? "command" : (s.model ?? DEFAULT_REVIEW_MODEL)}${s.differentModel ? ", not the author's model" : ""})`).join(", ")}` : "";
     const waiting = await g.attempts();
     const attempts = waiting.length ? `\nattempts waiting for the next land: ${waiting.map((a) => `${a.id} (${a.reason ?? a.task})`).join(", ")}` : "";
     const gitHooks = await gitHooksInstalled(g.git);
     const hooks = gitHooks
       ? "\ngit hooks: installed, so a plain git commit carries the record"
       : "\ngit hooks: not installed in this clone; commit with graft land, or run graft init to install them";
-    out({ open: record, commands: await g.catalog(), attempts: waiting, gitHooks }, (record ? formatRecord(record) : "No change is open.") + commands + attempts + hooks);
+    out({ open: record, commands: await g.catalog(), reviews: await g.reviews(), attempts: waiting, gitHooks }, (record ? formatRecord(record) : "No change is open.") + commands + reviews + attempts + hooks);
   });
 
 program
@@ -471,9 +513,19 @@ function formatRecord(r: ChangeRecord): string {
     lines.push(
       ev.kind === "command"
         ? `  ${ev.attested ? (ev.exitCode === 0 ? "attested" : `ATTESTED FAIL ${ev.exitCode}`) : ev.exitCode !== 0 ? "FAIL" : ev.stale ? "stale" : "pass"}  ${ev.command}${tag(ev.name, ev.label)}`
-        : `  note  ${ev.text}${ev.label ? `  [${ev.label}]` : ""}`,
+        : ev.kind === "review"
+          ? `  ${ev.stale ? "stale review" : ev.verdict === "approve" ? "approved" : "CHANGES REQUESTED"}  ${ev.model}${tag(ev.name, ev.label)} (prompt ${ev.promptSha256.slice(0, 8)}; ${ev.findings.length} finding${ev.findings.length === 1 ? "" : "s"})${ev.summary ? `\n        ${ev.summary}` : ""}`
+          : `  note  ${ev.text}${ev.label ? `  [${ev.label}]` : ""}`,
     );
   }
+  return lines.join("\n");
+}
+
+/** A review as `graft evidence <name>` prints it: the verdict, the summary and every finding. */
+function formatReview(ev: ReviewEvidence): string {
+  const lines = [`${ev.verdict === "approve" ? "Approved" : "Changes requested"} by ${ev.model} (review ${ev.name ?? ""}, prompt ${ev.promptSha256.slice(0, 8)}, ${(ev.durationMs / 1000).toFixed(1)}s)`];
+  if (ev.summary) lines.push(`  ${ev.summary}`);
+  for (const f of ev.findings) lines.push(`  ${f.severity}${f.file ? ` ${f.file}${f.line ? `:${f.line}` : ""}` : ""}: ${f.text}`);
   return lines.join("\n");
 }
 

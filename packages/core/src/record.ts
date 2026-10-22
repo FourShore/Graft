@@ -104,7 +104,47 @@ export interface ChangeAuthor {
   model?: string;
 }
 
-export type Evidence = CommandEvidence | NoteEvidence;
+export type Evidence = CommandEvidence | NoteEvidence | ReviewEvidence;
+
+/** One thing a reviewer found. */
+export interface ReviewFinding {
+  /** blocker: must change before landing; warning: should; nit: may. Only blockers make the verdict request-changes. */
+  severity: "blocker" | "warning" | "nit";
+  /** Path relative to the repo root, when the finding is about one file. */
+  file?: string;
+  line?: number;
+  text: string;
+}
+
+/**
+ * An independent review of the change by a model, under instructions the
+ * record identifies by hash: the one kind of evidence that is not the
+ * author's own run. `graft evidence <name>` records one for a review the
+ * policy names; `graft check --rerun` runs it again on each commit.
+ */
+export interface ReviewEvidence {
+  kind: "review";
+  at: string;
+  /** The policy's review name this satisfies (`reviews` in the policy). */
+  name?: string;
+  /** Optional label, as for a command. A record rebuilt from a message keeps the name here. */
+  label?: string;
+  /** The model that reviewed, as the API or the reviewer command reported it. */
+  model: string;
+  verdict: "approve" | "request-changes";
+  /** One or two sentences from the reviewer. */
+  summary: string;
+  findings: ReviewFinding[];
+  /** SHA-256 of the instructions the reviewer was given, so a record says which prompt judged it. */
+  promptSha256: string;
+  /** SHA-256 of the diff that was reviewed. */
+  diffSha256: string;
+  durationMs: number;
+  /** The working-tree hash the review looked at, as for a command; land compares it with what is committed. */
+  tree?: string;
+  /** Set at land when the reviewed tree differs from what is committed in a file a rule covers. */
+  stale?: true;
+}
 
 export interface CommandEvidence {
   kind: "command";
@@ -177,11 +217,16 @@ export function isChangeId(s: string): boolean {
 
 export function evidenceSummary(evidence: Evidence[]): string {
   const cmds = evidence.filter((e): e is CommandEvidence => e.kind === "command");
-  const notes = evidence.length - cmds.length;
+  const reviews = evidence.filter((e): e is ReviewEvidence => e.kind === "review");
+  const notes = evidence.length - cmds.length - reviews.length;
   const stale = cmds.filter((c) => c.stale).length;
   const passed = cmds.filter((c) => c.exitCode === 0 && !c.stale).length;
   const parts: string[] = [];
   if (cmds.length) parts.push(`${cmds.length} command${cmds.length === 1 ? "" : "s"}, ${passed} passed${stale ? `, ${stale} stale` : ""}`);
+  if (reviews.length) {
+    const approved = reviews.filter((r) => r.verdict === "approve" && !r.stale).length;
+    parts.push(`${reviews.length} review${reviews.length === 1 ? "" : "s"}, ${approved} approved`);
+  }
   if (notes) parts.push(`${notes} note${notes === 1 ? "" : "s"}`);
   return parts.length ? parts.join("; ") : "none";
 }
@@ -266,6 +311,12 @@ const MESSAGE_LINE_CAP = 200;
  *   [attested go tests] go test ./...
  *   [attested fail 2 build] yarn build
  *   [note] manually verified in browser
+ *   [review approve code] claude-opus-5-5 (prompt 4f3a2b1c; 0 findings)
+ *   [review request-changes code] claude-opus-5-5 (prompt 4f3a2b1c; 2 findings)
+ *
+ * A review line names the model, the first 8 hex digits of the hash of the
+ * instructions it reviewed under, and how many findings it made; the note
+ * keeps the findings themselves. A stale review reads `[review stale code]`.
  *
  * Repeated runs of one command (by catalog name, else by its label and text) keep only
  * the last, with a count of the earlier ones; the note keeps every run. When
@@ -278,9 +329,13 @@ export function evidenceLines(evidence: Evidence[]): string[] {
     const earlier = keep.get(i);
     if (earlier === undefined) return [];
     // A catalog name is the run's identity, so it is what the message keeps; a free label rides in the note.
-    const shown = ev.kind === "command" && ev.name ? ev.name : ev.label;
+    const shown = ev.kind !== "note" && ev.name ? ev.name : ev.label;
     const label = shown ? ` ${bracketSafe(shown)}` : "";
     if (ev.kind === "note") return [`  [note${label}] ${clip(oneLine(ev.text))}`];
+    if (ev.kind === "review") {
+      const status = ev.stale ? "stale" : ev.verdict;
+      return [`  [review ${status}${label}] ${oneLine(ev.model)} (prompt ${ev.promptSha256.slice(0, 8)}; ${ev.findings.length} finding${ev.findings.length === 1 ? "" : "s"})`];
+    }
     const failed = ev.exitCode === 0 ? "" : ` fail ${ev.exitCode}`;
     if (ev.attested) return [`  [attested${failed}${label}] ${clip(oneLine(ev.command))}`];
     const status = ev.exitCode !== 0 ? `fail ${ev.exitCode}` : ev.stale ? "stale" : "pass";
@@ -301,6 +356,7 @@ function collapseRuns(evidence: Evidence[]): Map<number, { runs: number; failed:
   const keep = new Map<number, { runs: number; failed: number }>();
   evidence.forEach((ev, i) => {
     if (ev.kind !== "command" || ev.attested) {
+      // Reviews are never collapsed: each is a separate judgement, and the policy reads the last one.
       keep.set(i, { runs: 0, failed: 0 });
       return;
     }
@@ -351,9 +407,10 @@ function bracketSafe(label: string): string {
 }
 
 const EVIDENCE_LINE = /^\s*\[(pass|stale|fail (-?\d+)|note|attested(?: fail (-?\d+))?)(?: ([^\]]*))?\] (.*)$/;
+const REVIEW_LINE = /^\s*\[review (approve|request-changes|stale)(?: ([^\]]*))?\] (\S+) \(prompt ([0-9a-f]{8,64}); (\d+) findings?\)$/;
 const DURATION = /^(.*) \((\d+(?:\.\d+)?)s(?:; earlier: \d+ runs?(?:, \d+ failed)?)?\)$/;
 /** A bracket that carries a label, which only the current format writes. */
-const LABELLED_BRACKET = /^\s*\[(?:pass|stale|fail -?\d+|note|attested(?: fail -?\d+)?) [^\]]+\] /;
+const LABELLED_BRACKET = /^\s*\[(?:pass|stale|fail -?\d+|note|attested(?: fail -?\d+)?|review \S+) [^\]]+\] /;
 /**
  * The 0.0.6 `label: command` split, taken only when the label reads like one
  * (plain words) and what follows reads like a command rather than the rest of
@@ -385,6 +442,25 @@ export function parseMessageRecord(message: string, authoredAt: string): ChangeR
   // Such a block never has a label inside a bracket, which is how it is told apart.
   const legacy = evidenceBlock.every((l) => !LABELLED_BRACKET.test(l));
   for (const line of evidenceBlock) {
+    const review = REVIEW_LINE.exec(line);
+    if (review) {
+      const [, status, name, model, prompt, count] = review;
+      // The message keeps the count and the verdict; the findings themselves are in the note.
+      evidence.push({
+        kind: "review",
+        at: authoredAt,
+        ...(name ? { label: name } : {}),
+        model,
+        verdict: status === "request-changes" ? "request-changes" : "approve",
+        summary: "",
+        findings: Array.from({ length: Number(count) }, () => ({ severity: "warning" as const, text: "(in the git note)" })),
+        promptSha256: prompt,
+        diffSha256: "",
+        durationMs: 0,
+        ...(status === "stale" ? { stale: true as const } : {}),
+      });
+      continue;
+    }
     const m = EVIDENCE_LINE.exec(line);
     if (!m) continue;
     const [, status, failCode, attestedFailCode, rawLabel, tail] = m;
@@ -460,7 +536,8 @@ export function parseOverrideTrailers(message: string): Override[] {
   return OVERRIDES.filter((o) => found.has(o));
 }
 
-const RECORD_HEADERS = ["Plan:", TRIED_HEADER, EVIDENCE_HEADER];
+/** The headings of the blocks Graft writes into a message, in the order they appear. */
+export const RECORD_HEADERS = ["Plan:", TRIED_HEADER, EVIDENCE_HEADER];
 
 /**
  * The record Graft wrote into a message: the trailer paragraph holding the

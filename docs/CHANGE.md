@@ -61,7 +61,7 @@ change is being made.
 | `startedAt`, `landedAt` | yes / on land | ISO 8601. |
 | `commit` | on land | The SHA the record was first landed on. Informational; the trailer is the durable link. After an amend or rebase the note moves with the commit but this field keeps the original SHA, so readers take the commit from where the note is attached, never from this field. |
 | `evidence[]` | yes (may be empty) | Ordered list of what was done to verify the change. |
-| `capturedBy` | no | The harness whose hook opened the change (`claude-code`, from the prompt) rather than an explicit `graft start`. A later `graft start` adopts such a change, naming the task and keeping its evidence. |
+| `capturedBy` | no | The harness whose hook opened the change (`claude-code`, `codex`, `cursor`, `copilot` or `gemini`, from the prompt) rather than an explicit `graft start`. A later `graft start` adopts such a change, naming the task and keeping its evidence and, unless it names one with `--author` or `--human`, the author the hook captured. |
 | `attempts[]` | no | Changes abandoned in this worktree since the last land, each with its `id`, `task`, `plan`, `reason`, `startedAt`, `abandonedAt` and `evidence`: the plans that did not work and why. Written as the `Tried:` block. |
 | `reverts` | no | The change id or commit this change undoes, when it was opened by `graft revert`. Written as the `Graft-Reverts` trailer. |
 | `artifacts[]` | no | Files the change produced, each `{ "name", "sha256" }` (lower-case hex), recorded with `graft artifact`. One `Graft-Artifact` trailer each, so a build found in the field resolves to its change with `graft show <sha256>`. |
@@ -81,7 +81,10 @@ Two kinds in version 1.
   Graft or a harness saw, though `graft check --rerun` runs it. With `via`
   set (for example `"claude-code"`) a harness reported the run through a
   hook, with its own exit code and output: a pass or fail like any other,
-  marked only so a reader knows who ran it. With `name` set the run is one
+  marked only so a reader knows who ran it. A harness run whose exit code
+  came only from an "Exit code: N" line in the tool's output, not from a
+  field of the payload, is recorded with `via` and `attested: true`, since
+  the program could have printed that line. With `name` set the run is one
   of the policy's named commands (`graft evidence test`, or a captured
   command that matched the catalog); the message line carries the name in
   place of any free label, so a record rebuilt from the message still
@@ -107,6 +110,20 @@ Two kinds in version 1.
   staleness is asserted only when it is certain.
 - `note`: free text for verification that did not come from a command: a manual
   check, a link to a CI run, a screenshot description.
+- `review`: an independent reading of the change by a model, the one kind
+  of evidence that is not the author's own run. `name` is the policy's name
+  for it, `model` the model that answered (as the API reported it, or as a
+  reviewer command named itself), `verdict` is `approve` or
+  `request-changes` (the latter exactly when a finding is a blocker),
+  `summary` one or two sentences, `findings` a list of `{ severity, file?,
+  line?, text }` with severity `blocker`, `warning` or `nit`, `promptSha256`
+  the hash of the instructions the reviewer ran under (the built-in prompt,
+  or the policy's `prompt` file) and `diffSha256` the hash of the diff it
+  read. `tree` and `stale` work as for a command: a review that approved
+  content other than what is being committed does not meet a rule.
+  Recorded by `graft evidence <name>` on the working tree's diff against
+  the last commit; run again by `graft check --rerun` on each commit's own
+  diff, and that verdict is the one that counts.
 
 Evidence is append-only while a change is open. Tools must not edit or drop
 evidence; a failed run stays in the record next to the later run that passed.
@@ -193,7 +210,11 @@ reader of the message alone reaches the same verdict on the policy as one with
 the note, which keeps every run. `Graft-Evidence` counts every run.
 The bracket holds the status, `pass`, `stale`, `fail <exit code>` or `note`,
 and then the label if there is one (`[pass unit tests]`, `[note manual]`); after it
-come the command and its duration, or the note text. Keeping the label inside
+come the command and its duration, or the note text. A review is
+`[review approve code] claude-opus-5-5 (prompt 4f3a2b1c; 2 findings)`:
+the verdict (or `stale`) and name in the bracket, then the model, the first
+eight hex digits of the prompt's hash and the count of findings; the
+findings themselves are in the note. Keeping the label inside
 the bracket means a command or note containing `: ` is read back exactly.
 Labels lose any square brackets; commands and notes are collapsed to one line
 and cut at 200 characters. Output is not in the message.
@@ -285,9 +306,11 @@ such template for the change's `ref`, used when `graft start` is given none
 harness's session variable on every change; an unset variable leaves the
 change without a ref. Without `ref`, a Claude Code cloud session's link is
 used when its session variable is set, and otherwise a `Claude-Session`,
-`Agent-Logs-Url` or `Entire-Checkpoint` trailer already in the commit message
+`Agent-Logs-Url` or `Entire-Checkpoint` trailer already in the commit message's
+trailer paragraph
 (the last as `entire:<id>`). `task`, optional, is `"captured"` (the default:
-the capture hooks record the prompt as the task) or `"named"` (they never do;
+the capture hooks record the prompt as the task, with links cut to
+`[link to <host>]` and email addresses to `[email]`) or `"named"` (they never do;
 a change they open carries a placeholder task that `land` refuses until
 `graft start` names it, with no override). `captureCommands`, optional,
 is a list of regular expressions (as strings) for commands the capture hooks
@@ -301,12 +324,23 @@ command only when it matches one of these. Unset, only catalog commands are
 re-run. `commands`, optional, is a map of name to shell command: the repo's
 checks, named once, run by `graft evidence <name>`, recognised by the
 capture hooks, and re-run by `graft check --rerun` under their current
-definition. `rules`, optional, is a list of `{ "paths": [globs], "require":
-[names] }`: a change touching a file that matches `paths` must carry a
-passing, non-attested run of every named command, made on the content being
-committed (see `tree` under Evidence), or `land` refuses and `check` fails
-the commit. A rule naming a command that `commands` does not
-define makes the policy unreadable, so the mistake surfaces at once. Readers
+definition. `reviews`, optional, is a map of name to review: `{}` reviews
+with the default model (`claude-opus-5-5`, through the API with
+`ANTHROPIC_API_KEY`) under the built-in instructions; `model` picks another;
+`prompt` names a file in the repo whose text replaces the built-in
+instructions (the record carries the hash of whichever was used); `command`
+runs a program instead of the API, which reads the request (`name`, `task`,
+`diff`, `instructions`) as JSON on stdin and prints the result (`verdict`,
+`summary`, `findings`, `model`) as JSON; `differentModel` refuses a review by
+the model in the record's `author.model`, and by an agent author whose model
+is not recorded. Names share the namespace of `commands`. `rules`, optional,
+is a list of `{ "paths": [globs], "require": [names] }`: a change touching a
+file that matches `paths` must carry a passing, non-attested run of every
+named command and an approving review for every named review, made on the
+content being committed (see `tree` under Evidence), or `land` refuses and
+`check` fails the commit. A rule naming something neither `commands` nor
+`reviews` defines makes the policy unreadable, so the mistake surfaces at
+once. Readers
 reject unknown policy versions. The file is committed, so changing policy is a
 reviewed change like any other; `graft check` reads it from the base of the
 range it checks, so a branch is held to the policy it is merging into, not

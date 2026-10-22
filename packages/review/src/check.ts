@@ -1,4 +1,23 @@
-import { DEFAULT_POLICY, Graft, GraftError, POLICY_PATH, evaluateRules, matchCatalog, parsePolicy, runShell, type CommandEvidence, type LogEntry, type Policy } from "@fourshore/graft-core";
+import {
+  DEFAULT_POLICY,
+  Graft,
+  GraftError,
+  POLICY_PATH,
+  ReviewError,
+  ReviewUnavailableError,
+  evaluateRules,
+  loadReviewPrompt,
+  matchCatalog,
+  parsePolicy,
+  rulesHit,
+  runReview,
+  runShell,
+  sameModelReason,
+  type CommandEvidence,
+  type LogEntry,
+  type Policy,
+  type ReviewFinding,
+} from "@fourshore/graft-core";
 import { parseDiff } from "./diff.js";
 import { triage, type Triage } from "./triage.js";
 
@@ -20,6 +39,8 @@ export type Finding =
   | { kind: "rule-unmet"; commit: string; title: string; files: string[]; names: { name: string; command: string }[] }
   | { kind: "rerun-failed"; command: string; commits: string[]; exitCode: number; output: string }
   | { kind: "rerun-skipped"; command: string; commits: string[]; reason: string }
+  | { kind: "review-failed"; name: string; commit: string; title: string; model: string; summary: string; findings: ReviewFinding[]; reason: "request-changes" | "same-model" }
+  | { kind: "review-skipped"; name: string; commits: string[]; reason: string }
   | { kind: "no-commits"; base: string }
   | { kind: "limit-reached"; base: string; limit: number };
 
@@ -44,6 +65,17 @@ export interface Rerun {
   output: string;
 }
 
+/** A review the check ran again on one commit's diff: the verdict that counts. */
+export interface ReviewRerun {
+  name: string;
+  commit: string;
+  model: string;
+  verdict: "approve" | "request-changes";
+  summary: string;
+  findings: ReviewFinding[];
+  durationMs: number;
+}
+
 export interface CheckResult {
   /** The base as resolved: `main` becomes `origin/main` in a clone that has no local branch of that name. */
   base: string;
@@ -51,6 +83,8 @@ export interface CheckResult {
   policy: Policy;
   commits: CheckedCommit[];
   reruns: Rerun[];
+  /** The reviews run again on this checkout, one per review name and commit. */
+  reviews: ReviewRerun[];
   findings: Finding[];
   /** False when any finding blocks. */
   ok: boolean;
@@ -100,10 +134,15 @@ export async function runCheck(opts: CheckOptions): Promise<CheckResult> {
     notes.push(`${merges.size} merge commit${merges.size === 1 ? " was" : "s were"} not inspected: this git has no --remerge-diff (2.36 or newer), so an edit made inside a merge is not checked.`);
   }
   const commits: CheckedCommit[] = [];
+  // What the re-run of reviews needs per commit: the diff text, and the review names its files and record call for.
+  const diffs = new Map<string, string>();
+  const reviewNames = new Map<string, Set<string>>();
   for (const entry of entries) {
     const merge = merges.has(entry.commit);
     if (merge && !remerge) continue;
-    const files = parseDiff(await graft.diff(entry.commit, { remerge: merge }));
+    const diffText = await graft.diff(entry.commit, { remerge: merge });
+    diffs.set(entry.commit, diffText);
+    const files = parseDiff(diffText);
     // A clean merge changes nothing beyond merging; only one with its own edits (or conflict resolutions) needs a record.
     if (merge && !files.length) continue;
     const t = triage(entry.record, files, entry.trailers, entry.recordSource, policy.behaviorFiles);
@@ -114,6 +153,17 @@ export async function runCheck(opts: CheckOptions): Promise<CheckResult> {
     // A rename is covered by the rules for where the file came from as well as where it went.
     const paths = [...new Set(files.flatMap((f) => (f.oldPath ? [f.path, f.oldPath] : [f.path])))];
     const unmet = partial ? [] : evaluateRules(policy, paths, entry.record?.evidence ?? []);
+    if (policy.reviews && entry.record && !partial) {
+      // The reviews the rules ask of these paths, and any the record carries under a policy name.
+      const names = new Set<string>();
+      for (const { rule } of rulesHit(policy, paths)) for (const n of rule.require) if (policy.reviews[n]) names.add(n);
+      for (const ev of entry.record.evidence) {
+        if (ev.kind !== "review") continue;
+        const n = ev.name ?? ev.label;
+        if (n && policy.reviews[n]) names.add(n);
+      }
+      if (names.size) reviewNames.set(entry.commit, names);
+    }
     let ok = true;
     if (behavior.length && policy.requireEvidence) {
       const base = { commit: entry.commit, title: entry.title, files: behavior };
@@ -152,6 +202,7 @@ export async function runCheck(opts: CheckOptions): Promise<CheckResult> {
   }
 
   const reruns: Rerun[] = [];
+  const reviews: ReviewRerun[] = [];
   const nested = Boolean(opts.rerun && process.env[RERUN_ENV]);
   const rerun = Boolean(opts.rerun && !nested);
   if (rerun) {
@@ -196,14 +247,89 @@ export async function runCheck(opts: CheckOptions): Promise<CheckResult> {
       reruns.push({ command, ...(name ? { name } : {}), commits: shas, exitCode, durationMs: Date.now() - started, output });
       if (exitCode !== 0) findings.push({ kind: "rerun-failed", command, commits: shas, exitCode, output });
     }
+    // Reviews: run again on each commit's own diff and task. The verdict made here is the one that counts, so an
+    // approval it gives satisfies a rule the record left unmet, and a request for changes fails the commit whatever
+    // the record said.
+    const unavailable = new Map<string, { commits: string[]; reason: string }>();
+    for (const c of commits) {
+      const names = reviewNames.get(c.entry.commit);
+      const record = c.entry.record;
+      if (!names || !record) continue;
+      for (const name of names) {
+        const spec = policy.reviews![name];
+        const skip = unavailable.get(name);
+        if (skip) {
+          skip.commits.push(c.entry.commit);
+          continue;
+        }
+        const started = Date.now();
+        // The verdict made here replaces whatever the record said for this name: an approval meets the rule, and a
+        // request for changes (or a reviewer that died) is the finding, not a rule left unmet.
+        const settled = () => {
+          for (const f of findings) {
+            if (f.kind !== "rule-unmet" || f.commit !== c.entry.commit) continue;
+            f.names = f.names.filter((n) => n.name !== name);
+            f.files = f.names.length ? f.files : [];
+          }
+        };
+        let result: Awaited<ReturnType<typeof runReview>>;
+        try {
+          const instructions = await loadReviewPrompt(spec, topLevel);
+          result = await runReview(spec, { name, task: record.task, diff: diffs.get(c.entry.commit) ?? "", instructions }, { cwd: topLevel });
+        } catch (err) {
+          if (err instanceof ReviewUnavailableError) {
+            unavailable.set(name, { commits: [c.entry.commit], reason: err.message });
+            continue;
+          }
+          if (err instanceof ReviewError) {
+            settled();
+            findings.push({ kind: "review-failed", name, commit: c.entry.commit, title: c.entry.title, model: spec.model ?? "", summary: err.message, findings: [], reason: "request-changes" });
+            c.ok = false;
+            c.rerun = "fail";
+            continue;
+          }
+          throw err;
+        }
+        reviews.push({ name, commit: c.entry.commit, model: result.model, verdict: result.verdict, summary: result.summary, findings: result.findings, durationMs: Date.now() - started });
+        settled();
+        const why = spec.differentModel ? sameModelReason(record.author, result.model) : null;
+        if (result.verdict !== "approve" || why) {
+          findings.push({
+            kind: "review-failed",
+            name,
+            commit: c.entry.commit,
+            title: c.entry.title,
+            model: result.model,
+            summary: why ?? result.summary,
+            findings: result.findings,
+            reason: why ? "same-model" : "request-changes",
+          });
+          c.ok = false;
+          c.rerun = "fail";
+        } else if (c.rerun !== "fail") {
+          c.rerun = "pass";
+        }
+      }
+    }
+    for (const [name, { commits: shas, reason }] of unavailable) findings.push({ kind: "review-skipped", name, commits: shas, reason });
+    // A rule-unmet whose every name a re-run review approved no longer blocks.
+    for (let i = findings.length - 1; i >= 0; i--) {
+      const f = findings[i];
+      if (f.kind === "rule-unmet" && !f.names.length) {
+        findings.splice(i, 1);
+        const c = commits.find((x) => x.entry.commit === f.commit);
+        if (c && !findings.some((g) => "commit" in g && g.commit === c.entry.commit)) c.ok = true;
+      }
+    }
     for (const c of commits) {
       const mine = reruns.filter((x) => x.commits.includes(c.entry.commit));
-      c.rerun = mine.some((x) => x.exitCode !== 0) ? "fail" : mine.length ? "pass" : "not run";
+      const failed = mine.some((x) => x.exitCode !== 0) || c.rerun === "fail";
+      c.rerun = failed ? "fail" : mine.length || c.rerun === "pass" ? "pass" : "not run";
       if (c.rerun === "fail") c.ok = false;
     }
   }
-  const ok = findings.every((f) => f.kind === "rerun-skipped");
-  return { base, head, policy, commits, reruns, findings, ok, rerun, notes, ...(nested ? { nested: true } : {}) };
+  const ok = findings.every((f) => f.kind === "rerun-skipped" || f.kind === "review-skipped");
+  return { base, head, policy, commits, reruns, reviews, findings, ok, rerun, notes, ...(nested ? { nested: true } : {}) };
 }
 
 /**
@@ -306,8 +432,14 @@ export function renderCheckText(r: CheckResult): string {
       lines.push(`  ${x.exitCode === 0 ? "pass" : `FAIL ${x.exitCode}`}  ${x.name ? `${x.name}: ` : ""}${x.command} (${(x.durationMs / 1000).toFixed(1)}s, recorded on ${x.commits.map((s) => s.slice(0, 10)).join(", ")})`);
     }
   }
-  const skipped = r.findings.filter((f) => f.kind === "rerun-skipped");
-  const blocking = r.findings.filter((f) => f.kind !== "rerun-skipped");
+  if (r.reviews.length) {
+    lines.push("", `Re-ran ${r.reviews.length} review${r.reviews.length === 1 ? "" : "s"} on this checkout:`);
+    for (const x of r.reviews) {
+      lines.push(`  ${x.verdict === "approve" ? "approved" : "CHANGES REQUESTED"}  ${x.name}: ${x.model} on ${x.commit.slice(0, 10)} (${(x.durationMs / 1000).toFixed(1)}s, ${x.findings.length} finding${x.findings.length === 1 ? "" : "s"})${x.summary ? `\n        ${x.summary}` : ""}`);
+    }
+  }
+  const skipped = r.findings.filter((f) => f.kind === "rerun-skipped" || f.kind === "review-skipped");
+  const blocking = r.findings.filter((f) => f.kind !== "rerun-skipped" && f.kind !== "review-skipped");
   if (skipped.length) {
     lines.push("", `Not re-run (${skipped.length}):`);
     for (const f of skipped) lines.push(`  - ${describeFinding(f)}`);
@@ -350,6 +482,12 @@ export function describeFinding(f: Finding): string {
       return `"${f.command}" was recorded as passing on ${f.commits.map((s) => s.slice(0, 10)).join(", ")} but exits ${f.exitCode} on this checkout.\n${indent(tail(f.output, 20))}`;
     case "rerun-skipped":
       return `"${f.command}" was not re-run: ${f.reason}.`;
+    case "review-failed":
+      return f.reason === "same-model"
+        ? `${f.commit.slice(0, 10)} "${f.title}": review "${f.name}" does not count: ${f.summary}.`
+        : `${f.commit.slice(0, 10)} "${f.title}": review "${f.name}" by ${f.model || "the reviewer"} requested changes${f.summary ? `: ${f.summary}` : ""}${f.findings.length ? "\n" + indent(f.findings.map(describeReviewFinding).join("\n")) : ""}`;
+    case "review-skipped":
+      return `Review "${f.name}" was not re-run on ${f.commits.map((s) => s.slice(0, 10)).join(", ")}: ${f.reason}`;
     case "no-commits":
       return `No commits to check in ${f.base}..HEAD. Is the base right, and was the pull request's head checked out with fetch-depth: 0?`;
     case "limit-reached":
@@ -357,10 +495,15 @@ export function describeFinding(f: Finding): string {
   }
 }
 
+/** "blocker src/a.ts:12: the lock is never released", one line per finding. */
+export function describeReviewFinding(f: ReviewFinding): string {
+  return `${f.severity}${f.file ? ` ${f.file}${f.line ? `:${f.line}` : ""}` : ""}: ${f.text}`;
+}
+
 /** GitHub Actions workflow commands: one annotation per finding and note, plus a step summary in Markdown. */
 export function renderCheckGithub(r: CheckResult): { annotations: string[]; summary: string } {
   const annotations = r.findings
-    .filter((f) => f.kind !== "rerun-skipped")
+    .filter((f) => f.kind !== "rerun-skipped" && f.kind !== "review-skipped")
     .map((f) => annotation("error", "Graft check", describeFinding(f).split("\n")[0]));
   for (const n of r.notes) annotations.push(annotation("warning", "Graft check", n));
   for (const c of r.commits) {
@@ -384,11 +527,28 @@ export function renderCheckGithub(r: CheckResult): { annotations: string[]; summ
     ...(r.reruns.length
       ? ["", "#### Re-run on this checkout", "", "| | Command | Recorded on |", "| --- | --- | --- |", ...r.reruns.map((x) => `| ${x.exitCode === 0 ? "✅" : `❌ exit ${x.exitCode}`} | \`${escapePipes(x.command)}\` | ${x.commits.map((s) => `\`${s.slice(0, 10)}\``).join(", ")} |`)]
       : []),
-    ...(r.findings.some((f) => f.kind === "rerun-skipped")
-      ? ["", "#### Not re-run", "", ...r.findings.filter((f) => f.kind === "rerun-skipped").map((f) => `- ${describeFinding(f).split("\n")[0]}`)]
+    ...(r.reviews.length
+      ? [
+          "",
+          "#### Reviewed again on this checkout",
+          "",
+          "| | Review | Model | Commit | Findings |",
+          "| --- | --- | --- | --- | --- |",
+          ...r.reviews.map((x) => `| ${x.verdict === "approve" ? "✅" : "❌ changes requested"} | ${escapePipes(x.name)} | ${escapePipes(x.model)} | \`${x.commit.slice(0, 10)}\` | ${x.findings.length} |`),
+        ]
       : []),
-    ...(r.findings.some((f) => f.kind !== "rerun-skipped")
-      ? ["", "#### Findings", "", ...r.findings.filter((f) => f.kind !== "rerun-skipped").map((f) => `- ${describeFinding(f).split("\n")[0]}`)]
+    ...(r.findings.some((f) => f.kind === "rerun-skipped" || f.kind === "review-skipped")
+      ? ["", "#### Not re-run", "", ...r.findings.filter((f) => f.kind === "rerun-skipped" || f.kind === "review-skipped").map((f) => `- ${describeFinding(f).split("\n")[0]}`)]
+      : []),
+    ...(r.findings.some((f) => f.kind !== "rerun-skipped" && f.kind !== "review-skipped")
+      ? [
+          "",
+          "#### Findings",
+          "",
+          ...r.findings
+            .filter((f) => f.kind !== "rerun-skipped" && f.kind !== "review-skipped")
+            .flatMap((f) => [`- ${describeFinding(f).split("\n")[0]}`, ...(f.kind === "review-failed" ? f.findings.map((x) => `  - ${escapePipes(describeReviewFinding(x))}`) : [])]),
+        ]
       : []),
     "",
   ].join("\n");

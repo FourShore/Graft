@@ -10,8 +10,10 @@ npm install -g @fourshore/graft
 /plugin install graft --marketplace fourshore/graft
 ```
 
-The first line is the binary the hooks call; the plugin cannot install it
-for you and says so at session start when it is missing. The second works on
+The first line is the binary the hooks call, 0.2.0 or newer (the plugin
+runs `graft hook claude-code --plugin`, which earlier versions do not have);
+the plugin cannot install or update it for you and says so at session start
+when it is missing or too old. The second works on
 Claude Code 2.1.275 or later; before that, `/plugin marketplace add
 FourShore/Graft` then `/plugin install graft@fourshore`.
 

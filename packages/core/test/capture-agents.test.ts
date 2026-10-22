@@ -4,11 +4,12 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { beforeEach, describe, expect, it } from "vitest";
 import { Graft, builtInRef, foreignTaskRef, splitTrailers } from "../src/graft.js";
-import { CAPTURE_AGENTS, commandOf, exitCodeOf, handleCaptureEvent, textOf } from "../src/capture-hook.js";
+import { CAPTURE_AGENTS, commandOf, exitCodeFrom, exitCodeOf, handleCaptureEvent, textOf } from "../src/capture-hook.js";
 import { normalizeAgentEvent, replyFor } from "../src/agent-hooks.js";
 import { handleClaudeCodeEvent } from "../src/claude-code.js";
 import { HOOK_SPECS, hasAgentHooks, installHooks } from "../src/hooks.js";
 import { parsePolicy } from "../src/policy.js";
+import { scrubPrompt } from "../src/redact.js";
 
 let dir: string;
 let graft: Graft;
@@ -40,6 +41,12 @@ describe("payload readers", () => {
     expect(exitCodeOf({ output: "12 passed" })).toBeNull();
     expect(exitCodeOf("all good")).toBeNull();
     expect(exitCodeOf(undefined)).toBeNull();
+    // The harness appends its line after the output, so a line the program printed earlier does not decide the run.
+    expect(exitCodeFrom("suite ran\nexit code: 1 from child\nall 12 passed\nExit code: 0")).toEqual({ exitCode: 0, fromText: true });
+    expect(exitCodeFrom({ metadata: { exit_code: 2 } })).toEqual({ exitCode: 2, fromText: false });
+    // A code only in the text is a claim: Copilot CLI's payload has no exit code field.
+    expect(normalizeAgentEvent("copilot", { hookEventName: "postToolUse", toolName: "bash", toolArgs: { command: "npm test" }, toolResult: { resultType: "success", textResultForLlm: "12 passed\nExit code: 0" } })).toMatchObject({ exitCode: 0, exitCodeFromText: true });
+    expect(normalizeAgentEvent("gemini", { hook_event_name: "AfterTool", tool_name: "run_shell_command", tool_input: { command: "npm test" }, tool_response: { llmContent: "Command: npm test\nExit Code: 0" } })).not.toHaveProperty("exitCodeFromText");
   });
 
   it("read the output and the command from objects or JSON strings", () => {
@@ -94,6 +101,11 @@ describe("agent adapters", () => {
       conversation_id: "k1",
     });
     expect(run).toMatchObject({ kind: "run", command: "npm run lint", exitCode: 2, output: "src/a.ts: unused", durationMs: 300, cwd: "/w" });
+    // The Shell tool's working_directory is where the command ran; a sub-package's suite is not the root's.
+    const sub = normalizeAgentEvent("cursor", { hook_event_name: "postToolUse", tool_name: "Shell", tool_input: { command: "npm test", working_directory: "packages/foo" }, tool_output: { exitCode: 0 } });
+    expect(sub).toMatchObject({ command: "cd packages/foo && npm test" });
+    const odd = normalizeAgentEvent("cursor", { hook_event_name: "postToolUse", tool_name: "Shell", tool_input: { command: "npm test", working_directory: "it's $HOME" }, tool_output: { exitCode: 0 } });
+    expect(odd).toMatchObject({ command: "cd 'it'\\''s $HOME' && npm test" });
     // afterShellExecution carries no exit code, so the run is not recordable.
     expect(normalizeAgentEvent("cursor", { hook_event_name: "afterShellExecution", command: "npm test", output: "ok", duration: 5 })).toMatchObject({ kind: "run", exitCode: null });
     expect(normalizeAgentEvent("cursor", { hook_event_name: "postToolUse", tool_name: "Read", tool_input: {} })).toMatchObject({ kind: "ignore" });
@@ -165,6 +177,11 @@ describe("the shared handler", () => {
     const run = await handleCaptureEvent(graft, "codex", { kind: "run", command: "npm test", exitCode: 0, output: "12 passed", sessionId: "c1", durationMs: 40 });
     expect(run).toMatchObject({ action: "recorded", name: "test", label: "test", exitCode: 0 });
     expect((await graft.status())?.evidence).toMatchObject([{ kind: "command", command: "npm test", exitCode: 0, via: "codex", name: "test" }]);
+    expect((await graft.status())?.evidence[0]).not.toHaveProperty("attested");
+    // An exit code read from the output text is recorded, as attested, and the agent is told how to make it count.
+    const claimed = await handleCaptureEvent(graft, "codex", { kind: "run", command: "npm test", exitCode: 0, exitCodeFromText: true, output: "Exit code: 0", sessionId: "c1" });
+    expect(claimed).toMatchObject({ action: "recorded", context: expect.stringMatching(/recorded as attested.*Run graft evidence test/) });
+    expect((await graft.status())?.evidence.at(-1)).toMatchObject({ kind: "command", attested: true, via: "codex" });
     // A run with nothing open opens a placeholder change that names the agent.
     await graft.abandon();
     const orphan = await handleCaptureEvent(graft, "copilot", { kind: "run", command: "npm test", exitCode: 1, output: "", sessionId: "p2" });
@@ -221,6 +238,8 @@ describe("task references from other tools", () => {
     expect(foreignTaskRef("Fix it\n\nentire-checkpoint: abc123def456")).toBe("entire:abc123def456");
     expect(foreignTaskRef("Fix it\n\nCo-Authored-By: x")).toBeUndefined();
     expect(foreignTaskRef("Note: the Claude-Session: link is not a trailer here")).toBeUndefined();
+    // The hook passes the trailer paragraph, so a subject that reads like a trailer is not one.
+    expect(foreignTaskRef(splitTrailers("Claude-Session: https://claude.ai/code/session_1").trailers)).toBeUndefined();
     expect(splitTrailers("Fix: the crash")).toEqual({ body: "Fix: the crash", trailers: "" });
     expect(splitTrailers("Fix the crash\n\nIt was null.\n\nCo-Authored-By: A <a@b>\nClaude-Session: x\n")).toEqual({ body: "Fix the crash\n\nIt was null.", trailers: "Co-Authored-By: A <a@b>\nClaude-Session: x" });
     expect(splitTrailers("Fix the crash\n\nIt was null, see issue: 42.")).toEqual({ body: "Fix the crash\n\nIt was null, see issue: 42.", trailers: "" });
@@ -287,7 +306,7 @@ describe("hook installers", () => {
     expect(cursor.hooks.postToolUse[0]).toMatchObject({ matcher: "Shell", command: expect.stringContaining("graft hook cursor") });
 
     const copilot = JSON.parse(await readFile(join(dir, ".github/hooks/graft.json"), "utf8"));
-    expect(copilot).toMatchObject({ version: 1, hooks: { userPromptSubmitted: [{ type: "command", bash: expect.stringContaining("graft hook copilot") }], postToolUse: [{ type: "command", timeoutSec: 15 }] } });
+    expect(copilot).toMatchObject({ version: 1, hooks: { userPromptSubmitted: [{ type: "command", bash: expect.stringContaining("graft hook copilot"), powershell: expect.stringContaining("graft hook copilot") }], postToolUse: [{ type: "command", timeoutSec: 15 }] } });
 
     const second = await installHooks(graft.git, dir, [...CAPTURE_AGENTS]);
     expect(second.agents).toEqual({ "claude-code": "present", codex: "present", cursor: "present", copilot: "present", gemini: "present" });
@@ -307,6 +326,10 @@ describe("the Claude Code plugin's hooks", () => {
     const run = (flags: string[], payload: object) =>
       execFileSync("node", [cli, "hook", "claude-code", ...flags], { cwd: dir, encoding: "utf8", input: JSON.stringify(payload) }).trim();
     const prompt = { hook_event_name: "UserPromptSubmit", prompt: "Fix the flaky login test", session_id: "s" };
+    // A repo that never ran graft init has no gate to land what the plugin would record: nothing is written there.
+    expect(JSON.parse(run(["--plugin", "--json"], prompt))).toMatchObject({ action: "ignored", reason: expect.stringContaining("not set up for Graft") });
+    expect(await graft.status()).toBeNull();
+    await policy({});
     expect(await hasAgentHooks(dir, "claude-code")).toBe(false);
     run(["--plugin"], prompt);
     expect((await graft.status())?.task).toBe("Fix the flaky login test");
@@ -318,5 +341,18 @@ describe("the Claude Code plugin's hooks", () => {
     expect(await graft.status()).toBeNull();
     run([], prompt);
     expect((await graft.status())?.task).toBe("Fix the flaky login test");
+  });
+});
+
+describe("captured prompts", () => {
+  it("keep links as their host and drop email addresses, while a task named with graft start stays as written", async () => {
+    expect(scrubPrompt("Fix https://linear.app/acme/issue/ENG-12?x=1 for jane.doe@acme.com (see http://user@intranet.acme.local:8080/doc).")).toBe(
+      "Fix [link to linear.app] for [email] (see [link to intranet.acme.local]).",
+    );
+    expect(scrubPrompt("Edit src/a.ts and docs/README.md")).toBe("Edit src/a.ts and docs/README.md");
+    const started = await handleCaptureEvent(graft, "claude-code", { kind: "prompt", prompt: "Ship the fix from https://github.com/acme/private/issues/9, ping bob@acme.com", sessionId: "s" });
+    expect(started).toMatchObject({ action: "started", task: "Ship the fix from [link to github.com], ping [email]" });
+    const named = await graft.start({ task: "Ship https://github.com/acme/private/issues/9" });
+    expect(named.task).toBe("Ship https://github.com/acme/private/issues/9");
   });
 });

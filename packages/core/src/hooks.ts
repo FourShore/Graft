@@ -18,13 +18,17 @@ const INSTALL_HINT = "npm install -g @fourshore/graft";
 
 export type HookFileState = "written" | "present" | "unreadable";
 
+/** The git hooks `graft init` installs, in the order git runs them. */
+export type GitHook = "prepare-commit-msg" | "commit-msg" | "post-commit";
+export const GIT_HOOKS: GitHook[] = ["prepare-commit-msg", "commit-msg", "post-commit"];
+
 export interface HooksResult {
   /** What happened to .claude/settings.json; the same as `agents["claude-code"]`, kept for readers of earlier versions. */
   claudeCode: HookFileState;
   /** Per agent whose hooks were asked for: what happened to its config file. */
   agents: Partial<Record<CaptureAgent, HookFileState>>;
   /** Per git hook: written, already Graft's, or left alone because another hook is there. */
-  git: Record<"prepare-commit-msg" | "post-commit", "written" | "present" | "foreign">;
+  git: Record<GitHook, "written" | "present" | "foreign">;
   /** Where the git hooks went, for the message. */
   hooksDir: string;
 }
@@ -79,7 +83,7 @@ export const HOOK_SPECS: Record<CaptureAgent, HookSpec> = {
   },
   cursor: {
     file: ".cursor/hooks.json",
-    // Cursor blocks the prompt when its hook answers with no JSON, so a missing binary must still say `continue`.
+    // Cursor reads the prompt hook's answer as JSON (and blocks on none where `failClosed` is set), so a missing binary still says `continue`.
     command: `command -v graft >/dev/null 2>&1 || { echo '{"continue":true}'; exit 0; }; graft hook cursor`,
     events: [["beforeSubmitPrompt"], ["postToolUse", "Shell"]],
     shape: "flat",
@@ -96,7 +100,8 @@ export const HOOK_SPECS: Record<CaptureAgent, HookSpec> = {
     command: guarded("copilot"),
     events: [["userPromptSubmitted"], ["postToolUse"]],
     shape: "flat",
-    handler: () => ({ type: "command", bash: guarded("copilot"), timeoutSec: 15 }),
+    // `bash` runs on Unix; Windows runs `powershell`, where `command -v` would not.
+    handler: () => ({ type: "command", bash: guarded("copilot"), powershell: "if (Get-Command graft -ErrorAction SilentlyContinue) { graft hook copilot }", timeoutSec: 15 }),
     commandKey: "bash",
     top: { version: 1 },
   },
@@ -201,8 +206,9 @@ async function writeGitHooks(git: Git): Promise<Pick<HooksResult, "git" | "hooks
   // Without the binary the commit goes through unrecorded, with one line saying so; graft check catches it at the pull request.
   const missing = (what: string) =>
     `if ! command -v graft >/dev/null 2>&1; then\n  ${what}\n  exit 0\nfi\n`;
-  const scripts: Record<"prepare-commit-msg" | "post-commit", string> = {
+  const scripts: Record<GitHook, string> = {
     "prepare-commit-msg": `#!/bin/sh\n${MARK}: add the open Graft change to the commit message\n[ -n "$GRAFT_LANDING" ] && exit 0\n${missing(`echo "graft is not installed, so this commit carries no Graft record. Install it: ${INSTALL_HINT}" >&2`)}exec graft hook prepare-commit-msg "$@"\n`,
+    "commit-msg": `#!/bin/sh\n${MARK}: abort a commit whose message is only the Graft record (an editor closed empty)\n[ -n "$GRAFT_LANDING" ] && exit 0\n${missing(":")}exec graft hook commit-msg "$@"\n`,
     "post-commit": `#!/bin/sh\n${MARK}: attach the Graft record to the commit just made\n[ -n "$GRAFT_LANDING" ] && exit 0\n${missing(":")}exec graft hook post-commit\n`,
   };
   const result = {} as HooksResult["git"];
