@@ -443,12 +443,14 @@ export class Graft {
     const tree = await this.worktreeHash();
     const diff = await this.worktreeDiff(tree);
     if (!diff.trim()) throw new GraftError("Nothing to review: the working tree matches the last commit.");
+    const head = await this.git.head();
     const started = Date.now();
     let instructions: string;
     let result: Awaited<ReturnType<typeof runReview>>;
     try {
       instructions = await loadReviewPrompt(spec, top);
-      result = await runReview(spec, { name, task: open.task, diff, instructions }, { cwd: top });
+      // The diff is the working tree's against HEAD, so HEAD is the base a reviewer that reads files compares with.
+      result = await runReview(spec, { name, task: open.task, diff, instructions, ...(head ? { base: head } : {}) }, { cwd: top });
     } catch (err) {
       if (err instanceof ReviewError || err instanceof ReviewUnavailableError) throw new GraftError(`Review "${name}" did not run: ${err.message}`);
       throw err;

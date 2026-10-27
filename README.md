@@ -249,10 +249,12 @@ repo with your own instructions; the record's hash then names it), and
 (the record's `Graft-Model`), since a model marking its own work is not a
 second opinion. `command` replaces the API call with a program of your own:
 it reads the request as JSON on stdin (`name`, `task`, `diff`,
-`instructions`) and prints the result as JSON (`verdict`, `summary`,
-`findings`, and `model`), which is how a reviewer behind another gateway, a
-local model, or a test gets in. No fallback model is ever used: the record
-names the reviewer, so it must be the one asked for.
+`instructions`, and `commit` and `base`: the commit under review when the
+check runs it, absent for the working tree, and the commit the diff is
+against) and prints the result as JSON (`verdict`, `summary`, `findings`,
+and `model`), which is how a reviewer behind another gateway, a local
+model, a test, or an analyzer that reads files gets in. No fallback model is
+ever used: the record names the reviewer, so it must be the one asked for.
 
 The review that counts is the one made where the pull request is checked.
 `graft check --rerun` runs each review the policy names again on each
@@ -262,6 +264,32 @@ rule whatever the author recorded, and a request for changes fails the
 commit with the findings in the summary. The action takes the key as
 `anthropic-api-key` (see below); without one, reviews are listed as not
 re-run and the recorded verdicts stand.
+
+### Capability diff
+
+The record says what was asked and what was run; the review says whether
+the diff does the task. Neither says that a change to `billing/` now makes
+HTTP calls. `@fourshore/graft-capdiff` is a reviewer command that answers
+that for Node and TypeScript: for each file a commit touched, the
+capabilities it holds before and after (`fs`, `net`, `process`, `env`,
+`eval`, `native`, and `dep` for a package it does not know), from the
+modules the file imports and the globals it uses, resolved one import deep
+into the repo's own files. A capability a file gains is a warning in the
+record and the summary; a new dependency says what the table knows of it.
+With a `.graft/capabilities.json` manifest of what each path may hold, a
+gain outside it is a blocker, so `land` refuses and `check --rerun` fails
+the commit. Name it like any review and require it like any command:
+
+```json
+{
+  "reviews": { "capabilities": { "command": "npx graft-capdiff" } },
+  "rules": [{ "paths": ["src/**"], "require": ["test", "capabilities"] }]
+}
+```
+
+It is deterministic and needs no key, so the check re-runs it on every
+commit. This repo runs it on itself. See
+[packages/capdiff](packages/capdiff/README.md).
 
 ## Capture without ritual
 
@@ -630,13 +658,14 @@ repository.
 
 ## Development
 
-npm workspace, three packages:
+npm workspace, four packages:
 
 | Package | What |
 | --- | --- |
 | `packages/core` (`@fourshore/graft-core`) | Record model, git plumbing, start/evidence/land/log/sync |
 | `packages/review` (`@fourshore/graft-review`) | Triage of a diff by evidence, and `graft check` |
 | `packages/cli` (`@fourshore/graft`) | `graft` and `graft-mcp` |
+| `packages/capdiff` (`@fourshore/graft-capdiff`) | `graft-capdiff`, the capability-diff reviewer command |
 
 ```
 git clone https://github.com/FourShore/Graft.git

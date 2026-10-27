@@ -330,8 +330,10 @@ with the default model (`claude-opus-5-5`, through the API with
 `prompt` names a file in the repo whose text replaces the built-in
 instructions (the record carries the hash of whichever was used); `command`
 runs a program instead of the API, which reads the request (`name`, `task`,
-`diff`, `instructions`) as JSON on stdin and prints the result (`verdict`,
-`summary`, `findings`, `model`) as JSON; `differentModel` refuses a review by
+`diff`, `instructions`, and `commit` and `base`: the commit under review
+when `check` runs it, absent for the working tree, and the commit the diff
+is against, absent for a root commit and for a merge) as JSON on stdin and
+prints the result (`verdict`, `summary`, `findings`, `model`) as JSON; `differentModel` refuses a review by
 the model in the record's `author.model`, and by an agent author whose model
 is not recorded. Names share the namespace of `commands`. `rules`, optional,
 is a list of `{ "paths": [globs], "require": [names] }`: a change touching a

@@ -20,7 +20,10 @@ without them is refused. Two things are yours.
   test, build and lint runs you make are recorded as you make them, unless the
   exit code is hidden (`npm test | tail`) or your agent does not report it.
   `graft evidence --note "<what you checked>"` records a manual check. A check
-  that ran before your last edit does not count.
+  that ran before your last edit does not count. A review the policy names
+  (`capabilities`: what each changed file can now do that it could not
+  before) is not a command the hooks see; run `graft evidence capabilities`
+  yourself after your last edit to a source file.
 
 Then commit. `graft status` says whether this clone has the git hooks: with
 them, a plain `git commit` carries the record; without them, use

@@ -2289,7 +2289,8 @@ describe("review evidence", () => {
     await change();
     const ev = await graft.evidenceNamed("code", "first look");
     expect(ev).toMatchObject({ kind: "review", name: "code", label: "first look", model: "fake-reviewer", verdict: "approve", findings: [], promptSha256: sha256(DEFAULT_REVIEW_PROMPT) });
-    expect(ev.kind === "review" && ev.summary).toMatch(/Reviewed code for: add a \(\d+ chars of instructions, env code\)/);
+    // The reviewer is told what the diff is against (HEAD) and that no commit is under review: the working tree is.
+    expect(ev.kind === "review" && ev.summary).toMatch(/Reviewed code for: add a \(\d+ chars of instructions, env code; commit none, base [0-9a-f]{40}\)/);
     expect(ev.kind === "review" && ev.tree).toMatch(/^[0-9a-f]{40}$/);
     expect(evidenceSummary([ev])).toBe("1 review, 1 approved");
     const { commit, record } = await graft.land({ all: true });

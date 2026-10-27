@@ -6,6 +6,11 @@
     "build": "npm run build",
     "test": "npm test"
   },
+  "reviews": {
+    "capabilities": {
+      "command": "node packages/capdiff/dist/cli.js"
+    }
+  },
   "rules": [
     {
       "paths": [
@@ -13,7 +18,8 @@
       ],
       "require": [
         "build",
-        "test"
+        "test",
+        "capabilities"
       ]
     }
   ],

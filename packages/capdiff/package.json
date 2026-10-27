@@ -1,0 +1,55 @@
+{
+  "name": "@fourshore/graft-capdiff",
+  "version": "0.2.0",
+  "description": "A capability-diff analyzer for Node, run as a Graft reviewer command: what each changed file can now do (fs, net, process, env, eval, native, new dependencies) that it could not before.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/FourShore/Graft.git"
+  },
+  "homepage": "https://github.com/FourShore/Graft#readme",
+  "bugs": {
+    "url": "https://github.com/FourShore/Graft/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "git",
+    "version-control",
+    "ai-agents",
+    "code-review",
+    "static-analysis",
+    "capabilities"
+  ],
+  "bin": {
+    "graft-capdiff": "dist/cli.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "typescript": "^5.9.0"
+  },
+  "devDependencies": {
+    "@fourshore/graft-core": "0.2.0",
+    "@fourshore/graft-review": "0.2.0"
+  }
+}

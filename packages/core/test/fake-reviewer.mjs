@@ -14,5 +14,5 @@ process.stdin.on("end", () => {
   const bad = /^\+.*bug/im.test(req.diff); // added lines only
   const findings = bad ? [{ severity: "blocker", file: "src.ts", line: 1, text: "This introduces a bug." }] : [];
   if (process.env.FAKE_NIT) findings.push({ severity: "nit", text: "Naming could be clearer." });
-  console.log(JSON.stringify({ model: process.env.FAKE_MODEL ?? "fake-reviewer", verdict: "approve", summary: `Reviewed ${req.name} for: ${req.task} (${req.instructions.length} chars of instructions, env ${process.env.GRAFT_REVIEW})`, findings }));
+  console.log(JSON.stringify({ model: process.env.FAKE_MODEL ?? "fake-reviewer", verdict: "approve", summary: `Reviewed ${req.name} for: ${req.task} (${req.instructions.length} chars of instructions, env ${process.env.GRAFT_REVIEW}; commit ${req.commit ?? "none"}, base ${req.base ?? "none"})`, findings }));
 });

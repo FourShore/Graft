@@ -507,6 +507,8 @@ describe("check", () => {
       ["code", "fake-reviewer", "request-changes"],
       ["code", "fake-reviewer", "approve"],
     ]);
+    // Each re-run names the commit it reviews and the parent its diff is against, so a reviewer that reads files reads the right tree.
+    for (const x of r.reviews) expect(x.summary).toContain(`commit ${x.commit}, base ${sh(["rev-parse", `${x.commit}^`])}`);
     expect(r.commits.map((c) => [c.entry.title, c.ok, c.rerun])).toEqual([
       ["unreviewed change", true, "pass"],
       ["sneaky change", false, "fail"],
