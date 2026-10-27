@@ -344,8 +344,13 @@ describe("graft-capdiff as a reviewer command", () => {
     await writeFile(join(dir, path), text);
   };
   const command = `node ${JSON.stringify(CLI)}`;
+  // These tests run graft check --rerun themselves; when this suite is itself a re-run of an outer check, the marker
+  // the outer check set would make the inner one run nothing.
+  let inheritedMarker: string | undefined;
 
   beforeEach(async () => {
+    inheritedMarker = process.env.GRAFT_CHECK_RERUN;
+    delete process.env.GRAFT_CHECK_RERUN;
     dir = await mkdtemp(join(tmpdir(), "capdiff-cli-"));
     sh(["init", "-q", "-b", "main"]);
     sh(["config", "user.name", "Test"]);
@@ -355,7 +360,11 @@ describe("graft-capdiff as a reviewer command", () => {
     sh(["add", "-A"]);
     sh(["commit", "-q", "-m", "base"]);
   });
-  afterEach(() => rm(dir, { recursive: true, force: true }));
+  afterEach(async () => {
+    if (inheritedMarker === undefined) delete process.env.GRAFT_CHECK_RERUN;
+    else process.env.GRAFT_CHECK_RERUN = inheritedMarker;
+    await rm(dir, { recursive: true, force: true });
+  });
 
   it("answers a request on stdin with a review result, and refuses what is not a request", () => {
     const run = (input: string) => spawnSync("node", [CLI], { cwd: dir, input, encoding: "utf8" });
