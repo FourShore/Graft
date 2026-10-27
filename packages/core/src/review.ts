@@ -45,6 +45,20 @@ export interface ReviewRequest {
   diff: string;
   /** The instructions the reviewer works under: the policy's prompt file, or the built-in prompt. */
   instructions: string;
+  /**
+   * The commit under review, when `graft check` runs the review again on one
+   * commit of a branch. Absent when `graft evidence` reviews the working tree.
+   * A reviewer command that reads files (an analyzer that resolves imports,
+   * say) reads them from this commit with `git show <commit>:<path>`; with no
+   * commit, the working tree is what is under review.
+   */
+  commit?: string;
+  /**
+   * The commit the diff is against: the last commit when the working tree is
+   * reviewed, the parent when a commit is. Absent for a root commit, and for a
+   * merge commit, whose diff is against git's own re-merge of its parents.
+   */
+  base?: string;
 }
 
 export interface ReviewResult {

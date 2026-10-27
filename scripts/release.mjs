@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Bump every package to the same new version, point the workspace packages at
 // each other by that version, commit, and tag. Pushing the tag triggers the
-// Release workflow, which publishes all three packages to npm.
+// Release workflow, which publishes all four packages to npm.
 //
 // The commit is landed with Graft itself (build and tests as evidence), so
 // the release is a recorded change like every other commit in this repo.
@@ -46,7 +46,7 @@ const { Graft } = await import("../packages/core/dist/index.js");
 // registry, which fails before the first publish, so bump the files directly.
 const root = JSON.parse(readFileSync("package.json", "utf8"));
 const version = next(root.version, bump);
-const workspaces = ["packages/core", "packages/review", "packages/cli"];
+const workspaces = ["packages/core", "packages/review", "packages/cli", "packages/capabilities"];
 const names = new Set(workspaces.map((w) => JSON.parse(readFileSync(`${w}/package.json`, "utf8")).name));
 for (const file of ["package.json", ...workspaces.map((w) => `${w}/package.json`)]) {
   const pkg = JSON.parse(readFileSync(file, "utf8"));

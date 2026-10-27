@@ -136,12 +136,19 @@ export async function runCheck(opts: CheckOptions): Promise<CheckResult> {
   const commits: CheckedCommit[] = [];
   // What the re-run of reviews needs per commit: the diff text, and the review names its files and record call for.
   const diffs = new Map<string, string>();
+  // The commit each diff is against, for a reviewer that reads files: the parent, or nothing for a root commit and
+  // for a merge, whose diff is against git's re-merge of its parents rather than any one commit.
+  const bases = new Map<string, string>();
   const reviewNames = new Map<string, Set<string>>();
   for (const entry of entries) {
     const merge = merges.has(entry.commit);
     if (merge && !remerge) continue;
     const diffText = await graft.diff(entry.commit, { remerge: merge });
     diffs.set(entry.commit, diffText);
+    if (!merge) {
+      const parent = await graft.git.run(["rev-parse", "--verify", "--quiet", `${entry.commit}^`]).catch(() => "");
+      if (parent) bases.set(entry.commit, parent);
+    }
     const files = parseDiff(diffText);
     // A clean merge changes nothing beyond merging; only one with its own edits (or conflict resolutions) needs a record.
     if (merge && !files.length) continue;
@@ -275,7 +282,12 @@ export async function runCheck(opts: CheckOptions): Promise<CheckResult> {
         let result: Awaited<ReturnType<typeof runReview>>;
         try {
           const instructions = await loadReviewPrompt(spec, topLevel);
-          result = await runReview(spec, { name, task: record.task, diff: diffs.get(c.entry.commit) ?? "", instructions }, { cwd: topLevel });
+          const base = bases.get(c.entry.commit);
+          result = await runReview(
+            spec,
+            { name, task: record.task, diff: diffs.get(c.entry.commit) ?? "", instructions, commit: c.entry.commit, ...(base ? { base } : {}) },
+            { cwd: topLevel },
+          );
         } catch (err) {
           if (err instanceof ReviewUnavailableError) {
             unavailable.set(name, { commits: [c.entry.commit], reason: err.message });

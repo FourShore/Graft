@@ -19,11 +19,12 @@
   "workspaces": [
     "packages/core",
     "packages/review",
-    "packages/cli"
+    "packages/cli",
+    "packages/capabilities"
   ],
   "scripts": {
-    "build": "tsc -b packages/core packages/review packages/cli",
-    "typecheck": "tsc -b packages/core packages/review packages/cli",
+    "build": "tsc -b packages/core packages/review packages/cli packages/capabilities",
+    "typecheck": "tsc -b packages/core packages/review packages/cli packages/capabilities",
     "test": "vitest run",
     "clean": "rm -rf packages/*/dist packages/*/tsconfig.tsbuildinfo",
     "dev:review": "node packages/cli/dist/cli.js review",
