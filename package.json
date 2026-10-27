@@ -20,11 +20,11 @@
     "packages/core",
     "packages/review",
     "packages/cli",
-    "packages/capdiff"
+    "packages/capabilities"
   ],
   "scripts": {
-    "build": "tsc -b packages/core packages/review packages/cli packages/capdiff",
-    "typecheck": "tsc -b packages/core packages/review packages/cli packages/capdiff",
+    "build": "tsc -b packages/core packages/review packages/cli packages/capabilities",
+    "typecheck": "tsc -b packages/core packages/review packages/cli packages/capabilities",
     "test": "vitest run",
     "clean": "rm -rf packages/*/dist packages/*/tsconfig.tsbuildinfo",
     "dev:review": "node packages/cli/dist/cli.js review",

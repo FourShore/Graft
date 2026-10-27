@@ -12,7 +12,7 @@ import { grantKey, scanSource } from "../src/scan.js";
 import { packageGrants, packageName } from "../src/table.js";
 import { GitTree, WorkTree } from "../src/tree.js";
 
-const CLI = join(process.cwd(), "packages", "capdiff", "dist", "cli.js");
+const CLI = join(process.cwd(), "packages", "capabilities", "dist", "cli.js");
 
 describe("scanSource", () => {
   const caps = (text: string, path = "src/a.ts") => scanSource(path, text).grants.map((g) => `${grantKey(g)}@${g.line}`);
@@ -165,7 +165,7 @@ describe("analyze", () => {
   const diffOfWorktree = () => sh(["diff", "HEAD"]);
 
   beforeEach(async () => {
-    dir = await mkdtemp(join(tmpdir(), "capdiff-"));
+    dir = await mkdtemp(join(tmpdir(), "capabilities-"));
     sh(["init", "-q", "-b", "main"]);
     sh(["config", "user.name", "Test"]);
     sh(["config", "user.email", "test@example.com"]);
@@ -182,7 +182,7 @@ describe("analyze", () => {
     await write("package.json", JSON.stringify({ name: "app", dependencies: { zod: "1", axios: "1", "left-pad": "1" } }));
     const head = commit("reach out");
     const r = await analyze(request(head, base), { cwd: dir, version: "9.9.9" });
-    expect(r.model).toBe("graft-capdiff/9.9.9");
+    expect(r.model).toBe("graft-capabilities/9.9.9");
     expect(r.verdict).toBe("approve");
     expect(r.findings).toEqual([
       { severity: "warning", file: "package.json", text: "New dependency axios, which grants net." },
@@ -336,7 +336,7 @@ describe("analyze", () => {
   });
 });
 
-describe("graft-capdiff as a reviewer command", () => {
+describe("graft-capabilities as a reviewer command", () => {
   let dir: string;
   const sh = (args: string[]) => execFileSync("git", args, { cwd: dir, encoding: "utf8" }).trim();
   const write = async (path: string, text: string) => {
@@ -351,7 +351,7 @@ describe("graft-capdiff as a reviewer command", () => {
   beforeEach(async () => {
     inheritedMarker = process.env.GRAFT_CHECK_RERUN;
     delete process.env.GRAFT_CHECK_RERUN;
-    dir = await mkdtemp(join(tmpdir(), "capdiff-cli-"));
+    dir = await mkdtemp(join(tmpdir(), "capabilities-cli-"));
     sh(["init", "-q", "-b", "main"]);
     sh(["config", "user.name", "Test"]);
     sh(["config", "user.email", "test@example.com"]);
@@ -370,11 +370,11 @@ describe("graft-capdiff as a reviewer command", () => {
     const run = (input: string) => spawnSync("node", [CLI], { cwd: dir, input, encoding: "utf8" });
     const r = run(JSON.stringify({ name: "capabilities", task: "t", diff: "" }));
     expect(r.status).toBe(0);
-    expect(JSON.parse(r.stdout)).toMatchObject({ model: expect.stringMatching(/^graft-capdiff\/\d+\.\d+\.\d+$/), verdict: "approve", summary: "Nothing in the diff.", findings: [] });
+    expect(JSON.parse(r.stdout)).toMatchObject({ model: expect.stringMatching(/^graft-capabilities\/\d+\.\d+\.\d+$/), verdict: "approve", summary: "Nothing in the diff.", findings: [] });
     expect(run("not json").status).toBe(2);
     expect(run("{}").status).toBe(2);
     const help = spawnSync("node", [CLI, "--help"], { cwd: dir, encoding: "utf8" });
-    expect(help.stdout).toContain("graft-capdiff scan");
+    expect(help.stdout).toContain("graft-capabilities scan");
     expect(spawnSync("node", [CLI, "bogus"], { cwd: dir, encoding: "utf8" }).status).toBe(2);
   });
 
@@ -387,7 +387,7 @@ describe("graft-capdiff as a reviewer command", () => {
     expect(ev).toMatchObject({ kind: "review", name: "capabilities", verdict: "approve", findings: [{ severity: "warning", file: "src/a.ts", line: 1, text: "process added: imports node:child_process." }] });
     expect(ev.summary).toBe("1 of 1 file changed capabilities: src/a.ts +process.");
     const { commit } = await graft.land({ all: true });
-    expect(sh(["log", "-1", "--format=%B", commit])).toMatch(/\[review approve capabilities\] graft-capdiff\/\d+\.\d+\.\d+ \(prompt [0-9a-f]{8}; 1 finding\)/);
+    expect(sh(["log", "-1", "--format=%B", commit])).toMatch(/\[review approve capabilities\] graft-capabilities\/\d+\.\d+\.\d+ \(prompt [0-9a-f]{8}; 1 finding\)/);
 
     const r = await runCheck({ repo: dir, base, rerun: true });
     expect(r.ok).toBe(true);

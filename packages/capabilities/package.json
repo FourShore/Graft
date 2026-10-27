@@ -1,5 +1,5 @@
 {
-  "name": "@fourshore/graft-capdiff",
+  "name": "@fourshore/graft-capabilities",
   "version": "0.2.0",
   "description": "A capability-diff analyzer for Node, run as a Graft reviewer command: what each changed file can now do (fs, net, process, env, eval, native, new dependencies) that it could not before.",
   "license": "MIT",
@@ -27,7 +27,7 @@
     "capabilities"
   ],
   "bin": {
-    "graft-capdiff": "dist/cli.js"
+    "graft-capabilities": "dist/cli.js"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

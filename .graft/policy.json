@@ -8,7 +8,7 @@
   },
   "reviews": {
     "capabilities": {
-      "command": "node packages/capdiff/dist/cli.js"
+      "command": "node packages/capabilities/dist/cli.js"
     }
   },
   "rules": [

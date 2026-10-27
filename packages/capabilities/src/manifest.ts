@@ -27,7 +27,7 @@ export function parseManifest(text: string): Manifest {
   }
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`${MANIFEST_PATH} must be an object.`);
   const m = raw as Record<string, unknown>;
-  if (m.version !== 1) throw new Error(`${MANIFEST_PATH}: unknown version ${JSON.stringify(m.version)}; this graft-capdiff reads version 1.`);
+  if (m.version !== 1) throw new Error(`${MANIFEST_PATH}: unknown version ${JSON.stringify(m.version)}; this graft-capabilities reads version 1.`);
   for (const key of Object.keys(m)) if (!["version", "allow", "packages"].includes(key)) throw new Error(`${MANIFEST_PATH}: unknown key "${key}".`);
   if (!Array.isArray(m.allow)) throw new Error(`${MANIFEST_PATH}: "allow" must be a list of { paths, capabilities }.`);
   const allow = m.allow.map((r, i) => {

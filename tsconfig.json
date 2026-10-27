@@ -11,7 +11,7 @@
       "path": "packages/cli"
     },
     {
-      "path": "packages/capdiff"
+      "path": "packages/capabilities"
     }
   ]
 }

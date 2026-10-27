@@ -46,7 +46,7 @@ const { Graft } = await import("../packages/core/dist/index.js");
 // registry, which fails before the first publish, so bump the files directly.
 const root = JSON.parse(readFileSync("package.json", "utf8"));
 const version = next(root.version, bump);
-const workspaces = ["packages/core", "packages/review", "packages/cli", "packages/capdiff"];
+const workspaces = ["packages/core", "packages/review", "packages/cli", "packages/capabilities"];
 const names = new Set(workspaces.map((w) => JSON.parse(readFileSync(`${w}/package.json`, "utf8")).name));
 for (const file of ["package.json", ...workspaces.map((w) => `${w}/package.json`)]) {
   const pkg = JSON.parse(readFileSync(file, "utf8"));

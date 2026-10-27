@@ -1,4 +1,4 @@
-# @fourshore/graft-capdiff
+# @fourshore/graft-capabilities
 
 What each changed file can now do that it could not before. A capability-diff
 analyzer for Node and TypeScript, run as a [Graft](https://github.com/FourShore/Graft#readme)
@@ -81,7 +81,7 @@ The manifest is read from the base of the diff (HEAD for the working tree,
 the parent at the check), like the policy, so a change cannot widen what it
 is checked against: widen the manifest in a commit of its own first.
 
-`graft-capdiff init` writes the manifest from the tree as it is, one rule per
+`graft-capabilities init` writes the manifest from the tree as it is, one rule per
 distinct capability set naming the files that hold it today, so adopting it
 on an existing repo starts from "what is, is allowed" and the gate only
 catches what changes. Collapse the rules into globs by hand as you like;
@@ -91,7 +91,7 @@ catches what changes. Collapse the rules into globs by hand as you like;
 
 ```json
 {
-  "reviews": { "capabilities": { "command": "npx graft-capdiff" } },
+  "reviews": { "capabilities": { "command": "npx graft-capabilities" } },
   "rules": [{ "paths": ["src/**"], "require": ["capabilities"] }]
 }
 ```
@@ -100,10 +100,10 @@ With that in `.graft/policy.json`, `graft evidence capabilities` runs it on
 the working tree and records the result, `graft land` requires it for a
 change to `src/`, and `graft check --rerun` runs it again on each commit's
 own diff with no API key, since it is a command. The commit message line
-reads `[review approve capabilities] graft-capdiff/0.2.0 (prompt 4f3a2b1c; 2
+reads `[review approve capabilities] graft-capabilities/0.2.0 (prompt 4f3a2b1c; 2
 findings)` and the findings stay in the note.
 
-`graft-capdiff scan [paths]` prints what each tracked source file holds,
+`graft-capabilities scan [paths]` prints what each tracked source file holds,
 inherited capabilities in parentheses; `--rev <commit>` reads a commit
 instead of the working tree.
 

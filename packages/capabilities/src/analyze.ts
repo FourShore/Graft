@@ -82,7 +82,7 @@ const EXTENSIONS = [".ts", ".tsx", ".mts", ".cts", ".js", ".mjs", ".cjs", ".jsx"
  */
 export async function analyze(request: ReviewRequest, opts: AnalyzeOptions): Promise<Analysis> {
   const { cwd } = opts;
-  const model = `graft-capdiff/${opts.version ?? "0"}`;
+  const model = `graft-capabilities/${opts.version ?? "0"}`;
   const notes: string[] = [];
   const findings: Finding[] = [];
 
@@ -320,7 +320,7 @@ function clip(s: string, max: number): string {
   return s.length <= max ? s : `${s.slice(0, max - 1)}…`;
 }
 
-/** The rules `graft-capdiff init` writes: one per distinct capability set, naming the files that hold it today. */
+/** The rules `graft-capabilities init` writes: one per distinct capability set, naming the files that hold it today. */
 export async function buildManifest(tree: Tree, existing: Manifest | null = null): Promise<Manifest> {
   const groups = new Map<string, { capabilities: Capability[]; paths: string[] }>();
   const internal = await workspacePackages(tree);

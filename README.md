@@ -269,7 +269,7 @@ re-run and the recorded verdicts stand.
 
 The record says what was asked and what was run; the review says whether
 the diff does the task. Neither says that a change to `billing/` now makes
-HTTP calls. `@fourshore/graft-capdiff` is a reviewer command that answers
+HTTP calls. `@fourshore/graft-capabilities` is a reviewer command that answers
 that for Node and TypeScript: for each file a commit touched, the
 capabilities it holds before and after (`fs`, `net`, `process`, `env`,
 `eval`, `native`, and `dep` for a package it does not know), from the
@@ -282,14 +282,14 @@ the commit. Name it like any review and require it like any command:
 
 ```json
 {
-  "reviews": { "capabilities": { "command": "npx graft-capdiff" } },
+  "reviews": { "capabilities": { "command": "npx graft-capabilities" } },
   "rules": [{ "paths": ["src/**"], "require": ["test", "capabilities"] }]
 }
 ```
 
 It is deterministic and needs no key, so the check re-runs it on every
 commit. This repo runs it on itself. See
-[packages/capdiff](packages/capdiff/README.md).
+[packages/capabilities](packages/capabilities/README.md).
 
 ## Capture without ritual
 
@@ -665,7 +665,7 @@ npm workspace, four packages:
 | `packages/core` (`@fourshore/graft-core`) | Record model, git plumbing, start/evidence/land/log/sync |
 | `packages/review` (`@fourshore/graft-review`) | Triage of a diff by evidence, and `graft check` |
 | `packages/cli` (`@fourshore/graft`) | `graft` and `graft-mcp` |
-| `packages/capdiff` (`@fourshore/graft-capdiff`) | `graft-capdiff`, the capability-diff reviewer command |
+| `packages/capabilities` (`@fourshore/graft-capabilities`) | `graft-capabilities`, the capability-diff reviewer command |
 
 ```
 git clone https://github.com/FourShore/Graft.git

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// graft-capdiff: a Graft reviewer command. With no arguments it reads the
+// graft-capabilities: a Graft reviewer command. With no arguments it reads the
 // review request on stdin and prints the capability diff as a review result;
 // `init` writes .graft/capabilities.json from the tree as it is, and `scan`
 // prints what each file holds.
@@ -13,17 +13,17 @@ import { GitTree, WorkTree, git } from "./tree.js";
 
 const { version } = createRequire(import.meta.url)("../package.json") as { version: string };
 
-const HELP = `graft-capdiff ${version}: what each changed file can now do that it could not before.
+const HELP = `graft-capabilities ${version}: what each changed file can now do that it could not before.
 
-  graft-capdiff                 read a Graft review request on stdin, print the review result (what the policy's "command" runs)
-  graft-capdiff scan [paths]    print the capabilities each file holds (every tracked source file by default)
-  graft-capdiff init            write ${MANIFEST_PATH} from the tree as it is, so the gate only catches what changes
-  graft-capdiff --version
+  graft-capabilities                 read a Graft review request on stdin, print the review result (what the policy's "command" runs)
+  graft-capabilities scan [paths]    print the capabilities each file holds (every tracked source file by default)
+  graft-capabilities init            write ${MANIFEST_PATH} from the tree as it is, so the gate only catches what changes
+  graft-capabilities --version
 
 Capabilities: fs, net, process, env, eval, native, and dep for a package the table does not know.
 Put it in .graft/policy.json as a review and require it like any other:
 
-  { "reviews": { "capabilities": { "command": "npx graft-capdiff" } },
+  { "reviews": { "capabilities": { "command": "npx graft-capabilities" } },
     "rules": [{ "paths": ["src/**"], "require": ["capabilities"] }] }
 `;
 
@@ -119,7 +119,7 @@ async function scan(cwd: string, args: string[]): Promise<number> {
 main(process.argv.slice(2)).then(
   (code) => process.exit(code),
   (err: unknown) => {
-    process.stderr.write(`graft-capdiff: ${err instanceof Error ? err.message : String(err)}\n`);
+    process.stderr.write(`graft-capabilities: ${err instanceof Error ? err.message : String(err)}\n`);
     process.exit(1);
   },
 );
