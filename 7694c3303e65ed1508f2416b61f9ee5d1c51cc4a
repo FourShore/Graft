@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "id": "m5xvz59cvdz8yccgxxah",
+  "task": "Write a design proposal for analyzer evidence and a capability-diff analyzer so another agent can review its merit and pick up the work",
+  "plan": "docs/proposals/analyzers.md: today's state with file references, Option A (analyzer as a reviewer command, no core change) vs Option B (a distinct analyzer evidence kind), a capability-diff analyzer for Node, a formatting rule, sequencing, acceptance criteria and open questions",
+  "ref": "https://claude.ai/code/session_018uGX1AJs3tXhCVinnxC8ys",
+  "author": {
+    "kind": "agent",
+    "name": "claude-code"
+  },
+  "startedAt": "2026-10-27T05:05:15.592Z",
+  "evidence": [
+    {
+      "kind": "note",
+      "at": "2026-10-27T05:07:09.726Z",
+      "text": "Checked every file and symbol the proposal names against the source at 12ac6b5: record.ts evidence kinds and parseMessageRecord's line regexes, review.ts ReviewSpec.command, ReviewRequest/ReviewResult and GRAFT_REVIEW, policy.ts CoverageRule and UnmetRule.kind, check.ts review re-run and review-skipped, triage.ts file groups, diff.ts parseDiff, typescript in root devDependencies"
+    }
+  ],
+  "landedAt": "2026-10-27T05:07:10.121Z",
+  "commit": "7694c3303e65ed1508f2416b61f9ee5d1c51cc4a"
+}
