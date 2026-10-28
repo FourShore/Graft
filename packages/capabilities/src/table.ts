@@ -196,9 +196,11 @@ export const PACKAGES: Readonly<Record<string, readonly Capability[]>> = {
 
 /** What a package grants under a table: exact name first, then a scoped `@scope/*` entry; undefined when unknown. */
 export function packageGrants(name: string, table: Readonly<Record<string, readonly Capability[]>>): readonly Capability[] | undefined {
-  if (table[name]) return table[name];
+  // Own keys only: a package named `constructor` or `toString` is a package, not a property of every object.
+  if (Object.hasOwn(table, name)) return table[name];
   const slash = name.indexOf("/");
-  if (name.startsWith("@") && slash > 0) return table[`${name.slice(0, slash)}/*`];
+  const scope = `${name.slice(0, slash)}/*`;
+  if (name.startsWith("@") && slash > 0 && Object.hasOwn(table, scope)) return table[scope];
   return undefined;
 }
 

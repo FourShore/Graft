@@ -47,7 +47,8 @@ export function parseManifest(text: string): Manifest {
       if (!Array.isArray(caps) || !caps.every((c) => typeof c === "string" && isCapability(c))) {
         throw new Error(`${MANIFEST_PATH}: packages["${name}"] must list capabilities from ${CAPABILITIES.join(", ")}.`);
       }
-      packages[name] = caps as Capability[];
+      // defineProperty, not assignment: a package named `__proto__` is an entry, not the object's prototype.
+      Object.defineProperty(packages, name, { value: caps as Capability[], enumerable: true, writable: true, configurable: true });
     }
   }
   return { version: 1, allow, ...(m.packages !== undefined ? { packages } : {}) };
@@ -63,9 +64,20 @@ export function allowedFor(manifest: Manifest, path: string): Set<Capability> {
   return out;
 }
 
-/** Same rules as Graft's policy globs: `**` crosses directories, `*` and `?` stay within one, and a glob with no `/` matches a basename anywhere. */
+/**
+ * Same rules as Graft's policy globs: `**` crosses directories, `*` and `?`
+ * stay within one, and a glob with no `/` matches a basename anywhere. A glob
+ * that starts with `./` is anchored to the repository root, so `./index.js` is
+ * the root file only.
+ */
 export function globToRegExp(glob: string): RegExp {
-  const body = glob
+  if (glob.startsWith("./")) return new RegExp(`^${globBody(glob.slice(2))}$`);
+  const body = globBody(glob);
+  return new RegExp(glob.includes("/") ? `^${body}$` : `(^|/)${body}$`);
+}
+
+function globBody(glob: string): string {
+  return glob
     .replace(/[.+^${}()|[\]\\]/g, "\\$&")
     .replace(/\*\*\//g, "\u0000")
     .replace(/\*\*/g, "\u0001")
@@ -73,5 +85,4 @@ export function globToRegExp(glob: string): RegExp {
     .replace(/\?/g, "[^/]")
     .replace(/\u0000/g, "(?:.*/)?")
     .replace(/\u0001/g, ".*");
-  return new RegExp(glob.includes("/") ? `^${body}$` : `(^|/)${body}$`);
 }
