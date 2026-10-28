@@ -21,9 +21,10 @@ const HELP = `graft-capabilities ${version}: what each changed file can now do t
   graft-capabilities --version
 
 Capabilities: fs, net, process, env, eval, native, and dep for a package the table does not know.
-Put it in .graft/policy.json as a review and require it like any other:
+Install it in the project (npm install -D @fourshore/graft-capabilities), then put it in
+.graft/policy.json as a review and require it like any other:
 
-  { "reviews": { "capabilities": { "command": "npx graft-capabilities" } },
+  { "reviews": { "capabilities": { "command": "npx --no-install graft-capabilities" } },
     "rules": [{ "paths": ["src/**"], "require": ["capabilities"] }] }
 `;
 
@@ -77,7 +78,11 @@ async function init(cwd: string, force: boolean): Promise<number> {
       process.stderr.write(`${MANIFEST_PATH} exists; pass --force to rewrite it from the tree (the "packages" table is kept).\n`);
       return 1;
     }
-    existing = parseManifest(text);
+    try {
+      existing = parseManifest(text);
+    } catch (e) {
+      process.stderr.write(`${(e as Error).message} Rewriting it from the tree; its "packages" table, if any, is not kept.\n`);
+    }
   }
   const manifest = await buildManifest(new WorkTree(cwd), existing);
   await mkdir(dirname(file), { recursive: true });
@@ -116,10 +121,13 @@ async function scan(cwd: string, args: string[]): Promise<number> {
   return 0;
 }
 
+// exitCode, not exit(): exit() can cut off the review result while a pipe is still taking it.
 main(process.argv.slice(2)).then(
-  (code) => process.exit(code),
+  (code) => {
+    process.exitCode = code;
+  },
   (err: unknown) => {
     process.stderr.write(`graft-capabilities: ${err instanceof Error ? err.message : String(err)}\n`);
-    process.exit(1);
+    process.exitCode = 1;
   },
 );

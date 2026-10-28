@@ -22,7 +22,7 @@ global that grants it. Seven, deliberately few:
 | `fs` | `node:fs`, `node:fs/promises` (`node:path` grants nothing) |
 | `net` | `node:http`, `https`, `http2`, `net`, `dns`, `tls`, `dgram`; global `fetch`, `WebSocket`, `XMLHttpRequest`, `EventSource` |
 | `process` | `node:child_process`, `worker_threads`, `cluster`; `process.exit`, `process.kill`, `process.abort` |
-| `env` | `process.env` |
+| `env` | `process.env`, also as `import { env } from "node:process"` or `const { env } = process` |
 | `eval` | `eval`, `new Function`, `node:vm`, `import()` or `require()` with a computed argument |
 | `native` | a `.node` addon, `process.dlopen`, `process.binding` |
 | `dep` | a third-party package the table does not know |
@@ -33,12 +33,17 @@ common libraries that reach nothing outside the program (`zod`, `lodash`,
 `vitest`) grant nothing. An unknown package grants `dep`, and the finding
 names it, so the table grows from what people hit. A repo extends it in the
 manifest (`"packages"`, below); the repository's own workspace packages are
-project code, not dependencies.
+project code, not dependencies, as are the files a root `tsconfig.json`'s
+`paths` aliases name (`@/lib/utils`). Workspaces come from `package.json` and
+from `pnpm-workspace.yaml`.
 
 A file also inherits, one level, the capabilities of the project files it
 imports, so a file that starts importing `./git.js` is reported as reaching
-`process` through it. Type-only imports grant nothing; a name the file
-declares itself (its own `fetch`) is not the global.
+`process` through it. Type-only imports grant nothing, `import { type Stats }`
+included. A name the file binds itself (its own `fetch`, a parameter called
+`process`) is not the global where that binding is in scope, and only there;
+a `require` that `createRequire` made and a `process` imported from
+`node:process` are the real thing under any name.
 
 ## Findings
 
@@ -72,26 +77,43 @@ request shows the delta, and the human decides. The gate is the manifest.
 ```
 
 A file may hold the union of the capabilities of every rule whose paths match
-it (globs as in the policy); a file no rule matches may hold none. With a
-manifest, a capability a file gains that its paths do not allow is a
-`blocker`, so `graft land` refuses the change and `graft check --rerun` fails
-the commit; one its paths allow is a `nit`.
+it (globs as in the policy, and a glob that starts with `./` is anchored to
+the root, so `./index.js` is that file only); a file no rule matches may hold
+none. With a manifest, a capability a file gains that its paths do not allow
+is a `blocker`, so `graft land` refuses the change and `graft check --rerun`
+fails the commit; one its paths allow is a `nit`. So is a file moved to a path
+that may not hold what it already holds, and a source file under a manifest
+that cannot be read (one over 4 MB).
 
 The manifest is read from the base of the diff (HEAD for the working tree,
 the parent at the check), like the policy, so a change cannot widen what it
-is checked against: widen the manifest in a commit of its own first.
+is checked against: widen the manifest in a commit of its own first. A
+commit that leaves the manifest unparseable is refused, and a manifest that
+does not parse allows nothing until it is fixed, so breaking it opens no
+gate. A merge is compared against git's own re-merge of its parents, as
+Graft's check diffs it, so only what the merge itself changed is reviewed.
+A base the repository does not have (a shallow clone) is an error, not an
+empty review.
 
 `graft-capabilities init` writes the manifest from the tree as it is, one rule per
 distinct capability set naming the files that hold it today, so adopting it
 on an existing repo starts from "what is, is allowed" and the gate only
-catches what changes. Collapse the rules into globs by hand as you like;
-`--force` rewrites the rules and keeps `packages`.
+catches what changes. It writes a root file as `./name`. Collapse the rules
+into globs by hand as you like; `--force` rewrites the rules and keeps
+`packages`.
 
 ## Install
 
+Install it in the project, so its version is pinned in the lockfile and `npx`
+runs that copy rather than fetching a package of that name:
+
+```sh
+npm install -D @fourshore/graft-capabilities
+```
+
 ```json
 {
-  "reviews": { "capabilities": { "command": "npx graft-capabilities" } },
+  "reviews": { "capabilities": { "command": "npx --no-install graft-capabilities" } },
   "rules": [{ "paths": ["src/**"], "require": ["capabilities"] }]
 }
 ```

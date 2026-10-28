@@ -280,9 +280,11 @@ With a `.graft/capabilities.json` manifest of what each path may hold, a
 gain outside it is a blocker, so `land` refuses and `check --rerun` fails
 the commit. Name it like any review and require it like any command:
 
+Install it with `npm install -D @fourshore/graft-capabilities`, then:
+
 ```json
 {
-  "reviews": { "capabilities": { "command": "npx graft-capabilities" } },
+  "reviews": { "capabilities": { "command": "npx --no-install graft-capabilities" } },
   "rules": [{ "paths": ["src/**"], "require": ["test", "capabilities"] }]
 }
 ```

@@ -1,9 +1,9 @@
 import { posix } from "node:path";
-import { CUT_MARKER, filesInDiff, parseNameStatus, type ChangedFile } from "./diff.js";
+import { parseNameStatus, type ChangedFile } from "./diff.js";
 import { MANIFEST_PATH, allowedFor, globToRegExp, parseManifest, type Manifest } from "./manifest.js";
-import { grantKey, isSourcePath, scanSource, type Grant, type ScanOptions } from "./scan.js";
+import { grantKey, isSourcePath, pathAliases, scanSource, type Grant, type ScanOptions } from "./scan.js";
 import { PACKAGES, packageGrants, type Capability } from "./table.js";
-import { EMPTY_TREE, GitTree, WorkTree, git, type Tree } from "./tree.js";
+import { EMPTY_TREE, GitTree, WorkTree, git, remergeTree, type Tree } from "./tree.js";
 
 /** What Graft sends a reviewer command on stdin. */
 export interface ReviewRequest {
@@ -89,43 +89,78 @@ export async function analyze(request: ReviewRequest, opts: AnalyzeOptions): Pro
   // Trees: the commit under review and what its diff is against, or the working tree and HEAD.
   let after: Tree;
   let before: Tree;
-  let baseRev = request.base;
+  // Where the manifest is read from: the base, which for a merge is its first parent.
+  let manifestRev: string | undefined;
+  let files: ChangedFile[];
+  if (request.base) await mustExist(cwd, request.base, "base");
   if (request.commit) {
+    await mustExist(cwd, request.commit, "commit");
     after = new GitTree(cwd, request.commit);
-    if (!baseRev) {
-      baseRev = (await git(cwd, ["rev-parse", "--verify", "--quiet", `${request.commit}^`]).catch(() => "")) || undefined;
-      if (baseRev) notes.push("Compared against the commit's first parent.");
+    const parents = (await git(cwd, ["rev-list", "--parents", "-n", "1", request.commit])).split(/\s+/).slice(1);
+    let from = request.base;
+    if (!from && parents.length > 1) {
+      // A merge: Graft reviews its diff against git's own re-merge of the parents, so only what the merge itself
+      // changed (a conflict resolution, an edit) is under review, not what came in from either side.
+      const remerged = parents.length === 2 ? await remergeTree(cwd, parents[0], parents[1]) : undefined;
+      if (remerged) {
+        from = remerged;
+        notes.push("Compared against git's re-merge of the parents.");
+      } else {
+        from = parents[0];
+        notes.push("Compared against the commit's first parent.");
+      }
+      manifestRev = parents[0];
+    } else if (!from && parents.length === 1) {
+      from = parents[0];
     }
+    manifestRev ??= from;
+    before = from ? new GitTree(cwd, from) : EMPTY_TREE;
+    const args = ["-c", "core.quotePath=false", "diff-tree", "-r", "-M", "--no-commit-id", "--name-status", "-z", ...(from ? [from, request.commit] : ["--root", request.commit])];
+    files = parseNameStatus(await git(cwd, args));
   } else {
     after = new WorkTree(cwd);
-    if (!baseRev) baseRev = (await git(cwd, ["rev-parse", "--verify", "--quiet", "HEAD"]).catch(() => "")) || undefined;
-  }
-  before = baseRev ? new GitTree(cwd, baseRev) : EMPTY_TREE;
-
-  // The files: from git when both ends are commits (exact), else from the diff.
-  let files: ChangedFile[];
-  if (request.commit) {
-    const args = ["-c", "core.quotePath=false", "diff-tree", "-r", "-M", "--no-commit-id", "--name-status", "-z", ...(baseRev ? [baseRev, request.commit] : ["--root", request.commit])];
-    files = parseNameStatus(await git(cwd, args).catch(() => ""));
-    if (!files.length && request.diff.trim()) files = filesInDiff(request.diff);
-  } else {
-    files = filesInDiff(request.diff);
-    if (CUT_MARKER.test(request.diff)) notes.push("The diff was cut, so files past the cut were not seen.");
+    const from = request.base ?? ((await git(cwd, ["rev-parse", "--verify", "--quiet", "HEAD"]).catch(() => "")) || undefined);
+    manifestRev = from;
+    before = from ? new GitTree(cwd, from) : EMPTY_TREE;
+    // The files from git, not from the diff text, which Graft cuts at a size: a file past the cut is still reviewed.
+    const untracked = parseNameStatus(
+      (await git(cwd, ["-c", "core.quotePath=false", "ls-files", "-z", "--others", "--exclude-standard", ...(from ? [] : ["--cached"])]))
+        .split("\0")
+        .filter(Boolean)
+        .map((f) => `A\0${f}`)
+        .join("\0"),
+    );
+    const tracked = from ? parseNameStatus(await git(cwd, ["-c", "core.quotePath=false", "diff", "-M", "--name-status", "-z", from])) : [];
+    files = [...tracked, ...untracked];
   }
 
   // The manifest comes from the base, like the policy: a change cannot widen what it is checked against.
+  // One that does not parse gates with no rules at all, so breaking it opens nothing.
   let manifest: Manifest | null = null;
-  const manifestText = await (baseRev ? before : after).read(MANIFEST_PATH);
+  const manifestText = await (manifestRev ? new GitTree(cwd, manifestRev) : after).read(MANIFEST_PATH);
   if (manifestText !== null) {
     try {
       manifest = parseManifest(manifestText);
     } catch (e) {
-      findings.push({ severity: "warning", file: MANIFEST_PATH, text: `Not gating: ${(e as Error).message}` });
+      manifest = { version: 1, allow: [] };
+      findings.push({ severity: "warning", file: MANIFEST_PATH, text: `${(e as Error).message} Until it is fixed nothing is allowed, so every capability a file gains is a blocker.` });
+    }
+  }
+  // A change to the manifest is checked here, so a broken one never lands to fail every later review.
+  const touched = files.find((f) => f.path === MANIFEST_PATH && f.status !== "deleted");
+  if (touched) {
+    const next = await after.read(MANIFEST_PATH);
+    if (next !== null) {
+      try {
+        parseManifest(next);
+      } catch (e) {
+        findings.push({ severity: "blocker", file: MANIFEST_PATH, text: `The new manifest does not parse: ${(e as Error).message}` });
+      }
     }
   }
   const packages = manifest?.packages ? { ...PACKAGES, ...manifest.packages } : PACKAGES;
-  const beforeOpts = { packages: manifest?.packages, internal: await workspacePackages(before) };
-  const afterOpts = { packages: manifest?.packages, internal: await workspacePackages(after) };
+  const beforeOpts: ScanOptions = { packages: manifest?.packages, internal: await workspacePackages(before), aliases: await pathAliases(before) };
+  const afterOpts: ScanOptions = { packages: manifest?.packages, internal: await workspacePackages(after), aliases: await pathAliases(after) };
 
   const changes: Change[] = [];
   const dependencies: Analysis["dependencies"] = [];
@@ -136,7 +171,7 @@ export async function analyze(request: ReviewRequest, opts: AnalyzeOptions): Pro
       const wasDeps = dependenciesOf(was);
       const nowDeps = dependenciesOf(now);
       for (const name of nowDeps) {
-        if (wasDeps.has(name)) continue;
+        if (wasDeps.has(name) || afterOpts.internal?.has(name)) continue;
         const grants = packageGrants(name, packages);
         if (grants && !grants.length) continue; // the table says it reaches nothing outside the program
         dependencies.push({ path: file.path, name, added: true, ...(grants ? { grants } : {}) });
@@ -160,7 +195,8 @@ export async function analyze(request: ReviewRequest, opts: AnalyzeOptions): Pro
       b = file.status === "added" ? null : await capabilitiesOf(before, file.oldPath ?? file.path, beforeOpts);
       a = file.status === "deleted" ? null : await capabilitiesOf(after, file.path, afterOpts);
     } catch (e) {
-      findings.push({ severity: "warning", file: file.path, text: `Not analyzed: ${(e as Error).message}` });
+      // What cannot be read cannot be shown to be within the manifest, so under one it does not pass.
+      findings.push({ severity: manifest ? "blocker" : "warning", file: file.path, text: `Not analyzed: ${(e as Error).message}.` });
       continue;
     }
     const beforeKeys = new Set([...(b?.direct ?? []), ...(b?.inherited ?? [])].map((h) => h.key));
@@ -180,6 +216,22 @@ export async function analyze(request: ReviewRequest, opts: AnalyzeOptions): Pro
         text: `${h.cap} added: ${h.grant.why}.${ok === false ? ` ${MANIFEST_PATH} does not allow ${h.cap} for this path.` : ""}`,
       });
     }
+    // A file moved to a path that may not hold what it holds: the capability did not change, but where it lives did.
+    if (manifest && allowed && file.oldPath && file.oldPath !== file.path && a) {
+      const was = allowedFor(manifest, file.oldPath);
+      const gainedKeys = new Set(gained.map((h) => h.key));
+      const reported = new Set<Capability>();
+      for (const h of a.direct) {
+        if (gainedKeys.has(h.key) || allowed.has(h.cap) || !was.has(h.cap) || reported.has(h.cap)) continue;
+        reported.add(h.cap);
+        findings.push({
+          severity: "blocker",
+          file: file.path,
+          line: h.grant.line,
+          text: `${h.cap} moved in from ${file.oldPath}: ${h.grant.why}. ${MANIFEST_PATH} does not allow ${h.cap} for this path.`,
+        });
+      }
+    }
     for (const h of inherited) {
       findings.push({ severity: "nit", file: file.path, line: h.grant.line, text: `${h.cap} inherited: imports ${h.via}, which ${h.grant.why}.` });
     }
@@ -187,7 +239,7 @@ export async function analyze(request: ReviewRequest, opts: AnalyzeOptions): Pro
       findings.push({ severity: "nit", file: file.path, text: `${h.cap} removed: no longer ${h.grant.why}.` });
     }
   }
-  if (manifest && baseRev) notes.push(`Gated by ${MANIFEST_PATH} at ${baseRev.slice(0, 10)}.`);
+  if (manifest && manifestRev) notes.push(`Gated by ${MANIFEST_PATH} at ${manifestRev.slice(0, 10)}.`);
 
   const order = { blocker: 0, warning: 1, nit: 2 };
   findings.sort((x, y) => order[x.severity] - order[y.severity] || (x.file ?? "").localeCompare(y.file ?? "") || (x.line ?? 0) - (y.line ?? 0));
@@ -231,6 +283,8 @@ export async function capabilitiesOf(tree: Tree, path: string, opts: ScanOptions
 /** A relative import to the file it names: the path as written, with a source extension, `.js` read as `.ts`, or an index file. */
 export async function resolveImport(tree: Tree, from: string, specifier: string): Promise<string | null> {
   const base = specifier.startsWith("/") ? specifier.slice(1) : posix.normalize(posix.join(posix.dirname(from), specifier));
+  // A path that leaves the repository is not part of either tree.
+  if (base === ".." || base.startsWith("../")) return null;
   const candidates = [base];
   const m = /\.(m|c)?jsx?$/.exec(base);
   if (m) {
@@ -255,16 +309,16 @@ export async function resolveImport(tree: Tree, from: string, specifier: string)
 export async function workspacePackages(tree: Tree): Promise<Set<string>> {
   const names = new Set<string>();
   const root = await tree.read("package.json");
-  if (root === null) return names;
-  let pkg: Record<string, unknown>;
+  let pkg: Record<string, unknown> = {};
   try {
-    pkg = JSON.parse(root) as Record<string, unknown>;
+    if (root !== null) pkg = JSON.parse(root) as Record<string, unknown>;
   } catch {
-    return names;
+    // Not JSON: no name and no workspaces from it.
   }
   if (typeof pkg.name === "string") names.add(pkg.name);
   const ws = Array.isArray(pkg.workspaces) ? pkg.workspaces : Array.isArray((pkg.workspaces as { packages?: unknown })?.packages) ? (pkg.workspaces as { packages: unknown[] }).packages : [];
-  const globs = ws.filter((w): w is string => typeof w === "string");
+  const globs = [...ws, ...pnpmWorkspaces(await tree.read("pnpm-workspace.yaml"))]
+    .filter((w): w is string => typeof w === "string" && !w.startsWith("!"));
   if (!globs.length) return names;
   const manifests = (await tree.list()).filter((f) => posix.basename(f) === "package.json" && globs.some((g) => globToRegExp(g.replace(/\/$/, "")).test(posix.dirname(f))));
   for (const file of manifests) {
@@ -276,6 +330,33 @@ export async function workspacePackages(tree: Tree): Promise<Set<string>> {
     }
   }
   return names;
+}
+
+/** The `packages` globs of a pnpm-workspace.yaml: the list under the top-level `packages:` key. */
+export function pnpmWorkspaces(text: string | null): string[] {
+  if (text === null) return [];
+  const out: string[] = [];
+  let inPackages = false;
+  for (const line of text.split(/\r?\n/)) {
+    if (/^packages:\s*$/.test(line)) {
+      inPackages = true;
+      continue;
+    }
+    if (!inPackages) continue;
+    if (/^\S/.test(line)) break;
+    const m = /^\s+-\s*(['"]?)(.+?)\1\s*(#.*)?$/.exec(line);
+    if (m) out.push(m[2]);
+  }
+  return out;
+}
+
+/** Fail rather than review against nothing: a missing base (a shallow clone) would make every capability look new, or none. */
+async function mustExist(cwd: string, rev: string, what: string): Promise<void> {
+  const ok = await git(cwd, ["cat-file", "-e", `${rev}^{commit}`]).then(
+    () => true,
+    () => false,
+  );
+  if (!ok) throw new Error(`the ${what} ${rev} is not in this repository (a shallow clone? fetch with fetch-depth: 0)`);
 }
 
 function dependenciesOf(text: string | null): Set<string> {
@@ -331,7 +412,8 @@ export async function buildManifest(tree: Tree, existing: Manifest | null = null
     if (!set.length) continue;
     const key = set.join(",");
     const g = groups.get(key) ?? { capabilities: set, paths: [] };
-    g.paths.push(path);
+    // A root file is written anchored: a bare `index.js` would match every index.js in the repo.
+    g.paths.push(path.includes("/") ? path : `./${path}`);
     groups.set(key, g);
   }
   const allow = [...groups.values()].sort((x, y) => x.paths[0].localeCompare(y.paths[0]));
